@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/chaseai-yt/claudex-loop.git
+	branch = main
+	commit = 8cf5e2c1771c5151d90c12642391d0ba8fa71b0e
+	parent = f983f31ef2403e72285a61a298a1272b8ca117a4
+	method = merge
+	cmdver = 0.4.9
