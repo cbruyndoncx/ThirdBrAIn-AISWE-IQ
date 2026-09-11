@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/leonvanzyl/autonomous-coding.git
+	branch = master
+	commit = 1690a61a22facfbd2fcbe99eac46d4b459f123b1
+	parent = 933dde9b8ba91d50d519068c3c9a4a98792ce840
+	method = merge
+	cmdver = 0.4.9
