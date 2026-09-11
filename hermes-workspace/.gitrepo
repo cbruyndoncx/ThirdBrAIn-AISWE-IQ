@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/outsourc-e/hermes-workspace.git
+	branch = main
+	commit = c631425d8baa933f8c61d8447040f4ec8b5f571c
+	parent = 5491f82a0eafd1a2972ecfb320766dfeec1b3d37
+	method = merge
+	cmdver = 0.4.9
