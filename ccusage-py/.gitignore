@@ -1,0 +1,14 @@
+.coverage
+.DS_Store
+.python-version
+.claude/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+plans/
+__pycache__
+CLAUDE.md
+litellm_pricing_cache.json
+uv.lock

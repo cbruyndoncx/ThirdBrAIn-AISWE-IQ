@@ -1,0 +1,154 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ccusage-py"
+version = "0.1.0"
+description = "Analyze your Claude Code token usage and costs - ccusage in Python"
+authors = [
+    {name = "Claude Code Implementation", email = "noreply@example.com"},
+]
+readme = "README.md"
+requires-python = ">=3.13"
+license = {text = "MIT"}
+keywords = ["claude", "code", "usage", "tokens", "cost", "analysis"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: System Shells",
+    "Topic :: Utilities",
+]
+
+dependencies = [
+    "aiohttp>=3.10.0",
+    "platformdirs>=4.0.0",
+    "pydantic>=2.5.0",
+    "requests>=2.31.0",
+    "rich>=13.7.0",
+    "typer>=0.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "coverage>=7.3.0",
+    "mypy>=1.17.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "pytest>=8.4.1",
+    "ruff>=0.12.3",
+]
+
+[project.urls]
+Homepage = "https://github.com/m6k/ccusage-py"
+Documentation = "https://github.com/m6k/ccusage-py/docs"
+Repository = "https://github.com/m6k/ccusage-py"
+Issues = "https://github.com/m6k/ccusage-py/issues"
+
+[project.scripts]
+ccusage-py = "ccusage.main:cli_main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ccusage"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/ccusage",
+    "tests",
+    "README.md",
+    "pyproject.toml",
+]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+extra_checks = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+    "A",  # flake8-builtins
+    "T20", # flake8-print
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific rules
+]
+ignore = [
+    "E501",  # line too long, handled by formatter
+    "B008",  # do not perform function calls in argument defaults
+    "T201",  # print found
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["T201", "S101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--cov=src/ccusage",
+    "--cov-report=html",
+    "--cov-report=term-missing",
+    "--cov-fail-under=0",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["src/ccusage"]
+branch = true
+parallel = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=1.0.0",
+    "pytest-cov>=6.2.1",
+    "types-requests>=2.32.4.20250611",
+]
