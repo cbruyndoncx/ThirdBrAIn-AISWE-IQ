@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/deepseek-ai/deepseek-harness.git
+	branch = master
+	commit = c291e7961a515f6d7af9304e7fd1d257929aef26
+	parent = 509b9469adf5f857cf7d4207835edbe0e43a7622
+	method = merge
+	cmdver = 0.4.9
