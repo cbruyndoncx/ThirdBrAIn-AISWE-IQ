@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/fernandezbaptiste/trode.git
+	branch = feat/scaffold
+	commit = 46ff4b858825d4b6c65566f2029b3d0402ef47f5
+	parent = a5def94317fecdf9967c9e41f9c920849c05ed63
+	method = merge
+	cmdver = 0.4.9

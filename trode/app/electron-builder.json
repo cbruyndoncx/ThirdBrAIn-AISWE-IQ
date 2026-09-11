@@ -1,0 +1,20 @@
+{
+  "appId": "io.tessl.trode",
+  "productName": "Trode",
+  "directories": {
+    "output": "release",
+    "buildResources": "assets"
+  },
+  "files": [
+    "dist/**/*",
+    "package.json"
+  ],
+  "mac": {
+    "target": "dmg",
+    "category": "public.app-category.developer-tools"
+  },
+  "extraMetadata": {
+    "main": "dist/main/index.js"
+  },
+  "extends": null
+}
