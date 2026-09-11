@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/herdrdev/herdr.git
+	branch = master
+	commit = a05c403881c5a5a6b65317d3dd349b11591fc4c6
+	parent = 9c70e343c0bb211b6aed016a9c71e91058d42cda
+	method = merge
+	cmdver = 0.4.9
