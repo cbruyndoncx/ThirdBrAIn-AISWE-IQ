@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/NateBJones-Projects/ringer.git
+	branch = main
+	commit = 474c4db3b7fdb6bad05f490f30d73c503baa0069
+	parent = 7abac2ba87b2ef6e6053bc78345e4ac51791f48e
+	method = merge
+	cmdver = 0.4.9
