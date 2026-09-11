@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/mrgoonie/claudekit-skills.git
+	branch = main
+	commit = 80113d86bc4407f105af40a2c4ea58194f7c370a
+	parent = 30c421b84d454c3d0e7415bc17473a1452112ba7
+	method = merge
+	cmdver = 0.4.9
