@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/MrLesk/Backlog.md.git
+	branch = main
+	commit = 3c7fde65e28a6e5e154f63126957649514eee370
+	parent = e3ff4e6086534ffb9bb70ffe846412b300e0936b
+	method = merge
+	cmdver = 0.4.9
