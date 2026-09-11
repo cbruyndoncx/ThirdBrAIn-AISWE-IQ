@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/ruvnet/ruflo.git
+	branch = main
+	commit = 005a0ed25e644778f767cd78754fe91d660466af
+	parent = c95cf8754af231db55e7047fb71f2188eca7a043
+	method = merge
+	cmdver = 0.4.9
