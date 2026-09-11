@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/stablyai/orca.git
+	branch = main
+	commit = 9aa0f7e77d366c23a3cc8de2da32ae550d397dc0
+	parent = bd9a46368985a358f6a454ba9ace7105c68164da
+	method = merge
+	cmdver = 0.4.9
