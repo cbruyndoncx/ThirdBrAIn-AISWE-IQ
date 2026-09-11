@@ -1,0 +1,80 @@
+import type { TeamSpec } from "@oh-my-opencode/team-core/types"
+
+import { CURATED_READONLY_AGENT_NAMES, ULW_REVIEWER_AGENT_NAMES } from "../agents/builtin"
+import { canonicalAgentName } from "../agents/legacy-agent-names"
+import { SenpiTeamSpecError } from "./errors"
+
+/**
+ * Senpi-local member vocabulary resolver ports. `isCategoryResolvable` is backed by the todo-4
+ * category resolution; `isKnownAgent` is backed by the todo-5 agent loader. Kept as injectable
+ * predicates so the registry does not couple to a full model registry just to validate a spec.
+ */
+export type SenpiTeamMemberPorts = {
+  readonly isCategoryResolvable: (category: string) => boolean
+  readonly isKnownAgent: (subagentType: string) => boolean
+  readonly categoryNames?: readonly string[]
+  readonly agentNames?: readonly string[]
+}
+
+const ALLOWED_KINDS_HINT =
+  "member kind must be 'category' (a resolvable delegate category), 'subagent_type' (a loaded agent definition), or the 'agent' alias for a subagent_type"
+
+/**
+ * Validates parsed team members against the ACTUAL senpi vocabulary. team-core `validateSpec` is
+ * NOT used because it hard-calls the opencode-roster eligibility registry.
+ */
+export function validateSenpiTeamMembers(spec: TeamSpec, ports: SenpiTeamMemberPorts): void {
+  for (const member of spec.members) {
+    if (member.kind === "category") {
+      if (!ports.isCategoryResolvable(member.category)) {
+        const available = ports.categoryNames !== undefined && ports.categoryNames.length > 0
+          ? ` Available categories: ${[...ports.categoryNames].sort().join(", ")}.`
+          : ""
+        throw new SenpiTeamSpecError(
+          `Team '${spec.name}' member '${member.name}' references unknown category '${member.category}'.${available} ${ALLOWED_KINDS_HINT}.`,
+          "UNRESOLVABLE_CATEGORY",
+          spec.name,
+        )
+      }
+      continue
+    }
+
+    // Legacy curated ids canonicalize before the curated/reviewer/known checks so a member
+    // declared under a retired curated id is validated (and later spawned) as its canonical id. The builtin
+    // name sets may still be keyed by the legacy id during the deprecation window, so both the
+    // canonical and the legacy id are checked against them (canonical once the sets are renamed);
+    // every message names the canonical id.
+    const canonical = canonicalAgentName(member.subagent_type)
+    const subagentType = canonical.name
+    const knownAs = (names: ReadonlySet<string>): boolean =>
+      names.has(subagentType) || (canonical.legacy !== undefined && names.has(canonical.legacy))
+
+    if (knownAs(CURATED_READONLY_AGENT_NAMES)) {
+      const requestedAs = canonical.legacy === undefined ? "" : ` (requested as "${canonical.legacy}")`
+      throw new SenpiTeamSpecError(
+        `curated read-only agent "${subagentType}"${requestedAs} cannot be a team member; delegate via the task tool instead`,
+        "UNKNOWN_SUBAGENT_TYPE",
+        spec.name,
+      )
+    }
+
+    if (knownAs(ULW_REVIEWER_AGENT_NAMES)) {
+      throw new SenpiTeamSpecError(
+        `ulw reviewer agent "${subagentType}" cannot be a team member; process-mode members drop reviewer instructions and tool allowlists, so delegate via the task tool instead`,
+        "UNKNOWN_SUBAGENT_TYPE",
+        spec.name,
+      )
+    }
+
+    if (!ports.isKnownAgent(subagentType)) {
+      const available = ports.agentNames !== undefined && ports.agentNames.length > 0
+        ? ` Available agents: ${[...ports.agentNames].sort().join(", ")}.`
+        : ""
+      throw new SenpiTeamSpecError(
+        `Team '${spec.name}' member '${member.name}' references unknown subagent_type '${subagentType}'.${available} ${ALLOWED_KINDS_HINT}.`,
+        "UNKNOWN_SUBAGENT_TYPE",
+        spec.name,
+      )
+    }
+  }
+}

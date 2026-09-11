@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/code-yeongyu/oh-my-openagent.git
+	branch = dev
+	commit = 9e9610e62d1a070e2a575f3fd619458497d5dd8e
+	parent = c9519fafd0a68c3aab64517c6714b15349390d20
+	method = merge
+	cmdver = 0.4.9
