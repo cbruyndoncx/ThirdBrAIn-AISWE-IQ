@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/brentrockwood/doa.git
+	branch = main
+	commit = b6d40d6afbbe2c3ba14565c91e0498e7b1c69567
+	parent = 8cbcd7266523c5dc10257a2cc5250619d6b2bced
+	method = merge
+	cmdver = 0.4.9
