@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/Wirasm/dylan.git
+	branch = develop
+	commit = 2e08daa34f831439c3a180ff5665eb3218e8c8e8
+	parent = 3ffc34892de97ef580eceb823a75a703b1fe4538
+	method = merge
+	cmdver = 0.4.9
