@@ -1,0 +1,89 @@
+---
+title: "0.2: Get the Course & Start"
+description: "Get the course materials with one prompt and launch your first interactive lesson with Claude."
+keywords: 'claude code course, get claude code course, start claude code lesson'
+---
+
+import CopyPrompt from '../../components/CopyPrompt'
+
+## 0.2: Get the Course & Start
+
+- **Time to Complete:** 5 minutes
+- **Prerequisites:** Claude installed ([0.1](/getting-started/installation))
+
+## Get the Course Materials
+
+This course runs in the Claude Desktop app. Open it, start a new project, and paste the prompt below — Claude takes it from there:
+
+In the Claude Desktop app, click the **Code** tab (upper left), start a new project, and paste:
+
+<img src="/images/code-tab.png" alt="The Code tab — upper left of the Claude Desktop app" width="240" style={{borderRadius:'8px'}} />
+
+<CopyPrompt />
+
+Claude installs the FSPM CLI, downloads the course into your project, and tells you how to begin. You never touch a zip file or a terminal.
+
+> **Important:** Use a new project, not a plain chat. The course files live in the project, so every lesson starts from there.
+
+{/* SCREENSHOT-REFRESH: folder-location.png showed the old "New Terminal at Folder" zip flow.
+    Needs a new screenshot of creating a project in the Claude Desktop app.
+![Opening folder from file explorer](/images/folder-location.png) */}
+
+## Start Your First Lesson
+
+Once Claude confirms the course is installed, type:
+
+```
+/start-1-1
+```
+
+Claude will begin teaching you interactively. Follow along and respond when prompted.
+
+## Prefer the Terminal? (Claude Code CLI)
+
+The same prompt works in the Claude Code CLI. (Haven't installed the CLI? See the [Claude Code CLI guide](/getting-started/claude-code-cli).) Open your terminal, make a folder for the course, and start Claude Code there:
+
+```bash
+mkdir -p ~/Documents/claude-code-pm-course
+cd ~/Documents/claude-code-pm-course
+claude
+```
+
+Then paste the same prompt:
+
+In the Claude Desktop app, click the **Code** tab (upper left), start a new project, and paste:
+
+<img src="/images/code-tab.png" alt="The Code tab — upper left of the Claude Desktop app" width="240" style={{borderRadius:'8px'}} />
+
+<CopyPrompt />
+
+> **Important:** Claude only sees files in the folder where you launch it. Always start Claude Code from the course folder.
+
+## Common Questions
+
+### "What if the install fails?"
+Ask Claude to try again. If it still fails, check [fullstackpm.com/cli](https://fullstackpm.com/cli) for install help.
+
+### "I already downloaded the old zip version. Do I need to switch?"
+No. Your existing course folder keeps working. The prompt above is just the current way to get the materials.
+
+### "Can I pause and come back later?"
+Yes! Open the same project (or folder) and run the lesson's `/start` command again to pick up where you left off.
+
+---
+
+## What's Next
+
+Type `/start-1-1` to begin Module 1!
+
+Or continue reading the reference guides:
+**[1.1: Welcome →](/fundamentals/welcome)**
+
+
+---
+
+**About This Course**
+
+Created by [Carl Vellotti](https://www.linkedin.com/in/carlvellotti/). If you have any feedback about this module or the course overall, message me! I'm building a newsletter and community for PM builders, check out [The Full Stack PM](https://fullstackpm.com/subscribe?utm_source=ccforpms&utm_medium=course&utm_campaign=start-and-clone).
+
+**Source Repository:** [github.com/carlvellotti/free-ai-courses](https://github.com/carlvellotti/free-ai-courses)

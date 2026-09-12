@@ -1,0 +1,11 @@
+# *
+User-agent: *
+Allow: /
+Disallow: /api/*
+Disallow: /_next/*
+
+# Host
+Host: https://cursorforpms.com
+
+# Sitemaps
+Sitemap: https://cursorforpms.com/sitemap.xml

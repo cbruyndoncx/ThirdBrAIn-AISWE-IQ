@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+
+# Obsidian workspace (personal settings)
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+
+# Node modules if any
+node_modules/
+
+# Environment files
+.env
+.env.local
+.vercel
+
+# Temporary files
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!course-materials/course-structure.json
+!website/vercel.json
+!mini-lessons/advanced-claude-workflows/.claude/skills/start-advanced-claude-workflows/assets/stop-hook-example.settings.json
+*.png
+!website/public/**/*.png
+!assets/fspm-welcome-banner.png
+
+# Release artifacts
+releases/
+*.zip
+__pycache__/
+.venv/

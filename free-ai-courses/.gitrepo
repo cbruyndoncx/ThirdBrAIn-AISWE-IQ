@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/carlvellotti/free-ai-courses.git
+	branch = main
+	commit = 45328639a4a62626f00242b3395512c91b56865e
+	parent = 3730ad84915c9a7a9d8c5f3f45eff8a8a3b35509
+	method = merge
+	cmdver = 0.4.9
