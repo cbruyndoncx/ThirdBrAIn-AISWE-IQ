@@ -1,0 +1,62 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run dev:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm run lint:*)",
+      "Bash(npx tailwindcss:*)",
+      "Bash(npx @tailwindcss/*:*)",
+      "Bash(npx prettier:*)",
+      "Write(src/**/*)",
+      "Write(app/**/*)",
+      "Write(pages/**/*)",
+      "Write(components/**/*)",
+      "Write(styles/**/*)",
+      "Read(tailwind.config.js)",
+      "Read(package.json)",
+      "Edit(tailwind.config.js)",
+      "Edit(globals.css)",
+      "Edit(src/styles/**/*)"
+    ],
+    "deny": [
+      "Read(.env.production)",
+      "Read(.env.local)",
+      "Write(.env)",
+      "Bash(rm -rf:*)",
+      "Bash(npm publish:*)",
+      "Read(node_modules/**)",
+      "Write(node_modules/**)"
+    ]
+  },
+  "env": {
+    "NODE_ENV": "development",
+    "TAILWIND_CONFIG": "tailwind.config.js",
+    "TAILWIND_DARK_MODE": "class"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx prettier --write",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "echo '🎨 Tailwind CSS | $(basename $(pwd))'"
+  },
+  "_metadata": {
+    "name": "Tailwind CSS",
+    "version": "1.0.0",
+    "category": "ui",
+    "generated": "2025-08-20T13:36:56.488Z",
+    "generator": "manual",
+    "note": "Official Claude Code configuration"
+  }
+}

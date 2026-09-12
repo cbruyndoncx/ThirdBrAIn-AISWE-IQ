@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/Matt-Dionis/claude-code-configs.git
+	branch = main
+	commit = dead8248e90cf86ffe5f97c69eeab72f2214d4e9
+	parent = b45ed5cb4f9a7335f1cfa8741c69090868f80339
+	method = merge
+	cmdver = 0.4.9

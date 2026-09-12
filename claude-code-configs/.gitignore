@@ -1,0 +1,95 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Testing
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+playwright/.cache/
+*.lcov
+
+# Production/Build
+dist/
+build/
+out/
+*.tsbuildinfo
+.next/
+.turbo/
+.vercel/
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Environment variables
+.env
+.env.local
+.env.production.local
+.env.development.local
+.env.test.local
+*.env
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.c9/
+*.sublime-workspace
+*.sublime-project
+
+# Package managers
+.npm/
+.yarn/
+.pnpm-store/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+.cache/
+tmp/
+temp/
+
+# Development/Planning
+context/
+notes/
+TODO.md
+NOTES.md
+.scratch/
+RELEASE_INSTRUCTIONS.md
+
+# Claude Config Composer specific
+claude-config-composer/.test-*/
+claude-config-composer/.generated/
+claude-config-composer/test-output/
+claude-config-composer/*.backup-*
+
+# Lock files (keep in repo for consistency)
+# Uncomment if you want to ignore lock files
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml

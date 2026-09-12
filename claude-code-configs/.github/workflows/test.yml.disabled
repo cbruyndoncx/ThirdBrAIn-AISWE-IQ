@@ -1,0 +1,160 @@
+name: Test and Validate
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+    
+    defaults:
+      run:
+        working-directory: ./claude-config-composer
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ./claude-config-composer/node_modules
+          key: ${{ runner.os }}-node-${{ matrix.node-version }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-${{ matrix.node-version }}-
+            ${{ runner.os }}-node-
+            
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Run TypeScript compilation
+        run: npm run build
+        
+      - name: Run tests
+        run: npm test
+        
+      - name: Validate configurations
+        run: |
+          echo "Testing configuration list..."
+          node dist/cli.js list
+          
+      - name: Test config generation
+        run: |
+          echo "Testing config generation..."
+          node dist/cli.js nextjs-15 --output .test-output --no-backup --no-gitignore
+          
+      - name: Validate generated config
+        run: |
+          if [ ! -f ".test-output/CLAUDE.md" ]; then
+            echo "Error: CLAUDE.md not generated"
+            exit 1
+          fi
+          
+          if [ ! -d ".test-output/.claude" ]; then
+            echo "Error: .claude directory not generated"
+            exit 1
+          fi
+          
+          echo "✅ Configuration generation test passed"
+          
+  validate-configs:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./claude-config-composer
+        
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Build CLI
+        run: npm run build
+        
+      - name: Validate all configurations exist
+        run: |
+          echo "Validating configuration integrity..."
+          
+          # Check that all registered configs have directories in new structure
+          CONFIGS=(
+            "frameworks/nextjs-15"
+            "ui/shadcn" 
+            "ui/tailwindcss"
+            "tooling/vercel-ai-sdk"
+            "databases/drizzle"
+            "mcp-servers/memory-mcp-server"
+            "mcp-servers/token-gated-mcp-server"
+          )
+          
+          for config in "${CONFIGS[@]}"; do
+            if [ ! -d "../configurations/$config" ]; then
+              echo "❌ Missing configuration directory: $config"
+              exit 1
+            fi
+            
+            if [ ! -f "../configurations/$config/CLAUDE.md" ]; then
+              echo "❌ Missing CLAUDE.md in: $config"
+              exit 1
+            fi
+            
+            if [ ! -f "../configurations/$config/README.md" ]; then
+              echo "❌ Missing README.md in: $config"
+              exit 1
+            fi
+            
+            echo "✅ Configuration valid: $config"
+          done
+          
+          echo "✅ All configurations validated successfully!"
+          
+      - name: Test CLI functionality
+        run: |
+          echo "Testing CLI list command..."
+          OUTPUT=$(node dist/cli-simple.js list)
+          
+          # Check that all expected configs appear in list
+          if ! echo "$OUTPUT" | grep -q "Next.js 15"; then
+            echo "❌ Next.js 15 not found in config list"
+            exit 1
+          fi
+          
+          if ! echo "$OUTPUT" | grep -q "shadcn/ui"; then
+            echo "❌ shadcn/ui not found in config list"
+            exit 1
+          fi
+          
+          if ! echo "$OUTPUT" | grep -q "Tailwind CSS"; then
+            echo "❌ Tailwind CSS not found in config list"
+            exit 1
+          fi
+          
+          if ! echo "$OUTPUT" | grep -q "Vercel AI SDK"; then
+            echo "❌ Vercel AI SDK not found in config list"
+            exit 1
+          fi
+          
+          if ! echo "$OUTPUT" | grep -q "Drizzle ORM"; then
+            echo "❌ Drizzle ORM not found in config list"
+            exit 1
+          fi
+          
+          echo "✅ CLI list command working correctly!"

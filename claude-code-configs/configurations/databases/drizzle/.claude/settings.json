@@ -1,0 +1,47 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run db:*)",
+      "Bash(npx drizzle-kit:*)",
+      "Bash(npm run migrate:*)",
+      "Bash(npm run seed:*)",
+      "Write(drizzle/**/*)",
+      "Write(src/schema/**/*)",
+      "Write(src/lib/db.ts)",
+      "Read(drizzle.config.ts)",
+      "Read(package.json)"
+    ],
+    "deny": [
+      "Read(.env.production)",
+      "Read(.env.local)",
+      "Write(.env)",
+      "Bash(npm publish:*)",
+      "Bash(rm -rf:*)"
+    ]
+  },
+  "env": {
+    "NODE_ENV": "development"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx prettier --write $FILE_PATH",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "_metadata": {
+    "name": "Drizzle ORM",
+    "version": "1.0.0",
+    "category": "database",
+    "generated": "2025-08-20T13:36:56.490Z",
+    "generator": "manual",
+    "note": "Official Claude Code configuration"
+  }
+}

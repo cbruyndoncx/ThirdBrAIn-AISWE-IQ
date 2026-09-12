@@ -1,0 +1,103 @@
+{
+  "name": "claude-config-composer",
+  "version": "1.0.0",
+  "description": "Generate production-ready Claude Code configurations for popular frameworks and tools.",
+  "main": "dist/cli.js",
+  "bin": {
+    "claude-config-composer": "./dist/cli.js",
+    "claude-compose": "./dist/cli.js"
+  },
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsc && chmod +x dist/cli.js",
+    "build:configs": "cp -r ../configurations .",
+    "build:full": "npm run build && npm run build:configs",
+    "test": "vitest run",
+    "test:ci": "vitest run --coverage",
+    "prepublishOnly": "npm run build:full && npm test",
+    "generate": "tsx src/cli.ts",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "lint:fix": "biome lint --write .",
+    "check": "biome check .",
+    "check:fix": "biome check --write ."
+  },
+  "keywords": [
+    "claude-code",
+    "claude",
+    "ai-assistant",
+    "config",
+    "cli",
+    "developer-tools",
+    "nextjs",
+    "react",
+    "shadcn",
+    "mcp-server",
+    "configuration-generator",
+    "development-stack"
+  ],
+  "author": "Matt Dionis <matt@nlad.dev>",
+  "license": "MIT",
+  "homepage": "https://github.com/Matt-Dionis/claude-code-configs#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Matt-Dionis/claude-code-configs.git",
+    "directory": "claude-config-composer"
+  },
+  "bugs": {
+    "url": "https://github.com/Matt-Dionis/claude-code-configs/issues"
+  },
+  "files": [
+    "dist/**/*",
+    "configurations/**/*",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.8.2",
+    "chalk": "^4.1.2",
+    "commander": "^11.1.0",
+    "js-yaml": "^4.1.0",
+    "zod": "^3.22.4"
+  },
+  "optionalDependencies": {
+    "boxen": "^8.0.1",
+    "cfonts": "^3.3.0",
+    "chalk-animation": "^2.0.3",
+    "cli-progress": "^3.12.0",
+    "figlet": "^1.8.2",
+    "gradient-string": "^3.0.0",
+    "nanospinner": "^1.2.2",
+    "node-emoji": "^2.2.0",
+    "terminal-link": "^4.0.0"
+  },
+  "peerDependencies": {
+    "asciify": "^1.3.2"
+  },
+  "peerDependenciesMeta": {
+    "asciify": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.0",
+    "@types/chalk-animation": "^1.6.3",
+    "@types/cli-progress": "^3.11.6",
+    "@types/figlet": "^1.7.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.10.0",
+    "@vitest/coverage-v8": "^3.2.4",
+    "tsx": "^4.6.2",
+    "typescript": "^5.3.2",
+    "vitest": "^3.2.4"
+  }
+}

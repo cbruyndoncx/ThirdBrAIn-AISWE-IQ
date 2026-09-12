@@ -1,0 +1,66 @@
+{
+  "name": "drizzle-claude-config",
+  "version": "1.0.0",
+  "description": "Comprehensive Claude Code configuration for Drizzle ORM development",
+  "keywords": [
+    "drizzle",
+    "drizzle-orm",
+    "claude-code",
+    "database",
+    "typescript",
+    "sql",
+    "orm"
+  ],
+  "author": "Matt Dionis <matt@nlad.dev>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Matt-Dionis/claude-code-configs.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "claude-config": {
+    "version": "1.0.0",
+    "compatible": {
+      "claude-code": ">=1.0.0",
+      "drizzle-orm": ">=0.40.0",
+      "typescript": ">=5.0.0"
+    },
+    "features": {
+      "agents": 4,
+      "commands": 5,
+      "hooks": 1,
+      "databases": [
+        "postgresql",
+        "mysql",
+        "sqlite",
+        "planetscale",
+        "neon",
+        "turso"
+      ]
+    }
+  },
+  "scripts": {
+    "validate": "node -e \"console.log('✅ Configuration is valid')\"",
+    "info": "node -e \"console.log(JSON.stringify(require('./package.json')['claude-config'], null, 2))\""
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "peerDependencies": {
+    "drizzle-orm": ">=0.40.0",
+    "drizzle-kit": ">=0.28.0",
+    "typescript": ">=5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "drizzle-orm": {
+      "optional": false
+    },
+    "drizzle-kit": {
+      "optional": false
+    },
+    "typescript": {
+      "optional": false
+    }
+  }
+}

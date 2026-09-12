@@ -1,0 +1,214 @@
+#!/bin/bash
+
+# TailwindCSS Pre-commit Hook
+# Validates TailwindCSS usage and optimizations before commits
+
+set -e
+
+echo "🎨 Running TailwindCSS pre-commit checks..."
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Function to print colored output
+print_status() {
+    local color=$1
+    local message=$2
+    echo -e "${color}${message}${NC}"
+}
+
+# Check if TailwindCSS config exists
+check_tailwind_config() {
+    print_status $BLUE "Checking TailwindCSS configuration..."
+    
+    if [[ ! -f "tailwind.config.js" && ! -f "tailwind.config.ts" ]]; then
+        print_status $RED "❌ No TailwindCSS configuration file found"
+        exit 1
+    fi
+    
+    print_status $GREEN "✅ TailwindCSS configuration found"
+}
+
+# Validate CSS utility usage patterns
+validate_utility_patterns() {
+    print_status $BLUE "Validating TailwindCSS utility patterns..."
+    
+    # Check for overly long class strings (potential refactoring candidates)
+    local long_classes=$(grep -r "class[Name]*=['\"][^'\"]*['\"]" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null | \
+                        sed -E 's/.*class[Name]*=["'\''`]([^"'\''`]*)["'\''`].*/\1/' | \
+                        awk 'length($0) > 150 { print FILENAME ":" FNR ":" $0 }' || true)
+    
+    if [[ -n "$long_classes" ]]; then
+        print_status $YELLOW "⚠️  Found potentially complex utility combinations (>150 characters):"
+        echo "$long_classes"
+        print_status $YELLOW "Consider extracting these into components or using @apply directive"
+    fi
+    
+    # Check for hardcoded colors (should use design tokens)
+    local hardcoded_colors=$(grep -r "bg-\(red\|blue\|green\|yellow\|purple\|pink\|indigo\)-[0-9]" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null || true)
+    
+    if [[ -n "$hardcoded_colors" ]]; then
+        print_status $YELLOW "⚠️  Found hardcoded color utilities. Consider using semantic color tokens:"
+        echo "$hardcoded_colors" | head -5
+    fi
+    
+    print_status $GREEN "✅ Utility patterns validated"
+}
+
+# Check for responsive design patterns
+validate_responsive_patterns() {
+    print_status $BLUE "Checking responsive design patterns..."
+    
+    # Look for mobile-first violations (desktop-first patterns)
+    local desktop_first=$(grep -r "class[Name]*=['\"][^'\"]*['\"]" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null | \
+                         sed -E 's/.*class[Name]*=["'\''`]([^"'\''`]*)["'\''`].*/\1/' | \
+                         grep -E "(^| )(block|flex|grid|hidden)" | \
+                         grep -E "(lg|xl|2xl):(block|flex|grid|hidden)" | \
+                         grep -vE "(sm|md):" | head -5 || true)
+    
+    if [[ -n "$desktop_first" ]]; then
+        print_status $YELLOW "⚠️  Potential desktop-first patterns detected. Consider mobile-first approach:"
+        echo "$desktop_first"
+    fi
+    
+    print_status $GREEN "✅ Responsive patterns checked"
+}
+
+# Build and analyze CSS bundle size
+analyze_bundle_size() {
+    print_status $BLUE "Analyzing CSS bundle size..."
+    
+    # Check if build script exists
+    if npm run --silent 2>/dev/null | grep -q "build\|build:css"; then
+        # Build CSS
+        npm run build:css >/dev/null 2>&1 || npm run build >/dev/null 2>&1 || {
+            print_status $YELLOW "⚠️  Could not run CSS build command"
+            return 0
+        }
+        
+        # Find the generated CSS file
+        local css_file=$(find . -name "*.css" -path "*/dist/*" -o -path "*/build/*" -o -path "*/.next/static/css/*" 2>/dev/null | head -1)
+        
+        if [[ -n "$css_file" && -f "$css_file" ]]; then
+            local size=$(wc -c < "$css_file")
+            local size_kb=$((size / 1024))
+            
+            print_status $GREEN "📊 CSS bundle size: ${size_kb}KB"
+            
+            # Warn if bundle is large
+            if [[ $size_kb -gt 100 ]]; then
+                print_status $YELLOW "⚠️  CSS bundle is large (${size_kb}KB). Consider optimization:"
+                print_status $YELLOW "   - Review unused utilities"
+                print_status $YELLOW "   - Optimize content paths in tailwind.config.js"
+                print_status $YELLOW "   - Use CSS purging effectively"
+            fi
+        else
+            print_status $YELLOW "⚠️  Could not find generated CSS file"
+        fi
+    else
+        print_status $YELLOW "⚠️  No build script found in package.json"
+    fi
+}
+
+# Check for accessibility considerations
+validate_accessibility() {
+    print_status $BLUE "Checking accessibility patterns..."
+    
+    # Check for focus states on interactive elements
+    local missing_focus=$(grep -r "class[Name]*=['\"][^'\"]*['\"]" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null | \
+                         grep -E "(button|input|select|textarea)" | \
+                         grep -v "focus:" | head -3 || true)
+    
+    if [[ -n "$missing_focus" ]]; then
+        print_status $YELLOW "⚠️  Interactive elements without focus states detected:"
+        echo "$missing_focus"
+        print_status $YELLOW "Consider adding focus: states for accessibility"
+    fi
+    
+    # Check for proper contrast utilities
+    local low_contrast=$(grep -r "text-gray-[123]00" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null || true)
+    
+    if [[ -n "$low_contrast" ]]; then
+        print_status $YELLOW "⚠️  Potentially low contrast text colors found:"
+        echo "$low_contrast" | head -3
+        print_status $YELLOW "Verify accessibility contrast ratios"
+    fi
+    
+    print_status $GREEN "✅ Accessibility patterns checked"
+}
+
+# Check for performance anti-patterns
+validate_performance() {
+    print_status $BLUE "Checking performance patterns..."
+    
+    # Check for layout-shifting animations
+    local layout_animations=$(grep -r "transition-\(width\|height\|top\|left\)" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null || true)
+    
+    if [[ -n "$layout_animations" ]]; then
+        print_status $YELLOW "⚠️  Layout-affecting transitions found (may cause performance issues):"
+        echo "$layout_animations" | head -3
+        print_status $YELLOW "Consider using transform-based animations instead"
+    fi
+    
+    # Check for excessive arbitrary values
+    local arbitrary_values=$(grep -r "\[\w*\]" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null | wc -l)
+    
+    if [[ $arbitrary_values -gt 10 ]]; then
+        print_status $YELLOW "⚠️  High usage of arbitrary values ($arbitrary_values instances)"
+        print_status $YELLOW "Consider adding values to your TailwindCSS configuration"
+    fi
+    
+    print_status $GREEN "✅ Performance patterns checked"
+}
+
+# Validate content configuration
+validate_content_config() {
+    print_status $BLUE "Validating content configuration..."
+    
+    local config_file="tailwind.config.js"
+    if [[ -f "tailwind.config.ts" ]]; then
+        config_file="tailwind.config.ts"
+    fi
+    
+    # Check if content paths are specific enough
+    if ! grep -q "components" "$config_file" 2>/dev/null; then
+        print_status $YELLOW "⚠️  Consider adding specific content paths for better purging"
+    fi
+    
+    # Check for safelist configuration for dynamic classes
+    if grep -r "class[Name]*=.*\${" src/ --include="*.jsx" --include="*.tsx" >/dev/null 2>&1; then
+        if ! grep -q "safelist" "$config_file" 2>/dev/null; then
+            print_status $YELLOW "⚠️  Dynamic class generation detected but no safelist configured"
+            print_status $YELLOW "Consider adding a safelist to prevent CSS purging of dynamic classes"
+        fi
+    fi
+    
+    print_status $GREEN "✅ Content configuration validated"
+}
+
+# Main execution
+main() {
+    local start_time=$(date +%s)
+    
+    # Run all checks
+    check_tailwind_config
+    validate_utility_patterns
+    validate_responsive_patterns
+    validate_accessibility
+    validate_performance
+    validate_content_config
+    analyze_bundle_size
+    
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+    
+    print_status $GREEN "✅ All TailwindCSS checks completed in ${duration}s"
+    print_status $BLUE "Ready to commit! 🚀"
+}
+
+# Run the main function
+main

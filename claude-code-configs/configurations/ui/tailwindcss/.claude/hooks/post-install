@@ -1,0 +1,338 @@
+#!/bin/bash
+
+# TailwindCSS Post-install Hook
+# Runs after dependencies are installed to ensure optimal TailwindCSS setup
+
+set -e
+
+echo "🎨 Running TailwindCSS post-install setup..."
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Function to print colored output
+print_status() {
+    local color=$1
+    local message=$2
+    echo -e "${color}${message}${NC}"
+}
+
+# Check TailwindCSS installation
+check_tailwind_installation() {
+    print_status $BLUE "Checking TailwindCSS installation..."
+    
+    if npm list tailwindcss >/dev/null 2>&1; then
+        local version=$(npm list tailwindcss --depth=0 2>/dev/null | grep tailwindcss | sed -E 's/.*tailwindcss@([0-9.]+).*/\1/')
+        print_status $GREEN "✅ TailwindCSS v${version} installed"
+        
+        # Check for v3+ features
+        if [[ "$(echo "$version" | cut -d. -f1)" -ge 3 ]]; then
+            print_status $GREEN "✅ Using TailwindCSS v3+ with modern features"
+        else
+            print_status $YELLOW "⚠️  Consider upgrading to TailwindCSS v3+ for better performance"
+        fi
+    else
+        print_status $RED "❌ TailwindCSS not found in dependencies"
+        print_status $YELLOW "Run: npm install -D tailwindcss"
+        exit 1
+    fi
+}
+
+# Verify essential plugins
+verify_recommended_plugins() {
+    print_status $BLUE "Checking for recommended plugins..."
+    
+    local plugins=(
+        "@tailwindcss/typography:Typography support"
+        "@tailwindcss/forms:Enhanced form styling"
+        "@tailwindcss/aspect-ratio:Aspect ratio utilities"
+        "autoprefixer:CSS vendor prefixes"
+        "postcss:CSS processing"
+    )
+    
+    for plugin_info in "${plugins[@]}"; do
+        local plugin=$(echo "$plugin_info" | cut -d: -f1)
+        local description=$(echo "$plugin_info" | cut -d: -f2)
+        
+        if npm list "$plugin" >/dev/null 2>&1; then
+            print_status $GREEN "✅ $plugin installed"
+        else
+            print_status $YELLOW "⚠️  Consider installing $plugin for $description"
+        fi
+    done
+}
+
+# Initialize configuration if missing
+initialize_config() {
+    print_status $BLUE "Checking TailwindCSS configuration..."
+    
+    if [[ ! -f "tailwind.config.js" && ! -f "tailwind.config.ts" ]]; then
+        print_status $YELLOW "⚠️  No TailwindCSS config found. Initializing..."
+        
+        if command -v npx >/dev/null 2>&1; then
+            npx tailwindcss init -p
+            print_status $GREEN "✅ Created tailwind.config.js and postcss.config.js"
+        else
+            print_status $RED "❌ npx not available. Please run 'npx tailwindcss init -p' manually"
+        fi
+    else
+        print_status $GREEN "✅ TailwindCSS configuration exists"
+    fi
+}
+
+# Check PostCSS configuration
+verify_postcss_config() {
+    print_status $BLUE "Verifying PostCSS configuration..."
+    
+    if [[ -f "postcss.config.js" ]]; then
+        if grep -q "tailwindcss" postcss.config.js; then
+            print_status $GREEN "✅ PostCSS configured with TailwindCSS"
+        else
+            print_status $YELLOW "⚠️  PostCSS config exists but may not include TailwindCSS"
+        fi
+    else
+        print_status $YELLOW "⚠️  No PostCSS config found. Consider creating one for optimal build setup"
+        
+        # Create basic PostCSS config
+        cat > postcss.config.js << EOF
+module.exports = {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}
+EOF
+        print_status $GREEN "✅ Created basic postcss.config.js"
+    fi
+}
+
+# Optimize package.json scripts
+optimize_package_scripts() {
+    print_status $BLUE "Checking package.json scripts..."
+    
+    if [[ -f "package.json" ]]; then
+        local has_build_css=$(npm run --silent 2>/dev/null | grep -q "build:css" && echo "true" || echo "false")
+        local has_watch_css=$(npm run --silent 2>/dev/null | grep -q "watch:css" && echo "true" || echo "false")
+        
+        if [[ "$has_build_css" == "false" ]]; then
+            print_status $YELLOW "⚠️  Consider adding a build:css script to package.json"
+            print_status $BLUE "Example: \"build:css\": \"tailwindcss -i ./src/input.css -o ./dist/output.css --minify\""
+        else
+            print_status $GREEN "✅ Build CSS script available"
+        fi
+        
+        if [[ "$has_watch_css" == "false" ]]; then
+            print_status $YELLOW "⚠️  Consider adding a watch:css script for development"
+            print_status $BLUE "Example: \"watch:css\": \"tailwindcss -i ./src/input.css -o ./dist/output.css --watch\""
+        else
+            print_status $GREEN "✅ Watch CSS script available"
+        fi
+    fi
+}
+
+# Create default CSS entry point
+create_css_entry() {
+    print_status $BLUE "Checking CSS entry point..."
+    
+    local css_files=("src/styles.css" "src/input.css" "src/globals.css" "styles/globals.css")
+    local css_exists=false
+    
+    for css_file in "${css_files[@]}"; do
+        if [[ -f "$css_file" ]]; then
+            css_exists=true
+            print_status $GREEN "✅ CSS entry point found: $css_file"
+            break
+        fi
+    done
+    
+    if [[ "$css_exists" == "false" ]]; then
+        print_status $YELLOW "⚠️  No CSS entry point found. Creating src/styles.css..."
+        
+        mkdir -p src
+        cat > src/styles.css << EOF
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+  
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50;
+  }
+  
+  .btn-primary {
+    @apply bg-primary text-primary-foreground hover:bg-primary/90;
+  }
+  
+  .btn-secondary {
+    @apply bg-secondary text-secondary-foreground hover:bg-secondary/80;
+  }
+  
+  .card {
+    @apply rounded-lg border bg-card text-card-foreground shadow-sm;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+EOF
+        print_status $GREEN "✅ Created src/styles.css with TailwindCSS directives"
+    fi
+}
+
+# Optimize TailwindCSS configuration
+optimize_config() {
+    print_status $BLUE "Checking TailwindCSS configuration optimization..."
+    
+    local config_file="tailwind.config.js"
+    if [[ -f "tailwind.config.ts" ]]; then
+        config_file="tailwind.config.ts"
+    fi
+    
+    if [[ -f "$config_file" ]]; then
+        # Check for content configuration
+        if ! grep -q "content:" "$config_file"; then
+            print_status $YELLOW "⚠️  No content configuration found in $config_file"
+            print_status $YELLOW "Add content paths for proper CSS purging"
+        fi
+        
+        # Check for dark mode configuration
+        if ! grep -q "darkMode" "$config_file"; then
+            print_status $YELLOW "⚠️  Consider adding dark mode support"
+            print_status $BLUE "Add: darkMode: 'class'"
+        fi
+        
+        print_status $GREEN "✅ Configuration file checked"
+    fi
+}
+
+# Set up development environment
+setup_dev_environment() {
+    print_status $BLUE "Setting up development environment..."
+    
+    # Create .gitignore entries if needed
+    if [[ -f ".gitignore" ]]; then
+        if ! grep -q "# TailwindCSS" .gitignore; then
+            echo "" >> .gitignore
+            echo "# TailwindCSS" >> .gitignore
+            echo "dist/" >> .gitignore
+            echo "build/" >> .gitignore
+            print_status $GREEN "✅ Added TailwindCSS entries to .gitignore"
+        fi
+    fi
+    
+    # Create VSCode settings for better TailwindCSS support
+    if [[ ! -d ".vscode" ]]; then
+        mkdir -p .vscode
+    fi
+    
+    if [[ ! -f ".vscode/settings.json" ]]; then
+        cat > .vscode/settings.json << 'EOF'
+{
+  "tailwindCSS.includeLanguages": {
+    "javascript": "javascript",
+    "typescript": "typescript"
+  },
+  "tailwindCSS.experimental.classRegex": [
+    ["cva\\(([^)]*)\\)", "[\"'`]([^\"'`]*).*?[\"'`]"],
+    ["cn\\(([^)]*)\\)", "(?:'|\"|`)([^']*)(?:'|\"|`)"],
+    ["clsx\\(([^)]*)\\)", "(?:'|\"|`)([^']*)(?:'|\"|`)"]
+  ],
+  "css.validate": false,
+  "scss.validate": false,
+  "editor.quickSuggestions": {
+    "strings": true
+  }
+}
+EOF
+        print_status $GREEN "✅ Created .vscode/settings.json for TailwindCSS support"
+    fi
+}
+
+# Generate usage report
+generate_usage_report() {
+    print_status $BLUE "Generating TailwindCSS setup report..."
+    
+    local report_file=".tailwindcss-setup-report.txt"
+    
+    cat > "$report_file" << EOF
+TailwindCSS Setup Report
+========================
+Generated: $(date)
+
+Installation Status:
+- TailwindCSS: $(npm list tailwindcss --depth=0 2>/dev/null | grep tailwindcss || echo "Not installed")
+- PostCSS: $(npm list postcss --depth=0 2>/dev/null | grep postcss || echo "Not installed")
+- Autoprefixer: $(npm list autoprefixer --depth=0 2>/dev/null | grep autoprefixer || echo "Not installed")
+
+Configuration Files:
+- tailwind.config.js: $([ -f "tailwind.config.js" ] && echo "✅ Present" || echo "❌ Missing")
+- postcss.config.js: $([ -f "postcss.config.js" ] && echo "✅ Present" || echo "❌ Missing")
+- CSS Entry Point: $(ls src/*.css styles/*.css 2>/dev/null | head -1 || echo "❌ Not found")
+
+Recommended Plugins:
+- @tailwindcss/typography: $(npm list @tailwindcss/typography >/dev/null 2>&1 && echo "✅ Installed" || echo "⚠️  Not installed")
+- @tailwindcss/forms: $(npm list @tailwindcss/forms >/dev/null 2>&1 && echo "✅ Installed" || echo "⚠️  Not installed")
+- @tailwindcss/aspect-ratio: $(npm list @tailwindcss/aspect-ratio >/dev/null 2>&1 && echo "✅ Installed" || echo "⚠️  Not installed")
+
+Package Scripts:
+$(npm run --silent 2>/dev/null | grep -E "(build|css|watch)" | sed 's/^/- /' || echo "- No relevant scripts found")
+
+Next Steps:
+1. Configure content paths in tailwind.config.js
+2. Set up your design system tokens
+3. Add dark mode support if needed
+4. Install recommended plugins as needed
+5. Set up build/watch scripts in package.json
+
+For detailed configuration examples, check the TailwindCSS documentation:
+https://tailwindcss.com/docs/installation
+EOF
+    
+    print_status $GREEN "✅ Setup report saved to $report_file"
+}
+
+# Main execution
+main() {
+    local start_time=$(date +%s)
+    
+    print_status $BLUE "🎨 TailwindCSS Post-Install Setup"
+    print_status $BLUE "=================================="
+    
+    # Run all setup tasks
+    check_tailwind_installation
+    verify_recommended_plugins
+    initialize_config
+    verify_postcss_config
+    optimize_package_scripts
+    create_css_entry
+    optimize_config
+    setup_dev_environment
+    generate_usage_report
+    
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+    
+    print_status $GREEN "✅ TailwindCSS post-install setup completed in ${duration}s"
+    print_status $BLUE "🚀 You're ready to start building with TailwindCSS!"
+    print_status $YELLOW "💡 Run 'cat .tailwindcss-setup-report.txt' to see your setup summary"
+}
+
+# Run the main function
+main

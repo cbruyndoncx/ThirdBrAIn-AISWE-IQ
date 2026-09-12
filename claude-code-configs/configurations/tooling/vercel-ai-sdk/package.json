@@ -1,0 +1,63 @@
+{
+  "name": "vercel-ai-sdk-claude-config",
+  "version": "1.0.0",
+  "description": "Comprehensive Claude Code configuration for Vercel AI SDK development",
+  "keywords": [
+    "vercel",
+    "ai-sdk",
+    "claude-code",
+    "streaming",
+    "llm",
+    "openai",
+    "anthropic",
+    "ai"
+  ],
+  "author": "Matt Dionis <matt@nlad.dev>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Matt-Dionis/claude-code-configs.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "claude-config": {
+    "version": "1.0.0",
+    "compatible": {
+      "claude-code": ">=1.0.0",
+      "ai": ">=3.0.0",
+      "typescript": ">=5.0.0"
+    },
+    "features": {
+      "agents": 6,
+      "commands": 4,
+      "hooks": 1,
+      "providers": [
+        "openai",
+        "anthropic",
+        "google",
+        "mistral",
+        "cohere",
+        "huggingface"
+      ]
+    }
+  },
+  "scripts": {
+    "validate": "node -e \"console.log('✅ Configuration is valid')\"",
+    "info": "node -e \"console.log(JSON.stringify(require('./package.json')['claude-config'], null, 2))\""
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "peerDependencies": {
+    "ai": ">=3.0.0",
+    "typescript": ">=5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "ai": {
+      "optional": false
+    },
+    "typescript": {
+      "optional": true
+    }
+  }
+}

@@ -1,0 +1,85 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output (TypeScript compilation)
+dist/
+build/
+*.tsbuildinfo
+
+# Only ignore JS files in src directory (not root for CLI entry)
+src/**/*.js
+src/**/*.js.map
+src/**/*.d.ts
+src/**/*.d.ts.map
+
+# Test artifacts
+coverage/
+.nyc_output/
+*.lcov
+test-results/
+.test-*/
+test-output/
+*.backup-*
+
+# Generated configurations (for testing)
+.generated/
+.claude-*/
+
+# Development files
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+debug-*.ts
+debug-*.js
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+.env.test
+.env.production
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+.cache/
+tmp/
+temp/
+
+# Package manager stores
+.npm/
+.yarn/
+.pnpm-store/
+
+# Generated configurations (copied from root during build)
+# This directory is created by build:configs script
+# The source of truth is in ../configurations/
+configurations/

@@ -1,0 +1,353 @@
+#!/bin/bash
+
+# TailwindCSS Pre-push Hook
+# Final checks before pushing code to ensure production-ready TailwindCSS usage
+
+set -e
+
+echo "🎨 Running TailwindCSS pre-push validation..."
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Function to print colored output
+print_status() {
+    local color=$1
+    local message=$2
+    echo -e "${color}${message}${NC}"
+}
+
+# Production build test
+test_production_build() {
+    print_status $BLUE "Testing production build..."
+    
+    # Check if build script exists
+    if npm run --silent 2>/dev/null | grep -q "build"; then
+        print_status $BLUE "Running production build test..."
+        
+        # Create a backup of current built files
+        if [[ -d "dist" ]]; then
+            mv dist dist.backup
+        fi
+        if [[ -d "build" ]]; then
+            mv build build.backup
+        fi
+        if [[ -d ".next" ]]; then
+            mv .next .next.backup
+        fi
+        
+        # Run build
+        if npm run build >/dev/null 2>&1; then
+            print_status $GREEN "✅ Production build successful"
+            
+            # Analyze build output
+            analyze_build_output
+        else
+            print_status $RED "❌ Production build failed"
+            
+            # Restore backups
+            restore_backups
+            exit 1
+        fi
+        
+        # Restore backups
+        restore_backups
+    else
+        print_status $YELLOW "⚠️  No build script found. Skipping production build test"
+    fi
+}
+
+# Restore backup directories
+restore_backups() {
+    [[ -d "dist.backup" ]] && rm -rf dist && mv dist.backup dist
+    [[ -d "build.backup" ]] && rm -rf build && mv build.backup build
+    [[ -d ".next.backup" ]] && rm -rf .next && mv .next.backup .next
+}
+
+# Analyze build output for CSS optimization
+analyze_build_output() {
+    print_status $BLUE "Analyzing CSS build output..."
+    
+    # Find CSS files in build output
+    local css_files=$(find dist build .next 2>/dev/null -name "*.css" -type f | head -5)
+    
+    if [[ -n "$css_files" ]]; then
+        local total_size=0
+        local file_count=0
+        
+        while IFS= read -r file; do
+            if [[ -f "$file" ]]; then
+                local size=$(wc -c < "$file")
+                local size_kb=$((size / 1024))
+                total_size=$((total_size + size))
+                file_count=$((file_count + 1))
+                
+                print_status $BLUE "📄 $(basename "$file"): ${size_kb}KB"
+                
+                # Warn about large CSS files
+                if [[ $size_kb -gt 200 ]]; then
+                    print_status $YELLOW "⚠️  Large CSS file detected (${size_kb}KB)"
+                    print_status $YELLOW "   Consider optimizing TailwindCSS configuration"
+                fi
+            fi
+        done <<< "$css_files"
+        
+        local total_kb=$((total_size / 1024))
+        print_status $GREEN "📊 Total CSS size: ${total_kb}KB across ${file_count} files"
+        
+        # Overall size warning
+        if [[ $total_kb -gt 500 ]]; then
+            print_status $RED "❌ CSS bundle too large (${total_kb}KB > 500KB)"
+            print_status $RED "   Optimize before pushing to production"
+            exit 1
+        elif [[ $total_kb -gt 300 ]]; then
+            print_status $YELLOW "⚠️  CSS bundle size is high (${total_kb}KB)"
+            print_status $YELLOW "   Consider optimization for better performance"
+        fi
+    else
+        print_status $YELLOW "⚠️  No CSS files found in build output"
+    fi
+}
+
+# Validate CSS purging effectiveness
+validate_purging() {
+    print_status $BLUE "Validating CSS purging effectiveness..."
+    
+    # Build CSS for analysis
+    if command -v npx >/dev/null 2>&1 && [[ -f "tailwind.config.js" ]]; then
+        # Create temporary input file
+        echo "@tailwind base; @tailwind components; @tailwind utilities;" > temp-input.css
+        
+        # Generate full CSS (no purging)
+        if npx tailwindcss -i temp-input.css -o temp-full.css >/dev/null 2>&1; then
+            local full_size=$(wc -c < temp-full.css)
+            
+            # Generate purged CSS (with content)
+            if npx tailwindcss -i temp-input.css -o temp-purged.css --minify >/dev/null 2>&1; then
+                local purged_size=$(wc -c < temp-purged.css)
+                local reduction_percent=$(( (full_size - purged_size) * 100 / full_size ))
+                
+                print_status $GREEN "✅ CSS purging reduces bundle by ${reduction_percent}%"
+                print_status $BLUE "   Full: $((full_size / 1024))KB → Purged: $((purged_size / 1024))KB"
+                
+                # Warn about ineffective purging
+                if [[ $reduction_percent -lt 70 ]]; then
+                    print_status $YELLOW "⚠️  Low purging effectiveness (${reduction_percent}%)"
+                    print_status $YELLOW "   Check content paths in tailwind.config.js"
+                fi
+            fi
+        fi
+        
+        # Cleanup temporary files
+        rm -f temp-input.css temp-full.css temp-purged.css
+    fi
+}
+
+# Security and best practices validation
+validate_security() {
+    print_status $BLUE "Validating security and best practices..."
+    
+    # Check for hardcoded values that might contain sensitive data
+    local suspicious_patterns=$(grep -r "class[Name]*=.*\(password\|token\|key\|secret\)" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null | head -3 || true)
+    
+    if [[ -n "$suspicious_patterns" ]]; then
+        print_status $YELLOW "⚠️  Suspicious patterns in class names:"
+        echo "$suspicious_patterns"
+    fi
+    
+    # Check for XSS-prone dynamic class generation
+    local dynamic_classes=$(grep -r "class[Name]*=.*\${.*}" src/ --include="*.jsx" --include="*.tsx" 2>/dev/null | wc -l)
+    
+    if [[ $dynamic_classes -gt 20 ]]; then
+        print_status $YELLOW "⚠️  High usage of dynamic class generation (${dynamic_classes} instances)"
+        print_status $YELLOW "   Ensure proper sanitization of user input"
+    fi
+    
+    print_status $GREEN "✅ Security validation completed"
+}
+
+# Performance impact analysis
+analyze_performance_impact() {
+    print_status $BLUE "Analyzing performance impact..."
+    
+    # Check for performance-impacting patterns
+    local heavy_animations=$(grep -r "animate-\(bounce\|ping\|pulse\|spin\)" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null | wc -l)
+    
+    if [[ $heavy_animations -gt 20 ]]; then
+        print_status $YELLOW "⚠️  High usage of animations (${heavy_animations} instances)"
+        print_status $YELLOW "   Consider performance impact on low-end devices"
+    fi
+    
+    # Check for layout-shifting utilities
+    local layout_shifts=$(grep -r "transition-\(width\|height\|padding\|margin\)" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null | wc -l)
+    
+    if [[ $layout_shifts -gt 10 ]]; then
+        print_status $YELLOW "⚠️  Layout-shifting transitions detected (${layout_shifts} instances)"
+        print_status $YELLOW "   May cause poor Cumulative Layout Shift (CLS) scores"
+    fi
+    
+    # Check for excessive gradient usage
+    local gradients=$(grep -r "gradient-to-\|from-\|via-\|to-" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null | wc -l)
+    
+    if [[ $gradients -gt 50 ]]; then
+        print_status $YELLOW "⚠️  Heavy gradient usage (${gradients} instances)"
+        print_status $YELLOW "   Consider performance impact and CSS bundle size"
+    fi
+    
+    print_status $GREEN "✅ Performance analysis completed"
+}
+
+# Browser compatibility check
+check_browser_compatibility() {
+    print_status $BLUE "Checking browser compatibility..."
+    
+    local config_file="tailwind.config.js"
+    if [[ -f "tailwind.config.ts" ]]; then
+        config_file="tailwind.config.ts"
+    fi
+    
+    # Check for modern CSS features that might need fallbacks
+    local modern_features=$(grep -r "\(backdrop-\|container\|aspect-\)" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null | wc -l)
+    
+    if [[ $modern_features -gt 0 ]]; then
+        print_status $YELLOW "⚠️  Modern CSS features detected (${modern_features} instances)"
+        print_status $YELLOW "   Verify browser support requirements"
+        
+        # Check for autoprefixer
+        if npm list autoprefixer >/dev/null 2>&1; then
+            print_status $GREEN "✅ Autoprefixer installed for vendor prefixes"
+        else
+            print_status $YELLOW "⚠️  Consider installing autoprefixer for better browser support"
+        fi
+    fi
+    
+    print_status $GREEN "✅ Browser compatibility check completed"
+}
+
+# Final accessibility audit
+final_accessibility_audit() {
+    print_status $BLUE "Running final accessibility audit..."
+    
+    # Check for proper focus management
+    local focus_traps=$(grep -r "focus-trap\|focus-within\|focus-visible" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null | wc -l)
+    
+    if [[ $focus_traps -eq 0 ]]; then
+        print_status $YELLOW "⚠️  No focus management utilities detected"
+        print_status $YELLOW "   Ensure proper keyboard navigation support"
+    else
+        print_status $GREEN "✅ Focus management utilities found"
+    fi
+    
+    # Check for color contrast considerations
+    local contrast_utilities=$(grep -r "contrast-\|brightness-" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null | wc -l)
+    
+    if [[ $contrast_utilities -gt 0 ]]; then
+        print_status $GREEN "✅ Color contrast utilities in use"
+    fi
+    
+    # Check for screen reader utilities
+    local sr_utilities=$(grep -r "sr-only\|not-sr-only" src/ --include="*.jsx" --include="*.tsx" --include="*.vue" --include="*.html" 2>/dev/null | wc -l)
+    
+    if [[ $sr_utilities -eq 0 ]]; then
+        print_status $YELLOW "⚠️  No screen reader utilities detected"
+        print_status $YELLOW "   Consider accessibility for screen reader users"
+    else
+        print_status $GREEN "✅ Screen reader utilities found"
+    fi
+    
+    print_status $GREEN "✅ Accessibility audit completed"
+}
+
+# Generate pre-push report
+generate_push_report() {
+    print_status $BLUE "Generating pre-push report..."
+    
+    local report_file=".tailwindcss-push-report.txt"
+    local timestamp=$(date)
+    
+    cat > "$report_file" << EOF
+TailwindCSS Pre-Push Report
+===========================
+Generated: $timestamp
+Branch: $(git branch --show-current 2>/dev/null || echo "unknown")
+Commit: $(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+Build Status:
+$(npm run build >/dev/null 2>&1 && echo "✅ Build successful" || echo "❌ Build failed")
+
+CSS Bundle Analysis:
+$(find dist build .next 2>/dev/null -name "*.css" -type f | while read file; do
+    if [[ -f "$file" ]]; then
+        echo "- $(basename "$file"): $(($(wc -c < "$file") / 1024))KB"
+    fi
+done | head -5 || echo "- No CSS files found")
+
+Code Quality Checks:
+- Long class strings: $(grep -r "class[Name]*=['\"][^'\"]*['\"]" src/ --include="*.jsx" --include="*.tsx" 2>/dev/null | sed -E 's/.*class[Name]*=["'\''`]([^"'\''`]*)["'\''`].*/\1/' | awk 'length($0) > 150' | wc -l | tr -d ' ')
+- Dynamic classes: $(grep -r "class[Name]*=.*\${.*}" src/ --include="*.jsx" --include="*.tsx" 2>/dev/null | wc -l | tr -d ' ')
+- Arbitrary values: $(grep -r "\[\w*\]" src/ --include="*.jsx" --include="*.tsx" 2>/dev/null | wc -l | tr -d ' ')
+
+Performance Metrics:
+- Animation utilities: $(grep -r "animate-" src/ --include="*.jsx" --include="*.tsx" 2>/dev/null | wc -l | tr -d ' ')
+- Layout transitions: $(grep -r "transition-\(width\|height\|padding\|margin\)" src/ 2>/dev/null | wc -l | tr -d ' ')
+- Gradient usage: $(grep -r "gradient-to-\|from-\|via-\|to-" src/ 2>/dev/null | wc -l | tr -d ' ')
+
+Accessibility Features:
+- Focus utilities: $(grep -r "focus-" src/ --include="*.jsx" --include="*.tsx" 2>/dev/null | wc -l | tr -d ' ')
+- Screen reader utilities: $(grep -r "sr-only\|not-sr-only" src/ 2>/dev/null | wc -l | tr -d ' ')
+
+Recommendations:
+$(if grep -r "class[Name]*=['\"][^'\"]*['\"]" src/ 2>/dev/null | sed -E 's/.*class[Name]*=["'\''`]([^"'\''`]*)["'\''`].*/\1/' | awk 'length($0) > 150' | head -1 >/dev/null 2>&1; then echo "- Consider component extraction for long utility combinations"; fi)
+$(if [[ $(grep -r "\[\w*\]" src/ 2>/dev/null | wc -l) -gt 10 ]]; then echo "- Consider adding custom utilities to config instead of arbitrary values"; fi)
+$(if [[ $(grep -r "animate-" src/ 2>/dev/null | wc -l) -gt 20 ]]; then echo "- Review animation usage for performance impact"; fi)
+
+Status: $(if npm run build >/dev/null 2>&1; then echo "✅ Ready for production"; else echo "❌ Issues detected - review before pushing"; fi)
+EOF
+    
+    print_status $GREEN "✅ Pre-push report saved to $report_file"
+    
+    # Show critical issues in console
+    if ! npm run build >/dev/null 2>&1; then
+        print_status $RED "❌ Build failures detected - see report for details"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Main execution
+main() {
+    local start_time=$(date +%s)
+    
+    print_status $BLUE "🎨 TailwindCSS Pre-Push Validation"
+    print_status $BLUE "===================================="
+    
+    # Run all validation tasks
+    test_production_build
+    validate_purging
+    validate_security
+    analyze_performance_impact
+    check_browser_compatibility
+    final_accessibility_audit
+    
+    # Generate final report
+    if generate_push_report; then
+        local end_time=$(date +%s)
+        local duration=$((end_time - start_time))
+        
+        print_status $GREEN "✅ All pre-push validations completed in ${duration}s"
+        print_status $BLUE "🚀 Code is ready for production push!"
+        print_status $YELLOW "📄 See .tailwindcss-push-report.txt for detailed analysis"
+    else
+        print_status $RED "❌ Pre-push validation failed"
+        print_status $RED "Fix issues before pushing to production"
+        exit 1
+    fi
+}
+
+# Run the main function
+main

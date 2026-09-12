@@ -1,0 +1,93 @@
+name: Publish to NPM
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./claude-config-composer
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ./claude-config-composer/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+            
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Run tests
+        run: npm test
+        
+      - name: Build project
+        run: npm run build
+        
+      - name: Validate configurations
+        run: node dist/cli.js list
+        
+      - name: Check package files
+        run: npm pack --dry-run
+        
+      - name: Publish to NPM
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: |
+            ## 🚀 New Release: ${{ github.ref_name }}
+            
+            ### 📦 Installation
+            ```bash
+            npx claude-config-composer@latest
+            ```
+            
+            ### ✨ What's New
+            - Check the changelog for detailed changes
+            - Updated configurations and bug fixes
+            - Performance improvements
+            
+            ### 🔧 Usage Examples
+            ```bash
+            # Full-stack Next.js
+            npx claude-config-composer nextjs-15 shadcn tailwindcss drizzle vercel-ai-sdk
+            
+            # AI Development
+            npx claude-config-composer vercel-ai-sdk drizzle
+            
+            # Interactive mode
+            npx claude-config-composer
+            ```
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

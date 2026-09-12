@@ -1,0 +1,63 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run dev:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm run lint:*)",
+      "Bash(npm run test:*)",
+      "Bash(npx shadcn@latest:*)",
+      "Bash(npx prettier:*)",
+      "Bash(npx eslint:*)",
+      "Write(components/**/*)",
+      "Write(app/**/*)",
+      "Write(src/**/*)",
+      "Write(lib/**/*)",
+      "Write(styles/**/*)",
+      "Read(components.json)",
+      "Read(package.json)",
+      "Read(tailwind.config.js)",
+      "Edit(tailwind.config.js)",
+      "Edit(components.json)"
+    ],
+    "deny": [
+      "Read(.env.production)",
+      "Read(.env.local)",
+      "Write(.env)",
+      "Bash(rm -rf:*)",
+      "Bash(npm publish:*)",
+      "Read(node_modules/**)",
+      "Write(node_modules/**)"
+    ]
+  },
+  "env": {
+    "NODE_ENV": "development",
+    "SHADCN_STYLE": "new-york",
+    "SHADCN_BASE_COLOR": "zinc"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx prettier --write",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "echo '🎨 shadcn/ui | $(basename $(pwd))'"
+  },
+  "_metadata": {
+    "name": "shadcn/ui",
+    "version": "1.0.0",
+    "category": "ui",
+    "generated": "2025-08-20T13:36:56.486Z",
+    "generator": "manual",
+    "note": "Official Claude Code configuration"
+  }
+}

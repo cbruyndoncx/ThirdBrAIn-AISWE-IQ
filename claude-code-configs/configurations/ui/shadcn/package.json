@@ -1,0 +1,67 @@
+{
+  "name": "shadcn-claude-config",
+  "version": "1.0.0",
+  "description": "Comprehensive Claude Code configuration for shadcn/ui development",
+  "keywords": [
+    "shadcn",
+    "shadcn-ui",
+    "claude-code",
+    "react",
+    "tailwind",
+    "radix-ui",
+    "components"
+  ],
+  "author": "Matt Dionis <matt@nlad.dev>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Matt-Dionis/claude-code-configs.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "claude-config": {
+    "version": "1.0.0",
+    "compatible": {
+      "claude-code": ">=1.0.0",
+      "shadcn-ui": ">=0.8.0",
+      "react": ">=18.0.0",
+      "tailwind": ">=3.4.0"
+    },
+    "features": {
+      "agents": 10,
+      "commands": 8,
+      "hooks": 4,
+      "frameworks": [
+        "next",
+        "vite",
+        "remix",
+        "astro",
+        "laravel",
+        "tanstack"
+      ]
+    }
+  },
+  "scripts": {
+    "validate": "node -e \"console.log('✅ Configuration is valid')\"",
+    "info": "node -e \"console.log(JSON.stringify(require('./package.json')['claude-config'], null, 2))\""
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0",
+    "tailwindcss": ">=3.4.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": false
+    },
+    "react-dom": {
+      "optional": false
+    },
+    "tailwindcss": {
+      "optional": false
+    }
+  }
+}

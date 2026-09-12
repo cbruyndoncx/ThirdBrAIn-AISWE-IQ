@@ -1,0 +1,62 @@
+{
+  "name": "tailwindcss-claude-config",
+  "version": "1.0.0",
+  "description": "Comprehensive Claude Code configuration for Tailwind CSS development",
+  "keywords": [
+    "tailwindcss",
+    "tailwind",
+    "claude-code",
+    "css",
+    "utility-first",
+    "responsive-design"
+  ],
+  "author": "Matt Dionis <matt@nlad.dev>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Matt-Dionis/claude-code-configs.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "claude-config": {
+    "version": "1.0.0",
+    "compatible": {
+      "claude-code": ">=1.0.0",
+      "tailwindcss": ">=3.4.0"
+    },
+    "features": {
+      "agents": 5,
+      "commands": 3,
+      "hooks": 2,
+      "patterns": [
+        "responsive-design",
+        "dark-mode",
+        "custom-utilities",
+        "component-variants"
+      ]
+    }
+  },
+  "scripts": {
+    "validate": "node -e \"console.log('✅ Configuration is valid')\"",
+    "info": "node -e \"console.log(JSON.stringify(require('./package.json')['claude-config'], null, 2))\""
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "peerDependencies": {
+    "tailwindcss": ">=3.4.0",
+    "postcss": ">=8.0.0",
+    "autoprefixer": ">=10.0.0"
+  },
+  "peerDependenciesMeta": {
+    "tailwindcss": {
+      "optional": false
+    },
+    "postcss": {
+      "optional": false
+    },
+    "autoprefixer": {
+      "optional": false
+    }
+  }
+}

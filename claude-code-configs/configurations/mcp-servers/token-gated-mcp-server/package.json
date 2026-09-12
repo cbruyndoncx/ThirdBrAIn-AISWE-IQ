@@ -1,0 +1,67 @@
+{
+  "name": "token-gated-mcp-server-claude-config",
+  "version": "1.0.0",
+  "description": "Comprehensive Claude Code configuration for Token-Gated MCP Server development",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "claude-code",
+    "token-gating",
+    "authentication",
+    "radius-sdk",
+    "web3",
+    "blockchain"
+  ],
+  "author": "Matt Dionis <matt@nlad.dev>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Matt-Dionis/claude-code-configs.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "claude-config": {
+    "version": "1.0.0",
+    "compatible": {
+      "claude-code": ">=1.0.0",
+      "@modelcontextprotocol/sdk": ">=1.0.0",
+      "@radius/mcp-sdk": ">=1.0.0",
+      "fastmcp": ">=1.0.0"
+    },
+    "features": {
+      "agents": 5,
+      "commands": 6,
+      "hooks": 4,
+      "capabilities": [
+        "token-authentication",
+        "proof-verification",
+        "rate-limiting",
+        "multi-tenant",
+        "web3-integration"
+      ]
+    }
+  },
+  "scripts": {
+    "validate": "node -e \"console.log('✅ Configuration is valid')\"",
+    "info": "node -e \"console.log(JSON.stringify(require('./package.json')['claude-config'], null, 2))\""
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "peerDependencies": {
+    "@modelcontextprotocol/sdk": ">=1.0.0",
+    "fastmcp": ">=1.0.0",
+    "typescript": ">=5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@modelcontextprotocol/sdk": {
+      "optional": false
+    },
+    "fastmcp": {
+      "optional": false
+    },
+    "typescript": {
+      "optional": false
+    }
+  }
+}

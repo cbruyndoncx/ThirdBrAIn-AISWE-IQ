@@ -1,0 +1,119 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "MultiEdit",
+      "Grep",
+      "Glob",
+      "LS",
+      "NotebookEdit",
+      "NotebookRead",
+      "TodoWrite",
+      "WebSearch",
+      "WebFetch",
+      "Bash(npm run dev*)",
+      "Bash(npm run build*)",
+      "Bash(npm run test*)",
+      "Bash(npm run lint*)",
+      "Bash(npm run typecheck*)",
+      "Bash(npm install*)",
+      "Bash(npm ci*)",
+      "Bash(npx tsx*)",
+      "Bash(npx fastmcp*)",
+      "Bash(ngrok http*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(curl https://rpc.testnet.radiustech.xyz*)",
+      "Bash(echo $EVMAUTH*)",
+      "Bash(docker build*)",
+      "Bash(docker run*)"
+    ],
+    "deny": [
+      "Read(**/*private*key*)",
+      "Read(**/*.env.production)",
+      "Read(**/*secret*)",
+      "Write(**/*private*key*)",
+      "Write(**/*.env.production)",
+      "Write(**/*secret*)",
+      "Bash(rm -rf*)",
+      "Bash(npm publish*)",
+      "Bash(curl -X POST*)",
+      "Bash(curl -X PUT*)",
+      "Bash(curl -X DELETE*)"
+    ],
+    "additionalDirectories": []
+  },
+  "env": {
+    "EVMAUTH_CONTRACT_ADDRESS": "0x5448Dc20ad9e0cDb5Dd0db25e814545d1aa08D96",
+    "EVMAUTH_CHAIN_ID": "1223953",
+    "EVMAUTH_RPC_URL": "https://rpc.testnet.radiustech.xyz",
+    "EVMAUTH_TOKEN_ID": "1",
+    "NODE_ENV": "development",
+    "DEBUG": "false",
+    "RADIUS_TESTNET": "true"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "#!/bin/bash\nfile_path=$(echo \"$CLAUDE_HOOK_DATA\" | jq -r '.tool_input.file_path // empty')\nif [[ \"$file_path\" == *.ts || \"$file_path\" == *.tsx ]]; then\n  # Check if we're writing token configuration\n  if echo \"$CLAUDE_HOOK_DATA\" | jq -r '.tool_input.content // .tool_input.new_string // \"\"' | grep -q 'contractAddress\\|chainId\\|tokenId'; then\n    echo \"🔐 Token configuration detected - validating...\"\n    # Validate contract address format\n    if echo \"$CLAUDE_HOOK_DATA\" | grep -q '0x[a-fA-F0-9]\\{40\\}'; then\n      echo \"✅ Valid contract address format\"\n    else\n      echo \"⚠️  Warning: Invalid contract address format detected\"\n    fi\n  fi\nfi"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "#!/bin/bash\ncommand=$(echo \"$CLAUDE_HOOK_DATA\" | jq -r '.tool_input.command')\n# Log FastMCP and ngrok commands for debugging\nif [[ \"$command\" == *\"fastmcp\"* ]] || [[ \"$command\" == *\"ngrok\"* ]]; then\n  echo \"[Token-Gate Debug] Running: $command\" >> ~/.claude/token-gate-debug.log\nfi"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "#!/bin/bash\nfile_path=$(echo \"$CLAUDE_HOOK_DATA\" | jq -r '.tool_input.file_path // empty')\n# Auto-format TypeScript files\nif [[ \"$file_path\" == *.ts || \"$file_path\" == *.tsx ]]; then\n  if command -v npx &> /dev/null && [ -f \"package.json\" ]; then\n    npx prettier --write \"$file_path\" 2>/dev/null || true\n  fi\nfi\n# Validate token-gating implementation\nif [[ \"$file_path\" == *server.ts* ]] || [[ \"$file_path\" == *index.ts* ]]; then\n  if grep -q 'radius.protect' \"$file_path\"; then\n    echo \"✅ Token protection detected in $file_path\"\n  fi\nfi"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "#!/bin/bash\n# Check if debug mode is still enabled\nif [ \"$DEBUG\" = \"true\" ]; then\n  echo \"⚠️  Reminder: Debug mode is enabled. Disable before production deployment!\"\nfi\n# Check if using testnet\nif [ \"$RADIUS_TESTNET\" = \"true\" ]; then\n  echo \"ℹ️  Using Radius Testnet (Chain ID: 1223953)\"\nfi"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "#!/bin/bash\necho \"🔐 Token-Gated MCP | Chain: ${EVMAUTH_CHAIN_ID:-1223953} | Token: ${EVMAUTH_TOKEN_ID:-1} | ${NODE_ENV:-dev}\""
+  },
+  "model": "claude-3-5-sonnet-20241022",
+  "includeCoAuthoredBy": true,
+  "cleanupPeriodDays": 30,
+  "_metadata": {
+    "name": "Token-Gated MCP Server",
+    "version": "1.0.0",
+    "category": "mcp-server",
+    "generated": "2025-08-20T13:36:56.498Z",
+    "generator": "manual",
+    "note": "Official Claude Code configuration"
+  }
+}
