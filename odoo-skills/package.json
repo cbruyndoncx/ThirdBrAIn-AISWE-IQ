@@ -1,0 +1,44 @@
+{
+  "name": "@mart337i/odoo-skills",
+  "version": "0.1.0",
+  "description": "Agent skills for Odoo engineering, idea validation, architecture review, plan grilling, codebase orientation, OWL frontend work, and OCA migrations.",
+  "type": "commonjs",
+  "bin": {
+    "odoo-skills": "./bin/odoo-skills.js"
+  },
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "README.md",
+    "bin/",
+    "skills/"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "skills",
+    "odoo",
+    "oca",
+    "idea-validation",
+    "architecture",
+    "owl",
+    "code-review",
+    "migration",
+    "testing"
+  ],
+  "homepage": "https://github.com/mart337i/odoo-skills#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mart337i/odoo-skills.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mart337i/odoo-skills/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

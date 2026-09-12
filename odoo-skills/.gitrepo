@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/mart337i/odoo-skills.git
+	branch = main
+	commit = 326ad862a279b6549441b4a90928f528ef9b8bc1
+	parent = e16590de8f77cf989c2a8b3dedc085dc829e807f
+	method = merge
+	cmdver = 0.4.9
