@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/chongdashu/codex-extensions.git
+	branch = master
+	commit = 7e8e12ff8d02f424c12061c5d8ebb2ff2221e07f
+	parent = 3a3b2c4b877221a3748ce44327acd37088dd3f4c
+	method = merge
+	cmdver = 0.4.9
