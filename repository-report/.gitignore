@@ -1,0 +1,8 @@
+.editorconfig
+.env
+.keys
+.nvmrc
+.output
+.vscode
+node_modules
+npm-debug.log
