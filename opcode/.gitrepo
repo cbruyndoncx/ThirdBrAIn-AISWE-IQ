@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/winfunc/opcode.git
+	branch = main
+	commit = 70c16d8a4910db48cd9684aeacdd431caefd7d71
+	parent = 815202cc76a3c8eb8976848720b0ac0ae69b8ed0
+	method = merge
+	cmdver = 0.4.9
