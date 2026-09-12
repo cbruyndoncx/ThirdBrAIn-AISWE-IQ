@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/maguowei/starred.git
+	branch = main
+	commit = 1e2bb94f44c376e06f8515d7304404ef1c93d4ca
+	parent = 575921dcc1e8acaf2396b97114f533fa6e14532e
+	method = merge
+	cmdver = 0.4.9
