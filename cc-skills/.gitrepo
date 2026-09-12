@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/chongdashu/cc-skills.git
+	branch = main
+	commit = 08f1b3d786497aeaa317cf6f20732c69dfb4b329
+	parent = ab944ab271ef929de554059d6dc0e5086172b721
+	method = merge
+	cmdver = 0.4.9
