@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/grapeot/devin.cursorrules.git
+	branch = master
+	commit = 284b743cca749a290bfe726e2e40466d207d7c9b
+	parent = 9ce72e863229dcf45cc710b3422d8670b8275a8f
+	method = merge
+	cmdver = 0.4.9
