@@ -1,0 +1,139 @@
+patterns:
+- bashly [root options]
+- bashly init|i [init options]
+- bashly preview|p [preview options]
+- bashly validate|v [validate options]
+- bashly generate|build|g [generate options]
+- bashly add|a [add options] <library>
+- bashly doc [doc options] <doc>
+- bashly completions|c [completions options]
+- bashly render [render options] <render_source>
+- bashly shell|s [shell options]
+
+options:
+  root:
+    - --help|-h
+    - --version|-v
+  init:
+    - --help|-h
+    - --minimal|-m
+  preview:
+    - --help|-h
+  validate:
+    - --help|-h
+    - --verbose|-v
+  generate:
+    - --help|-h
+    - --env|-e <env>
+    - --force|-f
+    - --quiet|-q
+    - --upgrade|-u
+    - --watch|-w
+    - --wrap|-r <function>
+  add:
+    - --help|-h
+    - --force|-f
+    - --list|-l
+    - --source|-s <source>
+  doc:
+    - --help|-h
+    - --index|-i
+  completions:
+    - --help|-h
+    - --install|-i
+    - --uninstall|-u
+  render:
+    - --help|-h
+    - --watch|-w
+    - --show|-s <path>
+    - --list|-l
+    - --about|-a
+  shell:
+    - --help|-h
+
+tokens:
+  env:
+    - development
+    - production
+  function:
+  source:
+  path:
+  library:
+    - colors
+    - config
+    - help
+    - hooks
+    - ini
+    - lib
+    - render_markdown
+    - render_markdown_github
+    - render_mandoc
+    - settings
+    - stacktrace
+    - strings
+    - validations
+    - yaml
+  doc:
+    - arg
+    - arg.allowed
+    - arg.completions
+    - arg.default
+    - arg.help
+    - arg.name
+    - arg.repeatable
+    - arg.required
+    - arg.validate
+    - command
+    - command.alias
+    - command.args
+    - command.catch_all
+    - command.commands
+    - command.default
+    - command.dependencies
+    - command.environment_variables
+    - command.examples
+    - command.expose
+    - command.extensible
+    - command.filename
+    - command.filters
+    - command.flags
+    - command.footer
+    - command.function
+    - command.group
+    - command.help
+    - command.help_header_override
+    - command.name
+    - command.private
+    - command.variables
+    - command.version
+    - environment_variable
+    - environment_variable.default
+    - environment_variable.help
+    - environment_variable.name
+    - environment_variable.private
+    - environment_variable.required
+    - environment_variable.validate
+    - flag
+    - flag.alias
+    - flag.allowed
+    - flag.arg
+    - flag.completions
+    - flag.conflicts
+    - flag.default
+    - flag.help
+    - flag.long
+    - flag.needs
+    - flag.negatable
+    - flag.private
+    - flag.repeatable
+    - flag.required
+    - flag.short
+    - flag.unique
+    - flag.validate
+    - variable
+    - variable.name
+    - variable.value
+  render_source:
+    - ":mandoc"
+    - ":markdown"
+    - ":markdown_github"

@@ -1,0 +1,38 @@
+plugins:
+  - rubocop-performance
+  - rubocop-rspec
+
+inherit_gem:
+  rentacop:
+    - rentacop.yml
+    - rspec.yml
+
+AllCops:
+  TargetRubyVersion: 3.3
+  SuggestExtensions: false
+  Exclude:
+    - dev/**/*
+    - spec/fixtures/**/*
+
+# The `ConfigValidator` class is a DSL, let it be
+Metrics/AbcSize:              { Exclude: [lib/bashly/config_validator.rb] }
+Metrics/CyclomaticComplexity: { Exclude: [lib/bashly/config_validator.rb] }
+Metrics/PerceivedComplexity:  { Exclude: [lib/bashly/config_validator.rb] }
+Metrics/MethodLength:         { Exclude: [lib/bashly/config_validator.rb] }
+Style/GuardClause:            { Exclude: [lib/bashly/config_validator.rb] }
+
+# False positive report of invalid use of a method that starts with `set_`
+Naming/AccessorMethodName:
+  Exclude:
+    - 'lib/bashly/concerns/indentation_helper.rb'
+
+Metrics/ClassLength:
+  Exclude: 
+    - lib/bashly/config_validator.rb
+
+# Allow longer examples in some cases
+RSpec/ExampleLength:
+  Exclude:
+    - 'spec/bashly/integration/**/*'
+    - 'spec/bashly/libraries/render*'
+    - 'spec/bashly/script/command_spec.rb'

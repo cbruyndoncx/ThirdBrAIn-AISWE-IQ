@@ -1,0 +1,14 @@
+begin
+  require 'debug'
+rescue LoadError
+end
+
+require 'bashly/version'
+require_relative 'support/runfile/example'
+
+title   'Bashly Developer Toolbelt'
+summary 'Runfile tasks for building the Bashly gem'
+
+import_gem 'runfile-tasks/gem'
+import_gem 'runfile-tasks/docker', image: 'dannyben/bashly', version: Bashly::VERSION
+import 'support/runfile/*'

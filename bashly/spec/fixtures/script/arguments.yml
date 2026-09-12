@@ -1,0 +1,44 @@
+:basic_argument:
+  name: file
+
+:completions:
+  name: file
+  completions:
+    static: [README.md]
+    dynamic: [recent_files]
+    options: [files, no-space]
+
+:allowed:
+  name: file
+  allowed: [README.md]
+
+:required:
+  name: file
+  required: true
+
+:repeatable:
+  name: file
+  repeatable: true
+
+:default_string:
+  name: file
+  repeatable: false
+  default: spaced one
+
+:default_array:
+  name: file
+  repeatable: true
+  default: [spaced one, two]
+
+:default_string_with_repeatable:
+  name: file
+  repeatable: true
+  default: spaced one
+
+:validate_string:
+  name: file
+  validate: file_exists
+
+:validate_array:
+  name: file
+  validate: [file_exists, file_is_writable]

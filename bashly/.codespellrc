@@ -1,0 +1,3 @@
+[codespell]
+skip = CHANGELOG.md,coverage,Gemfile.lock,sublime*
+ignore-words-list = bu

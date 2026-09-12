@@ -1,0 +1,81 @@
+:basic_flag:
+  long: --help
+  short: -h
+  help: show this help
+
+:aliases:
+  long: --container
+  short: -c
+  alias: [--pod, -p]
+  arg: name
+
+:alias_string:
+  long: --container
+  alias: --pod
+
+:negatable:
+  long: --color
+  short: -c
+  negatable: true
+
+:negatable_with_alias:
+  long: --color
+  short: -c
+  alias: --colour
+  negatable: true
+
+:long_only:
+  long: --long
+
+:short_only:
+  short: -s
+
+:required:
+  long: --mandatory
+  required: true
+
+:repeatable:
+  long: --mandatory
+  repeatable: true
+
+:completions_allowed:
+  long: --protocol
+  short: -p
+  allowed: [ssh, sftp, https]
+
+:completions_completions:
+  long: --path
+  short: -p
+  arg: path
+  completions:
+    static: [README.md]
+    dynamic: [recent_files]
+    options: [files, no-space]
+
+:default_string:
+  long: --file
+  arg: path
+  repeatable: false
+  default: spaced one
+
+:default_array:
+  long: --file
+  arg: path
+  repeatable: true
+  default: [spaced one, two]
+
+:default_string_with_repeatable:
+  long: --file
+  arg: path
+  repeatable: true
+  default: spaced one
+
+:validate_string:
+  long: --file
+  arg: name
+  validate: file_exists
+
+:validate_array:
+  long: --file
+  arg: name
+  validate: [file_exists, file_is_writable]

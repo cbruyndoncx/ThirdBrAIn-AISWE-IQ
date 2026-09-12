@@ -1,0 +1,15 @@
+services:
+  bash:
+    build: .
+    command: bash
+    <<: &default
+      entrypoint: []
+      image: dannyben/bashly
+
+  bashly:
+    build: .
+    image: dannyben/bashly
+
+  pandoc-test:
+    <<: *default
+    command: sh -ec "command -v pandoc >/dev/null"

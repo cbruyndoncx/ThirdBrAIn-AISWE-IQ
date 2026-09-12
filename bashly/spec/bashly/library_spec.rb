@@ -1,0 +1,72 @@
+describe Library do
+  subject { LibrarySource.new.libraries[name] }
+
+  let(:name) { :colors }
+  let(:lib_dir) { 'lib/bashly/libraries/colors' }
+
+  describe '#files' do
+    it 'returns an array of hashes' do
+      expect(subject.files).to be_an Array
+      expect(subject.files.first).to be_a Hash
+    end
+
+    it 'returns the content and target paths of the library files' do
+      matter = subject.files.first
+      expect(matter.keys).to match_array %i[path content]
+      expect(matter[:path]).to eq "#{Settings.target_dir}/src/lib/colors.sh"
+      expect(matter[:content]).to eq File.read("#{lib_dir}/colors.sh")
+    end
+
+    context 'when the library has a custom handler' do
+      let(:name) { :help }
+
+      before { reset_tmp_dir example: 'minimal' }
+
+      it 'delegates the request to the custom handler' do
+        expect(subject.files).to contain_exactly(
+          path:    'spec/tmp/src/help_command.sh',
+          content: include('help_function=download_usage')
+        )
+      end
+    end
+  end
+
+  describe '#post_install_message' do
+    context 'when the library has no configured message' do
+      let(:name) { :config }
+
+      it 'returns nil' do
+        expect(subject.post_install_message).to be_nil
+      end
+    end
+
+    context 'when the library has a configured message' do
+      before { subject.config['post_install_message'] = 'the message' }
+      after { subject.config.delete 'post_install_message' }
+
+      it 'returns the message' do
+        expect(subject.post_install_message).to eq 'the message'
+      end
+    end
+
+    context 'when the library has a custom handler' do
+      let(:name) { :help }
+
+      before { reset_tmp_dir example: 'minimal' }
+
+      it 'returns the message from the custom handler' do
+        expect(subject.post_install_message).to include(
+          'Add this as a command to your bashly.yml:'
+        )
+      end
+    end
+  end
+
+  describe '#find_file' do
+    let(:path) { "#{Settings.target_dir}/src/lib/colors.sh" }
+
+    it 'returns a file from the library' do
+      expect(subject.find_file path).to be_a Hash
+    end
+  end
+end

@@ -1,0 +1,9 @@
+Display bash completions for bashly itself
+
+Usage:
+  bashly completions
+  bashly completions (-h|--help)
+
+Options:
+  -h --help
+    Show this help
