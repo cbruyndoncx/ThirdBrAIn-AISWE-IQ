@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/OpenHands/OpenHands.git
+	branch = main
+	commit = d149fb5a3f0d18e0450ebb3b3ff261dc715a91ee
+	parent = 9d0eeca98c9b60438f8f0b9622a4dd4364efbafd
+	method = merge
+	cmdver = 0.4.9
