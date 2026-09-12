@@ -1,0 +1,3350 @@
+---
+---
+
+/* GitHub Primer-Inspired Color Palette & Variables */
+:root {
+  --primary-color: #0969da;
+  --primary-dark: #0550ae;
+  --secondary-color: #656d76;
+  --accent-color: #8250df;
+  --warning-color: #bf8700;
+  --text-primary: #24292f;
+  --text-secondary: #656d76;
+  --text-muted: #8c959f;
+  --bg-primary: #ffffff;
+  --bg-secondary: #f6f8fa;
+  --bg-tertiary: #f1f3f4;
+  --bg-card: #ffffff;
+  --border-color: #d0d7de;
+  --border-light: #d8dee4;
+  --border-muted: #e1e4e8;
+}
+
+/* Base Reset & Typography */
+* {
+  box-sizing: border-box;
+}
+
+/* Skip Link for Accessibility */
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 0;
+  background: var(--primary-color);
+  color: #ffffff;
+  padding: 8px 16px;
+  z-index: 1000;
+  text-decoration: none;
+  font-weight: 500;
+  border-radius: 0 0 6px 0;
+  transition: top 0.2s ease;
+  
+  &:focus {
+    top: 0;
+    outline: 2px solid var(--primary-dark);
+    outline-offset: 2px;
+  }
+}
+
+/* Global Focus Indicators */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+/* Fix for sticky header covering anchor links */
+html {
+  scroll-padding-top: 0px; /* Header height + some buffer */
+  scroll-behavior: smooth;
+}
+
+body, h1, h2, h3, h4, h5, h6, p, blockquote, pre, hr, dl, dd, ol, ul, figure {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+  color: var(--text-primary);
+  line-height: 1.6;
+  background-color: var(--bg-primary);
+  display: flex;
+  min-height: 100vh;
+  flex-direction: column;
+}
+
+/* Layout */
+.wrapper {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+/* Content spacing improvements */
+.page-content {
+  background: var(--bg-primary);
+  margin-top: 0;
+  padding: 30px 0;
+  flex: 1;
+  
+  .wrapper {
+    padding-top: 24px;
+    padding-bottom: 40px;
+  }
+  
+  p {
+    margin-bottom: 16px;
+    line-height: 1.6;
+  }
+  
+  blockquote {
+    margin: 20px 0;
+  }
+  
+  section, .section {
+    margin-bottom: 32px;
+  }
+}
+
+/* Header Styling */
+.site-header {
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
+  position: relative;
+  min-height: 56px;
+}
+
+.site-title {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-size: 24px;
+  float: left;
+  text-decoration: none;
+  line-height: 56px;
+}
+
+.site-title:visited {
+  color: var(--text-primary);
+}
+
+.site-nav {
+  float: right;
+  line-height: 56px;
+  
+  .nav-trigger {
+    display: none;
+  }
+  
+  .menu-icon {
+    display: none;
+  }
+  
+  .trigger {
+    clear: none;
+    display: inline-block;
+    vertical-align: top;
+  }
+}
+
+.site-nav .page-link {
+  color: var(--text-secondary);
+  font-weight: 500;
+  padding: 8px 16px;
+  border-radius: 6px;
+  transition: all 0.2s ease;
+  display: inline-block;
+  margin-left: 4px;
+  text-decoration: none;
+}
+
+.site-nav .page-link:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+/* Typography */
+h1, h2, h3, h4, h5, h6 {
+  color: var(--text-primary);
+  font-weight: 700;
+  margin-top: 32px;
+  margin-bottom: 16px;
+  /* Additional scroll margin for anchor links */
+  scroll-margin-top: 80px;
+}
+
+.page-content h1:first-child,
+.page-content h2:first-child,
+.page-content h3:first-child {
+  margin-top: 0;
+}
+
+h1 {
+  font-size: 2.2rem;
+  line-height: 1.2;
+  color: var(--text-primary);
+  margin-bottom: 20px;
+}
+
+h2 {
+  font-size: 2rem;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-light);
+  padding-bottom: 8px;
+}
+
+h3 {
+  font-size: 1.375rem;
+  color: var(--text-primary);
+}
+
+/* Blockquotes & Code Styling */
+blockquote {
+  background: var(--bg-secondary);
+  border-left: 3px solid var(--primary-color);
+  border-radius: 0 6px 6px 0;
+  padding: 12px 16px;
+  margin: 16px 0;
+  font-style: normal;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+}
+
+blockquote p {
+  margin-bottom: 0;
+}
+
+blockquote strong {
+  color: var(--primary-color);
+}
+
+/* CLEAN CODE BLOCKS - No minima interference */
+/* Inline code - no borders, just background */
+code {
+  background: var(--bg-tertiary);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 0.875rem;
+  color: var(--text-primary);
+  font-weight: 500;
+  font-family: 'SFMono-Regular', 'Monaco', 'Inconsolata', 'Liberation Mono', 'Courier New', monospace;
+}
+
+/* Code blocks - with borders and proper spacing */
+pre {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  padding: 16px;
+  overflow-x: auto;
+  line-height: 1.45;
+  font-size: 14px;
+  margin: 16px 0;
+  font-family: 'SFMono-Regular', 'Monaco', 'Inconsolata', 'Liberation Mono', 'Courier New', monospace;
+}
+
+/* Code inside pre blocks should not have borders */
+pre code {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+  font-weight: inherit;
+}
+
+/* Enhanced styling for raw markdown syntax - Jekyll's rouge highlighter classes */
+.language-plaintext.highlighter-rouge {
+  /* Subtle styling for raw markdown/code syntax - more neutral */
+  background: var(--bg-tertiary) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: 4px !important;
+  padding: 3px 8px !important;
+  color: var(--text-secondary) !important;
+  font-weight: 600 !important;
+  font-size: 0.85rem !important;
+  
+  /* Very subtle shadow for distinction without color overload */
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05) !important;
+}
+
+/* Special styling for inline markdown syntax patterns */
+code.language-markdown,
+code[class*="markdown"] {
+  background: var(--bg-tertiary) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: 4px !important;
+  padding: 3px 8px !important;
+  color: var(--text-secondary) !important;
+  font-weight: 600 !important;
+  font-size: 0.85rem !important;
+}
+
+/* Links containing code elements - clean styling */
+.page-content a:not(.path-card):not(.path-link):not(.nav-main-link):not(.nav-sub-link):not(.edit-link):not(.btn-primary):not(.github-btn):not(.heading-link):not(.cta-button) code {
+  color: var(--primary-color);
+  text-decoration: none;
+}
+
+.page-content a:not(.path-card):not(.path-link):not(.nav-main-link):not(.nav-sub-link):not(.edit-link):not(.btn-primary):not(.github-btn):not(.heading-link):not(.cta-button):hover code {
+  color: var(--primary-dark);
+  text-decoration: none;
+}
+
+/* General link styling - only for content links, not navigation or buttons */
+.page-content a:not(.path-card):not(.path-link):not(.nav-main-link):not(.nav-sub-link):not(.edit-link):not(.btn-primary):not(.github-btn):not(.heading-link):not(.cta-button):not(.hero-cta) {
+  color: var(--primary-color);
+  text-decoration: underline;
+  text-decoration-color: var(--primary-color);
+}
+
+.page-content a:not(.path-card):not(.path-link):not(.nav-main-link):not(.nav-sub-link):not(.edit-link):not(.btn-primary):not(.github-btn):not(.heading-link):not(.cta-button):not(.hero-cta):hover {
+  color: var(--primary-dark);
+  text-decoration-color: var(--primary-dark);
+}
+
+.page-content a:not(.path-card):not(.path-link):not(.nav-main-link):not(.nav-sub-link):not(.edit-link):not(.btn-primary):not(.github-btn):not(.heading-link):not(.cta-button):not(.hero-cta):visited {
+  color: var(--primary-color);
+}
+
+/* CLEAN SYNTAX HIGHLIGHTING - No minima conflicts */
+.highlight {
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  margin: 16px 0;
+}
+
+.highlight pre {
+  background: transparent;
+  border: none;
+  margin: 0;
+  padding: 16px;
+}
+
+/* Simple, clean syntax colors */
+.highlight .c,
+.highlight .cm,
+.highlight .c1,
+.highlight .cs { 
+  color: var(--text-muted); 
+  font-style: italic; 
+}
+
+.highlight .k,
+.highlight .kd,
+.highlight .kn,
+.highlight .kp,
+.highlight .kr,
+.highlight .kt { 
+  color: #cf222e; 
+  font-weight: 600; 
+}
+
+.highlight .s,
+.highlight .sb,
+.highlight .sc,
+.highlight .s2,
+.highlight .sh,
+.highlight .s1 { 
+  color: #0a3069; 
+}
+
+.highlight .sx { 
+  color: #cf222e; 
+  font-weight: 500; 
+}
+
+.highlight .p { 
+  color: var(--text-primary); 
+}
+
+.highlight .nv { 
+  color: #953800; 
+  font-weight: 500; 
+}
+
+/* List Styling */
+ul, ol {
+  margin: 16px 0;
+  padding-left: 24px;
+}
+
+ul li, ol li {
+  margin-bottom: 8px;
+  line-height: 1.6;
+  padding-left: 4px;
+}
+
+ul ul, ol ol, ul ol, ol ul {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+
+/* Footer Styling */
+.site-footer {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border-color);
+  padding: 32px 0 24px 0;
+}
+
+.site-footer .footer-content {
+  text-align: center;
+}
+
+.site-footer .footer-contribute {
+  font-size: 0.9375rem;
+  color: var(--text-secondary);
+  margin: 0 0 12px 0;
+}
+
+.site-footer .footer-contribute a {
+  color: var(--text-primary);
+}
+
+.site-footer .footer-text {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.site-footer a {
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.site-footer a:hover {
+  color: var(--primary-color);
+}
+
+/* License Information Styling */
+.license-info {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-light);
+}
+
+.license-info p {
+  margin-bottom: 8px;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.license-info .license-details {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin-bottom: 12px;
+}
+
+.license-info .copyright {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.license-info a {
+  color: var(--primary-color);
+  text-decoration: underline;
+  text-decoration-color: var(--primary-color);
+}
+
+.license-info a:hover {
+  color: var(--primary-dark);
+  text-decoration-color: var(--primary-dark);
+}
+
+.prose-attribution {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 8px;
+}
+
+.prose-attribution strong {
+  color: var(--text-secondary);
+}
+
+/* Mermaid Diagram Styling */
+.mermaid {
+  text-align: center;
+  margin: 32px 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.diagram-container {
+  max-width: 800px;
+  margin: 32px auto;
+  text-align: center;
+  
+  .mermaid {
+    margin: 24px 0;
+  }
+}
+
+/* Mobile Responsiveness */
+@media screen and (max-width: 1024px) {
+  .diagram-container {
+    max-width: 90%;
+  }
+}
+
+/* Mobile Sidebar Toggle Button - Primer Design */
+.sidebar-toggle-btn {
+  display: none; /* Hidden by default on desktop */
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 1px 3px rgba(27, 31, 35, 0.12);
+}
+
+.sidebar-toggle-btn:hover {
+  background: var(--bg-secondary);
+  border-color: var(--border-light);
+}
+
+.sidebar-toggle-btn:focus {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+/* Hamburger Icon */
+.hamburger-icon {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 16px;
+  height: 12px;
+}
+
+.hamburger-line {
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
+  transition: all 0.3s ease;
+  transform-origin: center;
+}
+
+/* Hamburger animation when active */
+.sidebar-toggle-btn.active .hamburger-line:nth-child(1) {
+  transform: translateY(5px) rotate(45deg);
+}
+
+.sidebar-toggle-btn.active .hamburger-line:nth-child(2) {
+  opacity: 0;
+}
+
+.sidebar-toggle-btn.active .hamburger-line:nth-child(3) {
+  transform: translateY(-5px) rotate(-45deg);
+}
+
+/* Sidebar Header with Close Button */
+.sidebar-header {
+  display: none; /* Only show on mobile */
+  justify-content: flex-end;
+  align-items: center;
+  padding: 16px 16px 16px 16px;
+  border-bottom: 1px solid var(--border-light);
+  margin-bottom: 16px;
+  background: var(--bg-primary);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.sidebar-close-btn {
+  background: none;
+  border: none;
+  padding: 8px;
+  cursor: pointer;
+  color: var(--text-muted);
+  border-radius: 6px;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 32px;
+}
+
+.sidebar-close-btn:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.sidebar-close-btn:focus {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+.sidebar-close-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+/* Sidebar Backdrop */
+.sidebar-backdrop {
+  display: none;
+}
+
+/* Remove the grayed backdrop - Primer style is clean */
+body.sidebar-open .sidebar-backdrop {
+  display: none;
+}
+
+@media screen and (max-width: 768px) {
+  .wrapper {
+    padding: 0 16px;
+  }
+  
+  h1 {
+    font-size: 2rem;
+  }
+  
+  .diagram-container {
+    max-width: 100%;
+    margin: 24px auto;
+  }
+  
+  .diagram-container .mermaid {
+    margin: 16px 0;
+  }
+  
+  /* Show mobile toggle button in header */
+  .sidebar-toggle-btn {
+    display: inline-flex !important;
+  }
+  
+  /* Adjust header layout for mobile */
+  .site-header {
+    min-height: 56px;
+    position: relative;
+  }
+  
+  .site-header .wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  
+  .site-title {
+    font-size: 18px;
+    line-height: 56px;
+    max-width: 50%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  
+  .github-btn {
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+  
+  .github-btn .github-text {
+    display: none;
+  }
+  
+  .github-btn .octicon {
+    width: 14px;
+    height: 14px;
+  }
+  
+  /* MOBILE: Single column layout, sidebar as overlay only */
+  .docs-layout {
+    display: grid !important;
+    grid-template-columns: 1fr !important; /* Single column - no space for sidebar */
+    gap: 0 !important;
+    min-height: auto !important;
+    width: 100% !important;
+  }
+  
+  .docs-content {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    grid-column: 1 !important; /* Take the single column */
+  }
+  
+  .docs-sidebar {
+    /* COMPLETELY HIDDEN BY DEFAULT - not part of layout */
+    display: none !important;
+  }
+  
+  /* ONLY when hamburger is clicked - show as overlay */
+  body.sidebar-open .docs-sidebar {
+    display: block !important;
+    position: fixed !important;
+    top: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: 320px !important;
+    height: 100vh !important;
+    max-height: 100vh !important;
+    background: #ffffff !important;
+    border-left: 1px solid #d1d9e0 !important;
+    padding: 0 !important;
+    z-index: 1100 !important;
+    overflow-y: auto !important;
+    box-shadow: -8px 0 32px rgba(27, 31, 35, 0.12) !important;
+    /* Slide in animation */
+    animation: slideInFromRight 0.25s cubic-bezier(0.22, 0.61, 0.36, 1) !important;
+    /* Ensure it covers the full viewport */
+    min-height: 100vh !important;
+  }
+  
+  /* Show close button header on mobile */
+  body.sidebar-open .sidebar-header {
+    display: flex !important;
+  }
+  
+  /* Adjust nav padding when close button is visible */
+  body.sidebar-open .docs-nav {
+    padding: 0 24px 24px 24px !important;
+  }
+  
+  /* Add backdrop */
+  body.sidebar-open::before {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(27, 31, 35, 0.5);
+    z-index: 1099;
+    animation: fadeIn 0.25s ease-out;
+  }
+  
+  /* Prevent body scroll when sidebar is open - less intrusive method */
+  body.sidebar-open {
+    overflow: hidden;
+  }
+  
+  /* Style the mobile sidebar navigation with better typography */
+  body.sidebar-open .docs-sidebar nav {
+    padding-top: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+  }
+  
+  /* Better spacing and typography for nav sections */
+  body.sidebar-open .nav-section {
+    margin-bottom: 16px;
+  }
+  
+  body.sidebar-open .nav-main-link {
+    font-size: 15px;
+    font-weight: 600;
+    padding: 10px 12px;
+    color: #24292f;
+    border-radius: 6px;
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+  
+  body.sidebar-open .nav-main-link:hover {
+    background-color: #f6f8fa;
+    color: #24292f;
+  }
+  
+  body.sidebar-open .nav-main-link.current {
+    background-color: #0969da;
+    color: #ffffff;
+    font-weight: 600;
+  }
+  
+  body.sidebar-open .nav-sub-link {
+    font-size: 14px;
+    font-weight: 400;
+    padding: 6px 12px 6px 28px;
+    color: #656d76;
+    border-radius: 4px;
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+  
+  body.sidebar-open .nav-sub-link:hover {
+    background-color: #f6f8fa;
+    color: #24292f;
+  }
+  
+  body.sidebar-open .nav-sub-link.current {
+    background-color: #dbeafe;
+    color: #0969da;
+    font-weight: 500;
+  }
+  
+  .docs-page-header {
+    padding: 20px 16px 12px 16px !important;
+  }
+  
+  .docs-page-header h1 {
+    font-size: 1.75rem !important;
+  }
+  
+  .docs-content-inner {
+    padding: 20px 16px 32px 16px !important;
+  }
+  
+  .site-footer .footer-col-wrapper {
+    flex-direction: column;
+  }
+  
+  .site-footer .footer-col-1 {
+    margin-right: 0;
+  }
+  
+  .docs-page-header {
+    padding: 20px 16px 12px 16px !important;
+  }
+  
+  .docs-page-header h1 {
+    font-size: 1.75rem !important;
+  }
+  
+  .docs-content-inner {
+    padding: 20px 16px 32px 16px !important;
+  }
+  
+  .site-footer .footer-col-wrapper {
+    flex-direction: column;
+  }
+  
+  .site-footer .footer-col-1 {
+    margin-right: 0;
+  }
+}
+
+/* Slide-in animation for mobile sidebar */
+@keyframes slideInFromLeft {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes slideInFromRight {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Base Reset & Typography */
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif !important;
+  color: var(--text-primary) !important;
+  line-height: 1.6 !important;
+  background-color: var(--bg-primary) !important;
+}
+
+/* Layout Overrides */
+.wrapper {
+  max-width: 1200px !important;
+  margin: 0 auto !important;
+  padding: 0 20px !important;
+}
+
+/* Content spacing improvements */
+.page-content {
+  background: var(--bg-primary) !important;
+  margin-top: 0 !important;
+  
+  .wrapper {
+    padding-top: 24px !important;
+    padding-bottom: 40px !important;
+  }
+  
+  p {
+    margin-bottom: 12px !important;
+    line-height: 1.6 !important;
+  }
+  
+  /* Fix blockquote spacing */
+  blockquote {
+    margin: 16px 0 !important;
+  }
+  
+  /* Section spacing */
+  section, .section {
+    margin-bottom: 24px !important;
+  }
+}
+
+/* Header Styling */
+.site-header {
+  background: var(--bg-primary) !important;
+  border-bottom: 1px solid var(--border-color) !important;
+  border-top: none !important;
+  color: var(--text-primary) !important;
+  box-shadow: none !important;
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 100 !important;
+}
+
+.site-header .wrapper {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+}
+
+.site-title {
+  color: var(--text-primary) !important;
+  font-weight: 600 !important;
+  font-size: 24px !important;
+  text-decoration: none !important;
+  line-height: 56px !important;
+}
+
+.site-title:visited {
+  color: var(--text-primary) !important;
+}
+
+.header-right {
+  display: flex !important;
+  align-items: center !important;
+  gap: 16px !important;
+}
+
+/* Primary CTA Button - GitHub Primer style */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 16px;
+  background: var(--primary-color);
+  color: white;
+  text-decoration: none;
+  border-radius: 6px;
+  font-weight: 500;
+  font-size: 14px;
+  line-height: 1.4;
+  transition: background-color 0.2s ease;
+  border: 1px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-primary:hover {
+  background: var(--primary-dark);
+  color: white;
+  text-decoration: none;
+}
+
+.btn-primary:visited {
+  color: white;
+}
+
+.btn-primary:focus {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+/* GitHub Contribute Button */
+.github-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  text-decoration: none;
+  border-radius: 6px;
+  font-weight: 500;
+  font-size: 14px;
+  line-height: 1.4;
+  transition: all 0.2s ease;
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.github-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  text-decoration: none;
+  border-color: var(--border-light);
+}
+
+.github-btn:visited {
+  color: var(--text-primary);
+}
+
+.github-btn .octicon {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.github-btn .github-text {
+  font-weight: 500;
+}
+
+/* Documentation Layout - Primer inspired */
+.docs-layout {
+  display: grid !important;
+  grid-template-columns: 280px 1fr !important;
+  gap: 0 !important;
+  min-height: calc(100vh - 56px) !important;
+  background: var(--bg-primary) !important;
+}
+
+.docs-sidebar {
+  background: var(--bg-primary) !important;
+  border-right: 1px solid var(--border-color) !important;
+  padding: 24px 16px !important;
+  position: sticky !important;
+  top: 0 !important;
+  height: calc(100vh - 56px) !important;
+  overflow-y: auto !important;
+  z-index: 10 !important;
+}
+
+.docs-nav {
+  padding: 0 !important;
+}
+
+/* Navigation Sections - Primer-inspired elegant grouping */
+.nav-section {
+  margin-bottom: 12px !important;
+  position: relative !important;
+}
+
+/* Consistent compact spacing between all section groups - Primer style */
+.nav-section + .nav-section {
+  margin-top: 0 !important;
+}
+
+.nav-section-title {
+  margin: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  position: relative !important;
+  border-radius: 6px !important;
+  transition: background-color 0.1s ease !important;
+}
+
+.nav-section-title:hover {
+  background: var(--bg-secondary) !important;
+}
+
+/* Toggle Button - Refined Primer style */
+.nav-toggle {
+  background: none !important;
+  border: none !important;
+  padding: 8px !important;
+  cursor: pointer !important;
+  color: var(--text-muted) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  transition: color 0.1s ease !important;
+  flex-shrink: 0 !important;
+  border-radius: 4px !important;
+}
+
+.nav-toggle:hover {
+  color: var(--text-secondary) !important;
+  background: rgba(175, 184, 193, 0.1) !important;
+}
+
+.nav-toggle.expanded {
+  color: var(--text-secondary) !important;
+}
+
+.chevron-icon {
+  width: 12px !important;
+  height: 12px !important;
+  transition: transform 0.2s ease !important;
+}
+
+.nav-toggle.expanded .chevron-icon {
+  transform: rotate(90deg) !important;
+}
+
+/* Main Navigation Links - Primer design patterns */
+.nav-main-link {
+  color: var(--text-primary) !important;
+  text-decoration: none !important;
+  font-weight: 500 !important;
+  font-size: 14px !important;
+  display: flex !important;
+  align-items: center !important;
+  padding: 8px 12px !important;
+  border-radius: 6px !important;
+  transition: all 0.1s ease !important;
+  flex: 1 !important;
+  position: relative !important;
+  margin: 2px 4px !important;
+}
+
+.nav-main-link:hover {
+  color: var(--text-primary) !important;
+  background: var(--bg-secondary) !important;
+  text-decoration: none !important;
+}
+
+.nav-main-link:visited {
+  color: var(--text-primary) !important;
+}
+
+.nav-main-link.current {
+  color: var(--text-primary) !important;
+  background: var(--bg-secondary) !important;
+  font-weight: 600 !important;
+}
+
+.nav-main-link.current::before {
+  content: '' !important;
+  position: absolute !important;
+  left: -4px !important;
+  top: 2px !important;
+  bottom: 2px !important;
+  width: 3px !important;
+  background: var(--primary-color) !important;
+  border-radius: 0 2px 2px 0 !important;
+}
+
+.nav-icon {
+  margin-right: 8px !important;
+  font-size: 16px !important;
+  flex-shrink: 0 !important;
+  display: none !important; /* Hide emoji icons for professional look */
+}
+
+.nav-text {
+  flex: 1 !important;
+}
+
+/* Subsections - Clean, subtle grouping */
+.nav-subsection {
+  list-style: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: rgba(246, 248, 250, 0.5) !important;
+  border-radius: 0 0 6px 6px !important;
+  max-height: 0 !important;
+  overflow: hidden !important;
+  transition: max-height 0.2s ease !important;
+  margin: 0 4px !important;
+}
+
+.nav-subsection.expanded {
+  max-height: 300px !important;
+  padding: 4px 0 8px 0 !important;
+}
+
+.nav-subsection li {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.nav-sub-link {
+  color: var(--text-secondary) !important;
+  text-decoration: none !important;
+  font-size: 13px !important;
+  font-weight: 400 !important;
+  display: block !important;
+  padding: 4px 12px 4px 36px !important;
+  transition: all 0.1s ease !important;
+  border-radius: 4px !important;
+  margin: 1px 8px !important;
+  position: relative !important;
+  border-left: 2px solid transparent !important;
+}
+
+.nav-sub-link:hover {
+  color: var(--text-primary) !important;
+  background: rgba(246, 248, 250, 0.8) !important;
+  text-decoration: none !important;
+  border-left-color: var(--border-muted) !important;
+}
+
+.nav-sub-link:visited {
+  color: var(--text-secondary) !important;
+}
+
+.nav-sub-link:active,
+.nav-sub-link.current {
+  color: var(--text-primary) !important;
+  background: rgba(246, 248, 250, 0.8) !important;
+  border-left-color: var(--primary-color) !important;
+  font-weight: 500 !important;
+}
+
+/* Scrollbar Styling for Sidebar */
+.docs-sidebar::-webkit-scrollbar {
+  width: 6px !important;
+}
+
+.docs-sidebar::-webkit-scrollbar-track {
+  background: transparent !important;
+}
+
+.docs-sidebar::-webkit-scrollbar-thumb {
+  background: var(--border-muted) !important;
+  border-radius: 3px !important;
+}
+
+.docs-sidebar::-webkit-scrollbar-thumb:hover {
+  background: var(--border-color) !important;
+}
+
+.docs-content {
+  background: var(--bg-primary) !important;
+  padding: 0 !important;
+  overflow-x: hidden !important;
+}
+
+.docs-page-header {
+  padding: 32px 40px 20px 40px !important;
+  background: var(--bg-primary) !important;
+  border-bottom: 1px solid var(--border-light) !important;
+}
+
+.docs-page-header h1 {
+  margin: 0 !important;
+  font-size: 2.25rem !important;
+  font-weight: 600 !important;
+  color: var(--text-primary) !important;
+  line-height: 1.2 !important;
+}
+
+.docs-content-inner {
+  padding: 32px 40px !important;
+  max-width: none !important;
+  line-height: 1.6 !important;
+}
+
+/* Content Cards - Only for specific use cases */
+.content-card {
+  background: var(--bg-card);
+  border-radius: 12px;
+  padding: 32px 24px;
+  margin: 24px 0;
+  box-shadow: 0 1px 3px rgba(27, 31, 35, 0.12);
+  border: 1px solid var(--border-light);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  
+  &:hover {
+    border-color: var(--border-color);
+    box-shadow: 0 1px 3px rgba(27, 31, 35, 0.12), 0 8px 24px rgba(66, 74, 83, 0.12);
+  }
+
+  /* Fix spacing inside content cards */
+  > *:first-child {
+    margin-top: 0 !important;
+  }
+  
+  > *:last-child {
+    margin-bottom: 0 !important;
+  }
+}
+
+/* Typography Overrides - Tighter spacing */
+h1, h2, h3, h4, h5, h6 {
+  color: var(--text-primary) !important;
+  font-weight: 700 !important;
+  margin-top: 24px !important;
+  margin-bottom: 12px !important;
+  /* Additional scroll margin for anchor links */
+  scroll-margin-top: 80px !important;
+  position: relative !important;
+}
+
+/* GitHub-style anchor links for headings - High specificity to override conflicts */
+.docs-content-inner .heading-link {
+  text-decoration: none !important;
+  color: inherit !important;
+  display: flex !important;
+  align-items: center !important;
+  width: 100% !important;
+  
+  /* Ensure it looks like a normal heading, not a link */
+  &:hover {
+    text-decoration: none !important;
+    color: inherit !important;
+    
+    .heading-text {
+      text-decoration: underline !important;
+      color: inherit !important;
+    }
+    
+    .heading-anchor {
+      opacity: 1 !important;
+      visibility: visible !important;
+    }
+  }
+  
+  &:visited {
+    color: inherit !important;
+    text-decoration: none !important;
+  }
+  
+  &:active {
+    color: inherit !important;
+    text-decoration: none !important;
+  }
+}
+
+.docs-content-inner .heading-text {
+  flex: 1 !important;
+  text-decoration: none !important;
+  color: inherit !important;
+  font-weight: inherit !important;
+  font-size: inherit !important;
+}
+
+.docs-content-inner .heading-anchor {
+  margin-left: 8px !important;
+  opacity: 0 !important;
+  visibility: hidden !important;
+  transition: opacity 0.2s ease !important;
+  color: #656d76 !important; /* Light grey like GitHub */
+  display: inline-flex !important;
+  align-items: center !important;
+  padding: 4px !important;
+  border-radius: 4px !important;
+  position: relative !important;
+  z-index: 10 !important;
+  
+  svg {
+    width: 16px !important;
+    height: 16px !important;
+    fill: #656d76 !important; /* Light grey like GitHub */
+    display: block !important;
+  }
+  
+  /* Remove hover effects - keep same appearance */
+  &:hover {
+    color: #656d76 !important; /* Stay same grey */
+    background: transparent !important; /* No background change */
+    
+    svg {
+      fill: #656d76 !important; /* Stay same grey */
+    }
+  }
+}
+
+/* Ensure headings with anchor links have proper spacing and hover behavior */
+.docs-content-inner h1, 
+.docs-content-inner h2, 
+.docs-content-inner h3, 
+.docs-content-inner h4, 
+.docs-content-inner h5, 
+.docs-content-inner h6 {
+  display: block !important; /* Let the inner wrapper handle flex */
+  
+  &:hover {
+    cursor: pointer !important;
+  }
+}
+
+/* Fix first heading spacing */
+.page-content h1:first-child,
+.page-content h2:first-child,
+.page-content h3:first-child {
+  margin-top: 0 !important;
+}
+
+h1 {
+  font-size: 2.25rem !important;
+  font-weight: 600 !important;
+  color: var(--text-primary) !important;
+  line-height: 1.2 !important;
+  margin-bottom: 16px !important;
+}
+
+h2 {
+  font-size: 1.875rem !important;
+  color: var(--text-primary) !important;
+  border-bottom: 1px solid var(--border-light) !important;
+  padding-bottom: 6px !important;
+  margin-top: 32px !important;
+  margin-bottom: 16px !important;
+}
+
+/* Remove border only on h2 right after hero section */
+.hero-section + h2 {
+  border-bottom: none !important;
+  padding-bottom: 0 !important;
+  margin-top: 24px !important;
+}
+
+h3 {
+  font-size: 1.375rem !important;
+  color: var(--text-primary) !important;
+  margin-top: 20px !important;
+  margin-bottom: 10px !important;
+}
+
+/* Guide Sections Grid - Primer Inspired Clean Cards */
+.guide-sections {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)) !important;
+  gap: 20px !important;
+  margin: 32px 0 !important;
+}
+
+.guide-card {
+  background: var(--bg-card) !important;
+  border-radius: 8px !important;
+  padding: 24px !important;
+  border: 1px solid var(--border-light) !important;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease !important;
+  position: relative !important;
+}
+
+.guide-card:hover {
+  border-color: var(--border-color) !important;
+  box-shadow: 0 1px 3px rgba(27, 31, 35, 0.12), 0 8px 24px rgba(66, 74, 83, 0.12) !important;
+}
+
+.guide-title {
+  font-size: 1.125rem !important;
+  font-weight: 600 !important;
+  color: var(--text-primary) !important;
+  margin-bottom: 8px !important;
+  line-height: 1.25 !important;
+}
+
+.guide-description {
+  color: var(--text-secondary) !important;
+  margin-bottom: 20px !important;
+  line-height: 1.5 !important;
+  font-size: 0.875rem !important;
+}
+
+.guide-link {
+  display: inline-flex !important;
+  align-items: center !important;
+  color: var(--primary-color) !important;
+  text-decoration: none !important;
+  font-weight: 500 !important;
+  font-size: 0.875rem !important;
+  transition: color 0.2s ease !important;
+}
+
+.guide-link:hover {
+  color: var(--primary-dark) !important;
+  text-decoration: none !important;
+}
+
+.guide-link::after {
+  content: "→" !important;
+  margin-left: 6px !important;
+  transition: transform 0.2s ease !important;
+}
+
+.guide-card:hover .guide-link::after {
+  transform: translateX(2px) !important;
+}
+
+/* Learning Paths Grid */
+.learning-paths {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)) !important;
+  gap: 24px !important;
+  margin: 32px 0 !important;
+}
+
+.path-card {
+  background: var(--bg-card) !important;
+  border-radius: 12px !important;
+  padding: 32px 24px !important;
+  border: 1px solid var(--border-light) !important;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease !important;
+  position: relative !important;
+  display: block !important;
+  text-decoration: none !important;
+  color: inherit !important;
+  cursor: pointer !important;
+}
+
+.path-card:hover {
+  border-color: var(--border-color) !important;
+  box-shadow: 0 1px 3px rgba(27, 31, 35, 0.12), 0 8px 24px rgba(66, 74, 83, 0.12) !important;
+  transform: translateY(-2px) !important;
+  text-decoration: none !important;
+  color: inherit !important;
+}
+
+.path-card:visited {
+  color: inherit !important;
+  text-decoration: none !important;
+}
+
+.path-card:focus {
+  outline: 2px solid var(--primary-color) !important;
+  outline-offset: 2px !important;
+  text-decoration: none !important;
+}
+
+.path-title {
+  font-size: 1.125rem !important;
+  font-weight: 600 !important;
+  color: var(--text-primary) !important;
+  margin-bottom: 12px !important;
+  line-height: 1.25 !important;
+}
+
+.path-description {
+  color: var(--text-secondary) !important;
+  margin-bottom: 20px !important;
+  line-height: 1.5 !important;
+  font-size: 0.875rem !important;
+}
+
+.path-meta {
+  font-size: 0.75rem !important;
+  color: var(--text-muted) !important;
+  margin-bottom: 24px !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.5px !important;
+  font-weight: 500 !important;
+}
+
+.path-link {
+  display: inline-flex !important;
+  align-items: center !important;
+  color: var(--primary-color) !important;
+  text-decoration: none !important;
+  font-weight: 500 !important;
+  font-size: 0.875rem !important;
+  transition: color 0.2s ease !important;
+}
+
+.path-link::after {
+  content: "→" !important;
+  margin-left: 6px !important;
+  transition: transform 0.2s ease !important;
+}
+
+.path-card:hover .path-link {
+  color: var(--primary-dark) !important;
+}
+
+.path-card:hover .path-link::after {
+  transform: translateX(2px) !important;
+}
+
+/* Blockquotes & Code Styling */
+blockquote {
+  background: var(--bg-secondary) !important;
+  border-left: 3px solid var(--primary-color) !important;
+  border-radius: 0 6px 6px 0 !important;
+  padding: 12px 16px !important;
+  margin: 16px 0 !important;
+  font-style: normal !important;
+  color: var(--text-primary) !important;
+  font-size: 0.95rem !important;
+}
+
+blockquote p {
+  margin-bottom: 0 !important;
+}
+
+blockquote strong {
+  color: var(--primary-color) !important;
+}
+
+/* Inline code styling - no borders, just subtle background */
+code {
+  background: var(--bg-tertiary) !important;
+  border: none !important;
+  border-radius: 3px !important;
+  padding: 2px 6px !important;
+  font-size: 0.875rem !important;
+  color: var(--text-primary) !important;
+  font-weight: 500 !important;
+  font-family: 'SFMono-Regular', 'Monaco', 'Inconsolata', 'Liberation Mono', 'Courier New', monospace !important;
+}
+
+/* Code blocks styling - with borders for clear delineation */
+pre {
+  background: var(--bg-tertiary) !important;
+  border: 1px solid var(--border-light) !important;
+  border-radius: 6px !important;
+  padding: 16px !important;
+  overflow-x: auto !important;
+  box-shadow: none !important;
+  line-height: 1.45 !important;
+  font-size: 14px !important;
+  font-family: 'SFMono-Regular', 'Monaco', 'Inconsolata', 'Liberation Mono', 'Courier New', monospace !important;
+  margin: 16px 0 !important;
+}
+
+/* Code inside pre blocks should be clean */
+pre code {
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  font-size: inherit !important;
+  color: inherit !important;
+  font-weight: inherit !important;
+}
+
+/* Enhanced styling for raw markdown syntax - Rouge highlighter targeting */
+.language-plaintext.highlighter-rouge {
+  /* More neutral styling - uses existing gray tones for cleaner look */
+  background: var(--bg-tertiary) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: 4px !important;
+  padding: 3px 8px !important;
+  color: var(--text-secondary) !important;
+  font-weight: 600 !important;
+  font-size: 0.85rem !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05) !important;
+}
+
+/* Special styling for inline markdown syntax patterns */
+code.language-markdown,
+code[class*="markdown"] {
+  background: var(--bg-tertiary) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: 4px !important;
+  padding: 3px 8px !important;
+  color: var(--text-secondary) !important;
+  font-weight: 600 !important;
+  font-size: 0.85rem !important;
+}
+
+/* Links containing code elements - clean styling with proper color inheritance */
+.page-content a:not(.path-card):not(.path-link):not(.nav-main-link):not(.nav-sub-link):not(.edit-link):not(.btn-primary):not(.github-btn):not(.heading-link):not(.cta-button) code {
+  color: var(--primary-color) !important;
+  text-decoration: none !important;
+}
+
+.page-content a:not(.path-card):not(.path-link):not(.nav-main-link):not(.nav-sub-link):not(.edit-link):not(.btn-primary):not(.github-btn):not(.heading-link):not(.cta-button):hover code {
+  color: var(--primary-dark) !important;
+  text-decoration: none !important;
+}
+
+/* General link styling that works with GitHub Primer design - only for content, excluding navigation and buttons */
+.page-content a:not(.path-card):not(.path-link):not(.nav-main-link):not(.nav-sub-link):not(.edit-link):not(.btn-primary):not(.github-btn):not(.heading-link):not(.cta-button):not(.hero-cta) {
+  color: var(--primary-color) !important;
+  text-decoration: underline !important;
+  text-decoration-color: var(--primary-color) !important;
+}
+
+.page-content a:not(.path-card):not(.path-link):not(.nav-main-link):not(.nav-sub-link):not(.edit-link):not(.btn-primary):not(.github-btn):not(.heading-link):not(.cta-button):not(.hero-cta):hover {
+  color: var(--primary-dark) !important;
+  text-decoration-color: var(--primary-dark) !important;
+}
+
+.page-content a:not(.path-card):not(.path-link):not(.nav-main-link):not(.nav-sub-link):not(.edit-link):not(.btn-primary):not(.github-btn):not(.heading-link):not(.cta-button):not(.hero-cta):visited {
+  color: var(--primary-color) !important;
+}
+
+/* Clean up syntax highlighting - GitHub Primer style */
+.highlight {
+  background: var(--bg-tertiary) !important;
+  border-radius: 6px !important;
+  margin: 16px 0 !important;
+}
+
+.highlight pre {
+  background: transparent !important;
+  border: none !important;
+  margin: 0 !important;
+  padding: 16px !important;
+}
+
+/* COMPLETE OVERRIDE: Disable all default minima syntax highlighting */
+.highlight .c,
+.highlight .err,
+.highlight .k,
+.highlight .o,
+.highlight .cm,
+.highlight .cp,
+.highlight .c1,
+.highlight .cs,
+.highlight .gd,
+.highlight .gd .x,
+.highlight .ge,
+.highlight .gr,
+.highlight .gh,
+.highlight .gi,
+.highlight .gi .x,
+.highlight .go,
+.highlight .gp,
+.highlight .gs,
+.highlight .gu,
+.highlight .gt,
+.highlight .kc,
+.highlight .kd,
+.highlight .kn,
+.highlight .kp,
+.highlight .kr,
+.highlight .kt,
+.highlight .m,
+.highlight .s,
+.highlight .na,
+.highlight .nb,
+.highlight .nc,
+.highlight .no,
+.highlight .ni,
+.highlight .ne,
+.highlight .nf,
+.highlight .nn,
+.highlight .nt,
+.highlight .nv,
+.highlight .ow,
+.highlight .w,
+.highlight .mf,
+.highlight .mh,
+.highlight .mi,
+.highlight .mo,
+.highlight .sb,
+.highlight .sc,
+.highlight .sd,
+.highlight .s2,
+.highlight .se,
+.highlight .sh,
+.highlight .si,
+.highlight .sx,
+.highlight .sr,
+.highlight .s1,
+.highlight .ss,
+.highlight .bp,
+.highlight .vc,
+.highlight .vg,
+.highlight .vi,
+.highlight .il,
+.highlight .p {
+  /* Reset ALL possible visual artifacts */
+  display: inline !important;
+  border: none !important;
+  text-decoration: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  outline: none !important;
+  text-shadow: none !important;
+  vertical-align: baseline !important;
+  line-height: inherit !important;
+  font-style: normal !important;
+  font-weight: normal !important;
+}
+
+/* Now apply clean GitHub Primer syntax highlighting */
+.highlight .c,
+.highlight .cm,
+.highlight .c1,
+.highlight .cs { 
+  color: var(--text-muted) !important; 
+  font-style: italic !important; 
+} /* Comments */
+
+.highlight .k,
+.highlight .kd,
+.highlight .kn,
+.highlight .kp,
+.highlight .kr,
+.highlight .kt { 
+  color: #cf222e !important; 
+  font-weight: 600 !important; 
+} /* Keywords */
+
+.highlight .s,
+.highlight .sb,
+.highlight .sc,
+.highlight .s2,
+.highlight .sh,
+.highlight .s1 { 
+  color: #0a3069 !important; 
+} /* Strings */
+
+.highlight .sx { 
+  color: #cf222e !important; 
+  font-weight: 500 !important; 
+} /* Paths */
+
+.highlight .sb { 
+  color: #cf222e !important; 
+  font-weight: 500 !important; 
+} /* Code blocks */
+
+.highlight .p { 
+  color: var(--text-primary) !important; 
+} /* Punctuation */
+
+.highlight .nv { 
+  color: #953800 !important; 
+  font-weight: 500 !important; 
+} /* Variables */
+
+.highlight .lineno {
+  color: var(--text-muted) !important;
+  user-select: none !important;
+  margin-right: 8px !important;
+}
+
+/* List Styling - Fixed bullet points and spacing */
+ul, ol {
+  margin: 16px 0 !important;
+  padding-left: 24px !important;
+}
+
+/* Table styling and spacing */
+table {
+  margin: 16px 0 32px 0 !important;
+  border-collapse: collapse !important;
+  width: 100% !important;
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: 6px !important;
+  overflow: hidden !important;
+}
+
+table th,
+table td {
+  padding: 12px 16px !important;
+  border: 1px solid var(--border-light) !important;
+  text-align: left !important;
+  vertical-align: top !important;
+}
+
+table th {
+  background: var(--bg-secondary) !important;
+  font-weight: 600 !important;
+  color: var(--text-primary) !important;
+}
+
+table tr:nth-child(even) {
+  background: var(--bg-secondary) !important;
+}
+
+/* Add extra spacing after tables to prevent content from being too close */
+table + p,
+table + blockquote,
+table + div,
+table + h1,
+table + h2,
+table + h3,
+table + h4,
+table + h5,
+table + h6 {
+  margin-top: 32px !important;
+}
+
+ul li, ol li {
+  margin-bottom: 8px !important;
+  line-height: 1.6 !important;
+  padding-left: 4px !important;
+}
+
+/* Nested lists */
+ul ul, ol ol, ul ol, ol ul {
+  margin: 8px 0 !important;
+  padding-left: 20px !important;
+}
+
+/* Fix list spacing in content cards */
+.content-card ul,
+.content-card ol {
+  margin: 12px 0 !important;
+}
+
+.content-card li {
+  margin-bottom: 6px !important;
+}
+
+/* Footer Styling */
+.site-footer {
+  background: var(--bg-secondary) !important;
+  color: var(--text-secondary) !important;
+  border-top: 1px solid var(--border-color) !important;
+  border-bottom: none !important;
+  padding: 24px 0 !important;
+}
+
+.site-footer .footer-heading {
+  color: var(--text-primary) !important;
+  margin-bottom: 24px !important;
+}
+
+.site-footer .footer-col-wrapper {
+  margin-bottom: 0 !important;
+  display: flex !important;
+  flex-wrap: wrap !important;
+}
+
+.site-footer .footer-col-1 {
+  flex: 1 1 300px !important;
+  margin-right: 40px !important;
+  margin-bottom: 20px !important;
+}
+
+.site-footer .footer-col-2 {
+  flex: 2 1 400px !important;
+  margin-bottom: 20px !important;
+}
+
+.site-footer a {
+  color: var(--text-secondary) !important;
+  text-decoration: none !important;
+}
+
+.site-footer a:hover {
+  color: var(--text-primary) !important;
+}
+
+/* Author Information Styling */
+.author-info {
+  margin-bottom: 0 !important;
+}
+
+.author-info .author-name {
+  color: var(--text-primary) !important;
+  font-size: 1.1rem !important;
+  font-weight: 600 !important;
+  margin-bottom: 12px !important;
+  margin-top: 0 !important;
+}
+
+.credentials {
+  font-size: 0.9rem !important;
+  line-height: 1.4 !important;
+  margin-bottom: 16px !important;
+}
+
+.credentials .current-role {
+  margin-bottom: 8px !important;
+  color: var(--text-primary) !important;
+}
+
+.credentials .current-role strong {
+  color: var(--primary-color) !important;
+  font-weight: 600 !important;
+}
+
+.credentials .experience {
+  margin-bottom: 0 !important;
+  color: var(--text-secondary) !important;
+  font-style: italic !important;
+}
+
+/* Social Links Styling */
+.author-info .social-links {
+  margin-top: 0 !important;
+}
+
+.social-media-list {
+  list-style: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.social-media-list li {
+  display: inline-block !important;
+  margin-right: 16px !important;
+  margin-bottom: 8px !important;
+}
+
+.social-media-list a {
+  display: flex !important;
+  align-items: center !important;
+  color: var(--text-secondary) !important;
+  transition: color 0.2s ease !important;
+}
+
+.social-media-list a:hover {
+  color: var(--primary-color) !important;
+}
+
+.social-media-list .svg-icon {
+  width: 16px !important;
+  height: 16px !important;
+  margin-right: 6px !important;
+  fill: currentColor !important;
+}
+
+.social-media-list .username {
+  font-size: 0.9rem !important;
+}
+
+/* Site Description Enhancement */
+.site-description {
+  font-size: 0.9rem !important;
+  line-height: 1.5 !important;
+  margin-bottom: 12px !important;
+  margin-top: 0 !important;
+}
+
+.site-description strong {
+  color: var(--text-primary) !important;
+  font-weight: 600 !important;
+}
+
+.expertise-note {
+  font-size: 0.85rem !important;
+  color: var(--text-muted) !important;
+  font-style: italic !important;
+  margin-bottom: 0 !important;
+}
+
+/* Mermaid Diagram Styling */
+.mermaid {
+  text-align: center !important;
+  margin: 32px 0 !important;
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+}
+
+/* Ensure mermaid diagrams are responsive */
+.mermaid svg {
+  max-width: 100% !important;
+  height: auto !important;
+}
+
+/* Diagram container for controlled sizing */
+.diagram-container {
+  max-width: 500px !important;
+  margin: 32px auto !important;
+  text-align: center !important;
+  
+  .mermaid {
+    margin: 24px 0 !important;
+  }
+}
+
+/* Responsive diagram sizing */
+@media screen and (max-width: 1024px) {
+  .diagram-container {
+    max-width: 90% !important;
+  }
+}
+
+@media screen and (max-width: 768px) {
+  .diagram-container {
+    max-width: 100% !important;
+    margin: 24px auto !important;
+  }
+  
+  .diagram-container .mermaid {
+    margin: 16px 0 !important;
+  }
+}
+
+/* Mobile Responsiveness */
+@media screen and (max-width: 768px) {
+  .wrapper {
+    padding: 0 16px !important;
+  }
+  
+  h1 {
+    font-size: 2rem !important;
+  }
+  
+  .learning-paths {
+    grid-template-columns: 1fr !important;
+  }
+  
+  /* Guide sections mobile responsive */
+  .guide-sections {
+    grid-template-columns: 1fr !important;
+    gap: 16px !important;
+  }
+  
+  .guide-card {
+    padding: 20px !important;
+  }
+  
+  /* Fix mobile header layout - prevent overlap */
+  .site-header {
+    min-height: 56px !important;
+    position: relative !important;
+  }
+  
+  .site-header .wrapper {
+    flex-direction: row !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    position: relative !important;
+  }
+  
+  .site-title {
+    font-size: 18px !important;
+    line-height: 56px !important;
+    max-width: 50% !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+  }
+  
+  .header-right {
+    flex-shrink: 0 !important;
+    gap: 8px !important;
+  }
+  
+  .site-nav {
+    position: static !important;
+    line-height: 56px !important;
+    background: transparent !important;
+    border: none !important;
+    
+    .trigger {
+      display: inline-block !important;
+      padding: 0 !important;
+    }
+  }
+  
+  .site-nav .page-link {
+    padding: 4px 6px !important;
+    font-size: 0.75rem !important;
+    display: inline-block !important;
+    margin-left: 2px !important;
+  }
+  
+  .github-btn {
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+  
+  .github-btn .github-text {
+    display: none;
+  }
+  
+  .github-btn .octicon {
+    width: 14px;
+    height: 14px;
+  }
+  
+  /* Mobile Documentation Layout */
+  .docs-layout {
+    grid-template-columns: 1fr !important;
+    min-height: auto !important;
+  }
+  
+  .docs-sidebar {
+    position: static !important;
+    height: auto !important;
+    border-right: none !important;
+    border-bottom: 1px solid var(--border-color) !important;
+    padding: 8px 0 !important;
+    max-height: 60vh !important;
+    overflow-y: auto !important;
+  }
+  
+  .nav-section {
+    border-bottom: 1px solid var(--border-light) !important;
+  }
+  
+  .nav-main-link {
+    padding: 10px 16px 10px 8px !important;
+    font-size: 13px !important;
+  }
+  
+  .nav-toggle {
+    padding: 10px !important;
+  }
+  
+  .nav-subsection.expanded {
+    max-height: 200px !important;
+    padding: 4px 0 !important;
+  }
+  
+  .nav-sub-link {
+    padding: 4px 16px 4px 40px !important;
+    font-size: 12px !important;
+  }
+  
+  .docs-page-header {
+    padding: 20px 16px 12px 16px !important;
+  }
+  
+  .docs-page-header h1 {
+    font-size: 1.5rem !important;
+  }
+  
+  .docs-content-inner {
+    padding: 20px 16px 32px 16px !important;
+  }
+  
+  /* Mobile footer layout */
+  .site-footer .footer-col-wrapper {
+    flex-direction: column !important;
+  }
+  
+  .site-footer .footer-col-1 {
+    margin-right: 0 !important;
+  }
+}
+
+/* AI Native Development Maturity Timeline - Following Primer Card Design */
+.maturity-timeline {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 24px;
+  margin: 48px 0;
+  align-items: stretch;
+}
+
+.maturity-stage {
+  position: relative;
+}
+
+.stage-content {
+  background: var(--bg-card);
+  border-radius: 8px;
+  padding: 24px;
+  border: 1px solid var(--border-light);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.stage-content:hover {
+  border-color: var(--border-color);
+  box-shadow: 0 1px 3px rgba(27, 31, 35, 0.12), 0 8px 24px rgba(66, 74, 83, 0.12);
+}
+
+.stage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.stage-number {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 500;
+  font-size: 0.6875rem;
+  flex-shrink: 0;
+  border: 1px solid var(--border-muted);
+}
+
+.stage-label {
+  background: var(--accent-color);
+  color: white;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.maturity-from .stage-label {
+  background: var(--secondary-color);
+}
+
+.maturity-to .stage-label {
+  background: var(--primary-color);
+}
+
+.stage-content h3 {
+  margin: 0 0 4px 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.25;
+}
+
+.stage-subtitle {
+  margin: 0 0 16px 0;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
+
+.stage-points {
+  margin: 0 0 16px 0 !important;
+  padding-left: 0 !important;
+  list-style: none !important;
+  flex: 1;
+}
+
+.stage-points li {
+  margin-bottom: 6px !important;
+  padding-left: 0 !important;
+  position: relative;
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  list-style: none !important;
+}
+
+.stage-outcome {
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  padding: 12px;
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--text-primary);
+  border-left: 3px solid var(--border-muted);
+  line-height: 1.4;
+}
+
+.maturity-from .stage-outcome {
+  border-left-color: var(--secondary-color);
+  background: var(--bg-tertiary);
+}
+
+.maturity-to .stage-outcome {
+  border-left-color: var(--primary-color);
+  background: var(--bg-tertiary);
+}
+
+.timeline-connector {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  margin-top: 40px;
+}
+
+.connector-arrow {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  box-shadow: 0 1px 3px rgba(27, 31, 35, 0.08);
+  transition: all 0.15s ease;
+}
+
+.connector-arrow:hover {
+  border-color: var(--border-color);
+  color: var(--text-secondary);
+}
+
+/* Enhanced Code Styling - Primer Brand inspired */
+code {
+  background: #f6f8fa !important;
+  color: #24292f !important;
+  border-radius: 6px !important;
+  padding: 2px 6px !important;
+  font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace !important;
+  font-size: 0.85em !important;
+  border: 1px solid #d8dee4 !important;
+}
+
+pre {
+  background: #f6f8fa !important;
+  border: 1px solid #d8dee4 !important;
+  border-radius: 8px !important;
+  padding: 16px !important;
+  overflow-x: auto !important;
+  margin: 16px 0 !important;
+}
+
+pre code {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  font-size: 0.875rem !important;
+  color: #24292f !important;
+}
+
+/* CTA Buttons Section - GitHub Primer Style */
+.cta-buttons {
+  display: flex;
+  gap: 16px;
+  margin: 24px 0;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* Single CTA Button - Standalone usage */
+.cta-button,
+a.cta-button,
+.page-content a.cta-button {
+  display: inline-flex !important;
+  align-items: center !important;
+  padding: 10px 20px !important;
+  background: var(--primary-color) !important;
+  color: white !important;
+  text-decoration: none !important;
+  border-radius: 6px !important;
+  font-weight: 500 !important;
+  font-size: 0.875rem !important;
+  line-height: 1.4 !important;
+  transition: all 0.15s ease !important;
+  border: none !important;
+  cursor: pointer !important;
+  margin: 20px 0 !important;
+}
+
+.cta-button:hover,
+a.cta-button:hover,
+.page-content a.cta-button:hover {
+  background: var(--primary-dark) !important;
+  color: white !important;
+  text-decoration: none !important;
+}
+
+.cta-button:visited,
+a.cta-button:visited,
+.page-content a.cta-button:visited {
+  color: white !important;
+  text-decoration: none !important;
+}
+
+/* Ensure buttons inherit clean styling from parent container */
+.cta-buttons .btn-primary,
+.cta-buttons .github-btn {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  transition: all 0.2s ease;
+  border: none;
+  outline: none;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+/* Primary CTA Button with higher specificity to override conflicts */
+.page-content .cta-buttons .btn-primary,
+.cta-buttons .btn-primary {
+  padding: 8px 16px;
+  background: var(--primary-color);
+  color: white;
+  text-decoration: none;
+  border-radius: 6px;
+  font-weight: 500;
+  font-size: 14px;
+  line-height: 1.4;
+  transition: background-color 0.2s ease;
+  border: 1px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.page-content .cta-buttons .btn-primary:hover,
+.cta-buttons .btn-primary:hover {
+  background: var(--primary-dark);
+  color: white;
+  text-decoration: none;
+}
+
+.page-content .cta-buttons .btn-primary:visited,
+.cta-buttons .btn-primary:visited {
+  color: white;
+}
+
+/* GitHub Button with higher specificity */
+.page-content .cta-buttons .github-btn,
+.cta-buttons .github-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  text-decoration: none;
+  border-radius: 6px;
+  font-weight: 500;
+  font-size: 14px;
+  line-height: 1.4;
+  transition: all 0.2s ease;
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.page-content .cta-buttons .github-btn:hover,
+.cta-buttons .github-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  text-decoration: none;
+  border-color: var(--border-light);
+}
+
+.page-content .cta-buttons .github-btn:visited,
+.cta-buttons .github-btn:visited {
+  color: var(--text-primary);
+}
+
+.github-btn .octicon {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.github-btn .github-text {
+  font-weight: 500;
+}
+
+/* Force button styles to override any conflicting link styles */
+a.btn-primary,
+a.btn-primary:hover,
+a.btn-primary:visited,
+a.btn-primary:focus {
+  color: white !important;
+  text-decoration: none !important;
+  background: var(--primary-color) !important;
+}
+
+a.btn-primary:hover {
+  background: var(--primary-dark) !important;
+}
+
+a.github-btn,
+a.github-btn:hover,
+a.github-btn:visited,
+a.github-btn:focus {
+  color: var(--text-primary) !important;
+  text-decoration: none !important;
+  background: var(--bg-secondary) !important;
+  border: 1px solid var(--border-color) !important;
+}
+
+a.github-btn:hover {
+  background: var(--bg-tertiary) !important;
+  border-color: var(--border-light) !important;
+}
+
+@media (max-width: 768px) {
+  .cta-buttons {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  
+  .cta-buttons .btn-primary,
+  .cta-buttons .github-btn {
+    text-align: center;
+    justify-content: center;
+  }
+  
+  .github-btn {
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+  
+  .github-btn .github-text {
+    display: none;
+  }
+  
+  .github-btn .octicon {
+    width: 14px;
+    height: 14px;
+  }
+}
+
+/* Mobile responsive timeline */
+@media (max-width: 768px) {
+  .maturity-timeline {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+  
+  .timeline-connector {
+    margin-top: 0;
+    flex-direction: row;
+    height: auto;
+    justify-content: center;
+    padding: 8px 0;
+  }
+  
+  .connector-arrow {
+    transform: rotate(90deg);
+    width: 28px;
+    height: 28px;
+    font-size: 0.75rem;
+  }
+  
+  .stage-header {
+    margin-bottom: 12px;
+  }
+  
+  .stage-number {
+    width: 18px;
+    height: 18px;
+    font-size: 0.625rem;
+  }
+  
+  .stage-label {
+    font-size: 0.625rem;
+    padding: 3px 6px;
+  }
+  
+  .stage-content h3 {
+    font-size: 1rem;
+    margin-bottom: 6px;
+  }
+  
+  .stage-content {
+    padding: 20px;
+  }
+  
+  .stage-points li {
+    font-size: 0.8125rem;
+  }
+  
+  .stage-outcome {
+    font-size: 0.75rem;
+    padding: 10px;
+  }
+}
+
+/* ============================================
+   PROSE specification Hero Section
+   ============================================ */
+.hero-section {
+  text-align: center;
+  padding: 80px 24px 64px 24px;
+  margin: 0;
+  background: transparent;
+}
+
+.hero-section h1 {
+  font-size: 4rem !important;
+  font-weight: 700 !important;
+  color: var(--text-primary) !important;
+  margin: 0 0 16px 0 !important;
+  letter-spacing: -0.04em;
+  line-height: 1 !important;
+  border-bottom: none !important;
+}
+
+.hero-section .tagline {
+  font-size: 1.25rem;
+  color: var(--text-secondary);
+  max-width: 420px;
+  margin: 0 auto 32px auto;
+  line-height: 1.5;
+}
+
+/* Hero CTA Button */
+.hero-cta {
+  display: inline-block;
+  background: var(--primary-color);
+  color: #ffffff !important;
+  padding: 12px 24px;
+  border-radius: 6px;
+  font-size: 1rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background 0.15s ease;
+}
+
+.hero-cta:hover {
+  background: var(--primary-dark);
+  color: #ffffff !important;
+}
+
+.hero-cta:visited {
+  color: #ffffff !important;
+}
+
+/* Hero Meta */
+.hero-meta {
+  margin: 20px 0 0 0;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+/* Beyond Section */
+.beyond-section {
+  text-align: center;
+  padding: 40px 24px 48px 24px;
+}
+
+.beyond-title {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  margin: 0 0 12px 0;
+}
+
+.beyond-links {
+  font-size: 1rem;
+  margin: 0;
+}
+
+.beyond-links a {
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.beyond-links a:hover {
+  color: var(--primary-color);
+}
+
+.beyond-links .sep {
+  color: var(--border-color);
+  margin: 0 12px;
+}
+
+/* Mobile responsive hero */
+@media (max-width: 768px) {
+  .hero-section {
+    padding: 56px 20px 48px 20px;
+  }
+  
+  .hero-section h1 {
+    font-size: 2.75rem !important;
+  }
+  
+  .hero-section .tagline {
+    font-size: 1.125rem;
+    margin-bottom: 28px;
+  }
+  
+  .beyond-links {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .beyond-links .sep {
+    display: none;
+  }
+}
+
+/* ============================================
+   PROSE Maturity Model - Primer Style Horizontal
+   ============================================ */
+.maturity-model {
+  display: flex;
+  gap: 0;
+  margin: 24px 0;
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-card);
+}
+
+.maturity-level {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  border-right: 1px solid var(--border-light);
+  background: var(--bg-card);
+  transition: background 0.15s ease;
+}
+
+.maturity-level:last-child {
+  border-right: none;
+}
+
+.maturity-level:hover {
+  background: var(--bg-secondary);
+}
+
+.maturity-level .level-number {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  font-size: 0.75rem;
+  font-weight: 600;
+  flex-shrink: 0;
+  margin-bottom: 12px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-muted);
+}
+
+.maturity-level .level-content {
+  flex: 1;
+}
+
+.maturity-level .level-content h4 {
+  margin: 0 0 6px 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.3;
+}
+
+.maturity-level .level-content p {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+/* Mobile responsive maturity model */
+@media (max-width: 900px) {
+  .maturity-model {
+    flex-direction: column;
+    gap: 0;
+  }
+  
+  .maturity-level {
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 12px;
+    border-right: none;
+    border-bottom: 1px solid var(--border-light);
+    padding: 14px 16px;
+  }
+  
+  .maturity-level:last-child {
+    border-bottom: none;
+  }
+  
+  .maturity-level .level-number {
+    margin-bottom: 0;
+    width: 24px;
+    height: 24px;
+    font-size: 0.6875rem;
+  }
+  
+  .maturity-level .level-content h4 {
+    font-size: 0.8125rem;
+  }
+  
+  .maturity-level .level-content p {
+    font-size: 0.75rem;
+  }
+}
+
+/* ============================================
+   About Page - Minimal Design
+   ============================================ */
+.about-page {
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+/* Profile Section */
+.about-profile {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.profile-avatar {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  margin-bottom: 16px;
+}
+
+.about-profile h1 {
+  font-size: 1.75rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 8px 0;
+  border-bottom: none;
+}
+
+.profile-tagline {
+  font-size: 1rem;
+  color: var(--text-secondary);
+  margin: 0 0 12px 0;
+  line-height: 1.5;
+}
+
+.profile-role {
+  font-size: 0.9375rem;
+  color: var(--text-primary);
+  font-weight: 500;
+  margin: 0 0 4px 0;
+}
+
+.profile-history {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  margin: 0 0 16px 0;
+}
+
+.profile-links {
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+}
+
+.profile-links a {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.profile-links a:hover {
+  color: var(--primary-color);
+}
+
+/* Divider */
+.about-divider {
+  border: none;
+  border-top: 1px solid var(--border-light);
+  margin: 32px 0;
+}
+
+/* Content Section */
+.about-content h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 24px 0 12px 0;
+  border-bottom: none;
+}
+
+.about-content h2:first-child {
+  margin-top: 0;
+}
+
+.about-content p {
+  font-size: 0.9375rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin: 0 0 12px 0;
+}
+
+.about-content a {
+  color: var(--primary-color);
+  text-decoration: none;
+}
+
+.about-content a:hover {
+  text-decoration: underline;
+}
+
+/* Mobile */
+@media (max-width: 600px) {
+  .about-page {
+    padding: 0 16px;
+  }
+  
+  .profile-avatar {
+    width: 80px;
+    height: 80px;
+  }
+  
+  .about-profile h1 {
+    font-size: 1.5rem;
+  }
+}
+
+/* ============================================
+   Learning Journey - Minimal 3-Step Path
+   ============================================ */
+.learning-journey {
+  text-align: center;
+  padding: 0 24px 48px 24px;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.journey-intro {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 24px 0;
+}
+
+.journey-steps {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 32px;
+}
+
+.journey-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px 24px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  text-decoration: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  min-width: 160px;
+}
+
+.journey-step:hover {
+  border-color: var(--primary-color);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.step-number {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: var(--bg-secondary);
+  border-radius: 50%;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.journey-step:hover .step-number {
+  background: var(--primary-color);
+  color: #ffffff;
+}
+
+.step-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.step-desc {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+.step-arrow {
+  color: var(--border-color);
+  font-size: 1.25rem;
+  font-weight: 300;
+}
+
+.journey-more {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.journey-more a {
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.journey-more a:hover {
+  color: var(--primary-color);
+}
+
+/* Landing Footer - Minimal */
+.landing-footer {
+  text-align: center;
+  padding: 32px 24px;
+  border-top: 1px solid var(--border-light);
+  margin-top: 16px;
+}
+
+.landing-footer p {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.landing-footer a {
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+
+.landing-footer a:hover {
+  color: var(--primary-color);
+}
+
+/* Mobile responsive journey */
+@media (max-width: 768px) {
+  .journey-steps {
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .step-arrow {
+    transform: rotate(90deg);
+  }
+  
+  .journey-step {
+    width: 100%;
+    max-width: 280px;
+  }
+}
+
+/* ============================================
+   Phase 1 — Handbook funnel: announcement bar,
+   hero subtitle + dual CTA, positioning callout,
+   primitive grid, footer companion line.
+   ============================================ */
+
+.announcement-bar {
+  background: var(--primary-color, #0969da);
+  color: #ffffff;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.announcement-inner {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 10px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  position: relative;
+}
+
+.announcement-text {
+  margin: 0;
+  text-align: center;
+  color: #ffffff;
+}
+
+.announcement-text em {
+  font-style: italic;
+}
+
+.announcement-text a {
+  color: #ffffff !important;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  margin-left: 6px;
+  font-weight: 600;
+}
+
+.announcement-text a:hover {
+  text-decoration: none;
+}
+
+.announcement-close {
+  background: transparent;
+  border: none;
+  color: #ffffff;
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0.85;
+}
+
+.announcement-close:hover {
+  opacity: 1;
+}
+
+@media (max-width: 640px) {
+  .announcement-inner {
+    padding: 10px 36px 10px 16px;
+  }
+  .announcement-text {
+    font-size: 0.85rem;
+  }
+}
+
+/* Hero subtitle (between H1 and tagline) */
+.hero-section .hero-subtitle {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  max-width: 640px;
+  margin: 0 auto 12px auto;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+
+@media (max-width: 768px) {
+  .hero-section .hero-subtitle {
+    font-size: 1.2rem;
+  }
+}
+
+.hero-section .tagline {
+  max-width: 640px;
+}
+
+/* Dual CTA row */
+.hero-ctas {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.hero-cta--secondary {
+  background: transparent !important;
+  color: var(--primary-color) !important;
+  border: 1px solid var(--border-color, #d0d7de);
+}
+
+.hero-cta--secondary:hover {
+  background: var(--bg-subtle, #f6f8fa) !important;
+  color: var(--primary-color) !important;
+}
+
+.hero-cta--secondary:visited {
+  color: var(--primary-color) !important;
+}
+
+/* Positioning callout (book vs site) */
+.positioning-callout {
+  max-width: 760px;
+  margin: 24px auto 48px auto;
+  padding: 24px 28px;
+  background: var(--bg-subtle, #f6f8fa);
+  border: 1px solid var(--border-color, #d0d7de);
+  border-radius: 8px;
+}
+
+.positioning-lead {
+  margin: 0 0 10px 0;
+  font-size: 1.05rem;
+  color: var(--text-primary);
+}
+
+.positioning-body {
+  margin: 0;
+  font-size: 0.975rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+/* Primitive grid */
+.primitive-grid {
+  max-width: 1040px;
+  margin: 0 auto 56px auto;
+  padding: 0 20px;
+}
+
+.primitive-grid-title {
+  text-align: center;
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 0 0 24px 0;
+  color: var(--text-primary);
+  border-bottom: none !important;
+}
+
+.primitive-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+@media (max-width: 900px) {
+  .primitive-cards {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .primitive-cards {
+    grid-template-columns: 1fr;
+  }
+}
+
+.primitive-card {
+  background: #ffffff;
+  border: 1px solid var(--border-color, #d0d7de);
+  border-radius: 8px;
+  padding: 18px 20px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.primitive-card:hover {
+  border-color: var(--primary-color, #0969da);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.primitive-card h3 {
+  margin: 0 0 8px 0 !important;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: none !important;
+}
+
+.primitive-card p {
+  margin: 0;
+  font-size: 0.925rem;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.primitive-card a {
+  color: var(--primary-color);
+  text-decoration: none;
+}
+
+.primitive-card a:hover {
+  text-decoration: underline;
+}
+
+/* Footer companion line */
+.site-footer .footer-companion {
+  font-size: 0.95rem;
+  color: var(--text-primary);
+  margin: 0 0 8px 0;
+}
+
+.site-footer .footer-companion a {
+  font-weight: 600;
+}
+
+/* About page profile pointer */
+.about-profile .profile-pointer {
+  font-size: 0.95rem;
+  color: var(--text-secondary);
+  margin: 8px 0 16px 0;
+}
+
+.about-profile .profile-pointer a {
+  color: var(--primary-color);
+}

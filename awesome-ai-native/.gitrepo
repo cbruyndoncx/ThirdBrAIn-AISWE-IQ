@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/danielmeppiel/awesome-ai-native.git
+	branch = main
+	commit = 806779f4e3338f0bba9aade82dd06b1d655632c1
+	parent = f1668150fee0791e49fc68b3990f35e82f1ec931
+	method = merge
+	cmdver = 0.4.9

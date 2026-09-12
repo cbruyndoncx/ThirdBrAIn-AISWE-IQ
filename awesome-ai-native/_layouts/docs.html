@@ -1,0 +1,401 @@
+---
+layout: default
+---
+
+<div class="docs-layout">
+  <aside id="docs-sidebar" class="docs-sidebar">
+    <!-- Close button for mobile (Primer style) -->
+    <div class="sidebar-header">
+      <button id="sidebar-close" class="sidebar-close-btn" aria-label="Close navigation menu">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+          <path d="M6.697 6l3.651-3.651a.494.494 0 0 0-.697-.697L6 5.303 2.349 1.651a.494.494 0 0 0-.697.697L5.303 6 1.651 9.651a.494.494 0 0 0 .697.697L6 6.697l3.651 3.652a.494.494 0 0 0 .697-.697L6.697 6z"/>
+        </svg>
+      </button>
+    </div>
+    
+    <nav class="docs-nav" aria-label="Documentation navigation">
+      
+      <!-- Main Guide Section -->
+      <div class="nav-section">
+        <div class="nav-section-title">
+          <a href="{{ '/docs/' | relative_url }}" class="nav-main-link {% if page.url == '/docs/' %}current{% endif %}">
+            <span class="nav-text">Guide</span>
+          </a>
+        </div>
+      </div>
+
+      <!-- The Practice -->
+      <div class="nav-section">
+        <div class="nav-section-title">
+          <button class="nav-toggle {% if page.url contains '/concepts/' %}expanded{% endif %}"
+                  data-target="practice-section"
+                  aria-expanded="{% if page.url contains '/concepts/' %}true{% else %}false{% endif %}">
+            <svg class="chevron-icon" width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+              <path d="M4.5 3L7.5 6L4.5 9"></path>
+            </svg>
+          </button>
+          <a href="{{ '/docs/concepts/' | relative_url }}" class="nav-main-link {% if page.url contains '/concepts/' %}current{% endif %}">
+            <span class="nav-text">The Practice</span>
+          </a>
+        </div>
+        <ul class="nav-subsection {% if page.url contains '/concepts/' %}expanded{% endif %}" id="practice-section">
+          <li><a href="{{ '/docs/concepts/' | relative_url }}#how-the-practice-implements-prose" class="nav-sub-link">How It Implements PROSE</a></li>
+          <li><a href="{{ '/docs/concepts/' | relative_url }}#discipline-1-prompt-engineering" class="nav-sub-link">1. Prompt Engineering</a></li>
+          <li><a href="{{ '/docs/concepts/' | relative_url }}#discipline-2-agent-primitives" class="nav-sub-link">2. Agent Primitives</a></li>
+          <li><a href="{{ '/docs/concepts/' | relative_url }}#discipline-3-context-engineering" class="nav-sub-link">3. Context Engineering</a></li>
+          <li><a href="{{ '/docs/concepts/' | relative_url }}#key-takeaways" class="nav-sub-link">Key Takeaways</a></li>
+        </ul>
+      </div>
+
+      <!-- Getting Started -->
+      <div class="nav-section">
+        <div class="nav-section-title">
+          <button class="nav-toggle {% if page.url contains '/getting-started/' %}expanded{% endif %}" 
+                  data-target="getting-started-section" 
+                  aria-expanded="{% if page.url contains '/getting-started/' %}true{% else %}false{% endif %}">
+            <svg class="chevron-icon" width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+              <path d="M4.5 3L7.5 6L4.5 9"></path>
+            </svg>
+          </button>
+          <a href="{{ '/docs/getting-started/' | relative_url }}" class="nav-main-link {% if page.url contains '/getting-started/' %}current{% endif %}">
+            <span class="nav-text">Getting Started</span>
+          </a>
+        </div>
+        <ul class="nav-subsection {% if page.url contains '/getting-started/' %}expanded{% endif %}" id="getting-started-section">
+          <li><a href="{{ '/docs/getting-started/' | relative_url }}#a-instructions-architecture" class="nav-sub-link">A. Instructions Architecture</a></li>
+          <li><a href="{{ '/docs/getting-started/' | relative_url }}#custom-agents-configuration" class="nav-sub-link">B. Custom Agents Configuration</a></li>
+          <li><a href="{{ '/docs/getting-started/' | relative_url }}#c-agentic-workflows" class="nav-sub-link">C. Agentic Workflows</a></li>
+          <li><a href="{{ '/docs/getting-started/' | relative_url }}#d-specification-templates" class="nav-sub-link">D. Specification Templates</a></li>
+          <li><a href="{{ '/docs/getting-started/' | relative_url }}#e-context-organization--discovery" class="nav-sub-link">E. Context Organization</a></li>
+          <li><a href="{{ '/docs/getting-started/' | relative_url }}#quick-start-checklist" class="nav-sub-link">Quick Start Checklist</a></li>
+        </ul>
+      </div>
+
+      <!-- Tooling -->
+      <div class="nav-section">
+        <div class="nav-section-title">
+          <button class="nav-toggle {% if page.url contains '/tooling/' %}expanded{% endif %}" 
+                  data-target="tooling-section" 
+                  aria-expanded="{% if page.url contains '/tooling/' %}true{% else %}false{% endif %}">
+            <svg class="chevron-icon" width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+              <path d="M4.5 3L7.5 6L4.5 9"></path>
+            </svg>
+          </button>
+          <a href="{{ '/docs/tooling/' | relative_url }}" class="nav-main-link {% if page.url contains '/tooling/' %}current{% endif %}">
+            <span class="nav-text">Tooling</span>
+          </a>
+        </div>
+        <ul class="nav-subsection {% if page.url contains '/tooling/' %}expanded{% endif %}" id="tooling-section">
+          <li><a href="{{ '/docs/tooling/' | relative_url }}#natural-language-as-code" class="nav-sub-link">Natural Language as Code</a></li>
+          <li><a href="{{ '/docs/tooling/' | relative_url }}#agent-cli-runtimes" class="nav-sub-link">Agent CLI Runtimes</a></li>
+          <li><a href="{{ '/docs/tooling/' | relative_url }}#runtime-management" class="nav-sub-link">Runtime Management</a></li>
+          <li><a href="{{ '/docs/tooling/' | relative_url }}#distribution-and-packaging" class="nav-sub-link">Distribution and Packaging</a></li>
+          <li><a href="{{ '/docs/tooling/' | relative_url }}#production-deployment" class="nav-sub-link">Production Deployment</a></li>
+          <li><a href="{{ '/docs/tooling/' | relative_url }}#ecosystem-evolution" class="nav-sub-link">Ecosystem Evolution</a></li>
+          <li><a href="{{ '/docs/tooling/' | relative_url }}#key-takeaways" class="nav-sub-link">Key Takeaways</a></li>
+        </ul>
+      </div>
+
+      <!-- Agent Delegation -->
+      <div class="nav-section">
+        <div class="nav-section-title">
+          <button class="nav-toggle {% if page.url contains '/agent-delegation/' %}expanded{% endif %}" 
+                  data-target="agent-delegation-section" 
+                  aria-expanded="{% if page.url contains '/agent-delegation/' %}true{% else %}false{% endif %}">
+            <svg class="chevron-icon" width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+              <path d="M4.5 3L7.5 6L4.5 9"></path>
+            </svg>
+          </button>
+          <a href="{{ '/docs/agent-delegation/' | relative_url }}" class="nav-main-link {% if page.url contains '/agent-delegation/' %}current{% endif %}">
+            <span class="nav-text">Agent Delegation</span>
+          </a>
+        </div>
+        <ul class="nav-subsection {% if page.url contains '/agent-delegation/' %}expanded{% endif %}" id="agent-delegation-section">
+          <li><a href="{{ '/docs/agent-delegation/' | relative_url }}#agentic-workflow-execution-example" class="nav-sub-link">Agentic Workflow Execution Example</a></li>
+          <li><a href="{{ '/docs/agent-delegation/' | relative_url }}#a-execution-strategy-selection" class="nav-sub-link">Execution Strategy Selection</a></li>
+          <li><a href="{{ '/docs/agent-delegation/' | relative_url }}#b-local-ide-execution" class="nav-sub-link">Local IDE Execution</a></li>
+          <li><a href="{{ '/docs/agent-delegation/' | relative_url }}#c-async-agent-delegation" class="nav-sub-link">Async Agent Delegation</a></li>
+          <li><a href="{{ '/docs/agent-delegation/' | relative_url }}#d-progress-monitoring--async-integration" class="nav-sub-link">Progress Monitoring & Async Integration</a></li>
+          <li><a href="{{ '/docs/agent-delegation/' | relative_url }}#e-hybrid-orchestration-strategies" class="nav-sub-link">Hybrid Orchestration Strategies</a></li>
+          <li><a href="{{ '/docs/agent-delegation/' | relative_url }}#f-tooling-enhanced-execution" class="nav-sub-link">Tooling-Enhanced Execution</a></li>
+          <li><a href="{{ '/docs/agent-delegation/' | relative_url }}#key-takeaways" class="nav-sub-link">Key Takeaways</a></li>
+        </ul>
+      </div>
+
+      <!-- Reference -->
+      <div class="nav-section">
+        <div class="nav-section-title">
+          <button class="nav-toggle {% if page.url contains '/reference/' %}expanded{% endif %}" 
+                  data-target="reference-section" 
+                  aria-expanded="{% if page.url contains '/reference/' %}true{% else %}false{% endif %}">
+            <svg class="chevron-icon" width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+              <path d="M4.5 3L7.5 6L4.5 9"></path>
+            </svg>
+          </button>
+          <a href="{{ '/docs/reference/' | relative_url }}" class="nav-main-link {% if page.url contains '/reference/' %}current{% endif %}">
+            <span class="nav-text">Reference</span>
+          </a>
+        </div>
+        <ul class="nav-subsection {% if page.url contains '/reference/' %}expanded{% endif %}" id="reference-section">
+          <li><a href="{{ '/docs/reference/' | relative_url }}#quick-start-checklist" class="nav-sub-link">Quick Start Checklist</a></li>
+          <li><a href="{{ '/docs/reference/' | relative_url }}#mastery-progression" class="nav-sub-link">Mastery Progression</a></li>
+          <li><a href="{{ '/docs/reference/' | relative_url }}#the-paradigm-shift" class="nav-sub-link">The Paradigm Shift</a></li>
+          <li><a href="{{ '/docs/reference/' | relative_url }}#documentation-references" class="nav-sub-link">Documentation References</a></li>
+          <li><a href="{{ '/docs/reference/' | relative_url }}#quick-troubleshooting" class="nav-sub-link">Quick Troubleshooting</a></li>
+          <li><a href="{{ '/docs/reference/' | relative_url }}#success-metrics-tracking" class="nav-sub-link">Success Metrics Tracking</a></li>
+          <li><a href="{{ '/docs/reference/' | relative_url }}#next-steps" class="nav-sub-link">Next Steps</a></li>
+        </ul>
+      </div>
+
+      <!-- Examples Section -->
+      <div class="nav-section">
+        <div class="nav-section-title">
+          <a href="{{ '/examples/' | relative_url }}" class="nav-main-link {% if page.url contains '/examples/' %}current{% endif %}">
+            <span class="nav-text">Examples</span>
+          </a>
+        </div>
+      </div>
+
+    </nav>
+  </aside>
+
+  <main class="docs-content">
+    <div class="docs-page-header">
+      <h1>{{ page.display_title | default: page.title }}</h1>
+    </div>
+    
+    <div class="docs-content-inner">
+      {{ content }}
+    </div>
+  </main>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  // Mobile sidebar toggle functionality
+  const toggleBtn = document.getElementById('sidebar-toggle');
+  const closeBtn = document.getElementById('sidebar-close');
+  const sidebar = document.getElementById('docs-sidebar');
+  
+  if (toggleBtn && sidebar) {
+    console.log('Mobile toggle elements found'); // Debug
+    
+    let isNavigatingToAnchor = false;
+    
+    // Toggle sidebar
+    const toggleSidebar = () => {
+      const isExpanded = toggleBtn.getAttribute('aria-expanded') === 'true';
+      const newState = !isExpanded;
+      
+      console.log('Toggling sidebar, new state:', newState); // Debug
+      
+      if (newState) {
+        // Opening sidebar
+        isNavigatingToAnchor = false; // Reset flag
+      }
+      
+      toggleBtn.setAttribute('aria-expanded', newState);
+      document.body.classList.toggle('sidebar-open', newState);
+      
+      // Update hamburger animation
+      toggleBtn.classList.toggle('active', newState);
+    };
+    
+    // Close sidebar
+    const closeSidebar = (skipScrollRestore = false) => {
+      console.log('Closing sidebar', { skipScrollRestore, isNavigatingToAnchor }); // Debug
+      toggleBtn.setAttribute('aria-expanded', 'false');
+      document.body.classList.remove('sidebar-open');
+      toggleBtn.classList.remove('active');
+    };
+    
+    // Toggle button click
+    toggleBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      console.log('Hamburger clicked'); // Debug
+      toggleSidebar();
+    });
+    
+    // Close button click
+    if (closeBtn) {
+      closeBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        console.log('Close button clicked'); // Debug
+        closeSidebar();
+      });
+    }
+    
+    // ESC key to close
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeSidebar();
+    });
+    
+    // Close on backdrop click
+    document.addEventListener('click', (e) => {
+      const sidebarOpen = document.body.classList.contains('sidebar-open');
+      if (sidebarOpen && !sidebar.contains(e.target) && !toggleBtn.contains(e.target)) {
+        closeSidebar();
+      }
+    });
+    
+    // Close sidebar when clicking on navigation links
+    sidebar.addEventListener('click', (e) => {
+      const link = e.target.closest('a');
+      if (link && (link.classList.contains('nav-main-link') || link.classList.contains('nav-sub-link'))) {
+        const href = link.getAttribute('href');
+        
+        // Check if it's an anchor link (either #anchor or ends with #anchor)
+        if (href && href.includes('#')) {
+          const hashIndex = href.indexOf('#');
+          const anchor = href.substring(hashIndex);
+          const currentPath = window.location.pathname;
+          const linkPath = href.substring(0, hashIndex);
+          
+          // Check if it's an anchor on the current page
+          if (anchor && (href.startsWith('#') || currentPath.includes(linkPath) || linkPath === '')) {
+            e.preventDefault(); // Prevent default anchor behavior
+            
+            // Set flag to indicate we're navigating to an anchor
+            isNavigatingToAnchor = true;
+            
+            // Close sidebar first without restoring scroll
+            closeSidebar(true);
+            
+            // Then scroll to the target after sidebar is closed
+            setTimeout(() => {
+              const target = document.querySelector(anchor);
+              if (target) {
+                target.scrollIntoView({ 
+                  behavior: 'smooth',
+                  block: 'start'
+                });
+                // Update URL hash
+                if (window.history && window.history.pushState) {
+                  window.history.pushState(null, null, anchor);
+                }
+              }
+              // Reset flag after navigation
+              isNavigatingToAnchor = false;
+            }, 300); // Wait for sidebar close animation
+            return; // Exit early for anchor links
+          }
+        }
+        
+        // For regular links (different pages), just close sidebar with small delay
+        setTimeout(() => {
+          closeSidebar();
+        }, 100);
+      }
+    });
+    
+    // Close on window resize to desktop size
+    window.addEventListener('resize', () => {
+      if (window.innerWidth > 768) {
+        closeSidebar();
+      }
+    });
+  } else {
+    console.log('Mobile toggle elements not found:', { toggleBtn, sidebar }); // Debug
+  }
+
+  // Initialize collapsible navigation
+  const toggleButtons = document.querySelectorAll('.nav-toggle');
+  
+  toggleButtons.forEach(button => {
+    button.addEventListener('click', function() {
+      const targetId = this.getAttribute('data-target');
+      const targetSection = document.getElementById(targetId);
+      const isExpanded = this.getAttribute('aria-expanded') === 'true';
+      
+      // Toggle the current section
+      this.setAttribute('aria-expanded', !isExpanded);
+      this.classList.toggle('expanded');
+      targetSection.classList.toggle('expanded');
+      
+      // Store the state in localStorage
+      const sectionKey = `nav-section-${targetId}`;
+      localStorage.setItem(sectionKey, !isExpanded);
+    });
+  });
+  
+  // Restore expanded state from localStorage on page load
+  toggleButtons.forEach(button => {
+    const targetId = button.getAttribute('data-target');
+    const sectionKey = `nav-section-${targetId}`;
+    const storedState = localStorage.getItem(sectionKey);
+    
+    // Only restore state if it's not the current page section (current page sections should always be expanded)
+    if (storedState !== null && !button.classList.contains('expanded')) {
+      const shouldExpand = storedState === 'true';
+      const targetSection = document.getElementById(targetId);
+      
+      button.setAttribute('aria-expanded', shouldExpand);
+      if (shouldExpand) {
+        button.classList.add('expanded');
+        targetSection.classList.add('expanded');
+      }
+    }
+  });
+
+  // Add GitHub-style anchor links to headings - with delay to ensure DOM is ready
+  setTimeout(function() {
+    const headings = document.querySelectorAll('.docs-content-inner h1[id], .docs-content-inner h2[id], .docs-content-inner h3[id], .docs-content-inner h4[id], .docs-content-inner h5[id], .docs-content-inner h6[id]');
+  
+  headings.forEach(heading => {
+    
+    try {
+      // Store original heading content
+      const originalContent = heading.innerHTML;
+      
+      // Create wrapper anchor for the entire heading
+      const headingWrapper = document.createElement('a');
+      headingWrapper.href = '#' + heading.id;
+      headingWrapper.className = 'heading-link';
+      headingWrapper.setAttribute('aria-label', 'Permalink to this heading');
+      headingWrapper.style.textDecoration = 'none';
+      headingWrapper.style.color = 'inherit';
+      headingWrapper.style.display = 'flex';
+      headingWrapper.style.alignItems = 'center';
+      headingWrapper.style.width = '100%';
+      
+      // Create the chain icon
+      const anchorIcon = document.createElement('span');
+      anchorIcon.className = 'heading-anchor';
+      anchorIcon.innerHTML = `
+        <svg class="octicon octicon-link" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+          <path fill-rule="evenodd" d="M7.775 3.275a.75.75 0 001.06 1.06l1.25-1.25a2 2 0 112.83 2.83l-2.5 2.5a2 2 0 01-2.83 0 .75.75 0 00-1.06 1.06 3.5 3.5 0 004.95 0l2.5-2.5a3.5 3.5 0 00-4.95-4.95l-1.25 1.25zm-4.69 9.64a2 2 0 010-2.83l2.5-2.5a2 2 0 012.83 0 .75.75 0 001.06-1.06 3.5 3.5 0 00-4.95 0l-2.5 2.5a3.5 3.5 0 004.95 4.95l1.25-1.25a.75.75 0 00-1.06-1.06l-1.25 1.25a2 2 0 01-2.83 0z"></path>
+        </svg>
+      `;
+      
+      // Create text span for the heading content
+      const textSpan = document.createElement('span');
+      textSpan.className = 'heading-text';
+      textSpan.innerHTML = originalContent;
+      
+      // Build the structure: wrapper > [text, icon]
+      headingWrapper.appendChild(textSpan);
+      headingWrapper.appendChild(anchorIcon);
+      
+      // Replace heading content with the wrapper
+      heading.innerHTML = '';
+      heading.appendChild(headingWrapper);
+      heading.style.display = 'block'; // Let the inner wrapper handle flex
+      
+      // Add hover behavior
+      headingWrapper.addEventListener('mouseenter', function() {
+        anchorIcon.style.setProperty('opacity', '1', 'important');
+        anchorIcon.style.setProperty('visibility', 'visible', 'important');
+        textSpan.style.setProperty('text-decoration', 'underline', 'important');
+      });
+      
+      headingWrapper.addEventListener('mouseleave', function() {
+        anchorIcon.style.setProperty('opacity', '0', 'important');
+        textSpan.style.setProperty('text-decoration', 'none', 'important');
+      });
+    } catch (error) {
+      console.error('Error adding anchor link to heading:', heading.textContent, error);
+    }
+  });
+  }, 1000); // Wait 1 second for other scripts to finish
+});
+</script>

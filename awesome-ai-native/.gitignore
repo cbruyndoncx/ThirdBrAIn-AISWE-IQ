@@ -1,0 +1,35 @@
+# Jekyll build files
+_site/
+.sass-cache/
+.jekyll-cache/
+.jekyll-metadata
+
+# Ruby/Bundler files
+vendor/
+.bundle/
+Gemfile.lock
+
+# macOS files
+.DS_Store
+
+# Editor files
+.vscode/
+*.swp
+*.swo
+
+# Node modules (if using npm for anything)
+node_modules/
+
+# Environment variables
+.env
+awesome-cop-*.md
+# PROSE draft working documents
+PROSE-v0.1-draft.md
+PROSE-evolution-guide.md
+
+
+# APM dependencies
+apm_modules/
+
+# Local working notes (not for publication)
+.local/
