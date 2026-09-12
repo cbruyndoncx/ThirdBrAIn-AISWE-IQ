@@ -1,0 +1,795 @@
+import * as path from 'path';
+import * as fs from 'fs/promises';
+import * as yaml from 'js-yaml';
+import { stringify as stringifyTOML } from '@iarna/toml';
+import {
+  RULER_SUBAGENTS_PATH,
+  CLAUDE_SUBAGENTS_PATH,
+  CURSOR_SUBAGENTS_PATH,
+  CODEX_SUBAGENTS_PATH,
+  COPILOT_SUBAGENTS_PATH,
+  logWarn,
+  logVerboseInfo,
+} from '../constants';
+import type { SubagentInfo, SubagentFrontmatter } from '../types';
+import { loadSubagentFile, mapToolsForCopilot } from './SubagentsUtils';
+import type { IAgent } from '../agents/IAgent';
+import { assertManagedPathInsideRoot } from './FileSystemUtils';
+
+const RULER_MANAGED_MANIFEST = '.ruler-managed.json';
+
+interface ManagedManifest {
+  version: 1;
+  paths: string[];
+}
+
+/**
+ * Discovers subagent definitions in `.ruler/agents/`.
+ * Each `.md` file is parsed for YAML frontmatter (name, description, …).
+ * Files that fail validation are dropped from the returned list and
+ * reported via warnings.
+ */
+export async function discoverSubagents(
+  projectRoot: string,
+): Promise<{ subagents: SubagentInfo[]; warnings: string[] }> {
+  const dir = path.join(projectRoot, RULER_SUBAGENTS_PATH);
+
+  try {
+    await fs.access(dir);
+  } catch {
+    return { subagents: [], warnings: [] };
+  }
+
+  const mdFiles = await listMarkdownFilesRecursive(dir);
+
+  const subagents: SubagentInfo[] = [];
+  const warnings: string[] = [];
+
+  for (const filePath of mdFiles) {
+    const info = await loadSubagentFile(filePath);
+    if (info.valid) {
+      info.sourceRelativePath = path.relative(dir, filePath);
+      subagents.push(info);
+    } else if (info.error) {
+      warnings.push(info.error);
+    }
+  }
+
+  return { subagents, warnings };
+}
+
+async function listMarkdownFilesRecursive(dir: string): Promise<string[]> {
+  const results: string[] = [];
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const nested = await listMarkdownFilesRecursive(fullPath);
+      results.push(...nested);
+      continue;
+    }
+    if (entry.isFile() && entry.name.endsWith('.md')) {
+      results.push(fullPath);
+    }
+  }
+  return results.sort();
+}
+
+type SubagentTarget = 'claude' | 'cursor' | 'codex' | 'copilot';
+
+const SUBAGENT_TARGET_TO_IDENTIFIERS = new Map<
+  SubagentTarget,
+  readonly string[]
+>([
+  ['claude', ['claude']],
+  ['cursor', ['cursor']],
+  ['codex', ['codex']],
+  ['copilot', ['copilot']],
+]);
+
+const SUBAGENT_TARGET_PATHS: Record<SubagentTarget, string> = {
+  claude: CLAUDE_SUBAGENTS_PATH,
+  cursor: CURSOR_SUBAGENTS_PATH,
+  codex: CODEX_SUBAGENTS_PATH,
+  copilot: COPILOT_SUBAGENTS_PATH,
+};
+
+/**
+ * Returns which native subagent targets are reachable through the supplied
+ * agent list. An agent only contributes to a target when it implements
+ * `supportsNativeSubagents()` returning true.
+ */
+export function getSelectedSubagentTargets(
+  agents: IAgent[],
+): Set<SubagentTarget> {
+  const enabledIdentifiers = new Set(
+    agents
+      .filter((agent) => agent.supportsNativeSubagents?.())
+      .map((agent) => agent.getIdentifier()),
+  );
+  const targets = new Set<SubagentTarget>();
+  for (const [target, identifiers] of SUBAGENT_TARGET_TO_IDENTIFIERS) {
+    if (identifiers.some((id) => enabledIdentifiers.has(id))) {
+      targets.add(target);
+    }
+  }
+  return targets;
+}
+
+/**
+ * Returns absolute paths that subagent propagation may generate, for the
+ * supplied agents, used for `.gitignore` integration.
+ */
+export async function getSubagentsGitignorePaths(
+  projectRoot: string,
+  agents: IAgent[],
+): Promise<string[]> {
+  const dir = path.join(projectRoot, RULER_SUBAGENTS_PATH);
+  try {
+    await fs.access(dir);
+  } catch {
+    return [];
+  }
+  const targets = getSelectedSubagentTargets(agents);
+  const { subagents } = await discoverSubagents(projectRoot);
+  if (subagents.length === 0) {
+    return [];
+  }
+
+  const generatedPaths = new Set<string>();
+  for (const target of targets) {
+    const targetPath = path.join(projectRoot, SUBAGENT_TARGET_PATHS[target]);
+    generatedPaths.add(path.join(targetPath, RULER_MANAGED_MANIFEST));
+    for (const subagent of subagents) {
+      const outputPath =
+        target === 'codex'
+          ? withExtension(getSourceRelativeMdPath(subagent), '.toml')
+          : getSourceRelativeMdPath(subagent);
+      generatedPaths.add(path.join(targetPath, outputPath));
+    }
+  }
+  return Array.from(generatedPaths);
+}
+
+/**
+ * Module-level state to track if experimental warning has been shown.
+ * Mirrors the SkillsProcessor convention to avoid spamming the user across
+ * multiple `apply` invocations within the same process.
+ */
+let hasWarnedExperimental = false;
+
+function warnOnceExperimental(dryRun: boolean): void {
+  if (hasWarnedExperimental) return;
+  hasWarnedExperimental = true;
+  logWarn(
+    'Subagents support is experimental and behavior may change in future releases.',
+    dryRun,
+  );
+}
+
+/**
+ * Test-only hook to reset the once-per-process experimental warning state.
+ */
+export function _resetExperimentalWarningForTests(): void {
+  hasWarnedExperimental = false;
+}
+
+/* ------------------------------------------------------------------ */
+/* Frontmatter helpers                                                 */
+/* ------------------------------------------------------------------ */
+
+function buildFrontmatterBlock(meta: Record<string, unknown>): string {
+  const yamlText = yaml.dump(meta, { lineWidth: -1, noRefs: true }).trimEnd();
+  return `---\n${yamlText}\n---\n`;
+}
+
+function ensureBodyFormatting(body: string | undefined): string {
+  const text = (body ?? '').replace(/^\n+/, '');
+  return text.endsWith('\n') ? text : `${text}\n`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Managed directory write                                             */
+/* ------------------------------------------------------------------ */
+
+function isSafeManagedRelativePath(relativePath: string): boolean {
+  return (
+    relativePath.length > 0 &&
+    !path.isAbsolute(relativePath) &&
+    !relativePath.split(path.sep).includes('..') &&
+    !relativePath.split('/').includes('..')
+  );
+}
+
+async function readManagedManifest(targetDir: string): Promise<string[]> {
+  try {
+    const content = await fs.readFile(
+      path.join(targetDir, RULER_MANAGED_MANIFEST),
+      'utf8',
+    );
+    const parsed = JSON.parse(content) as Partial<ManagedManifest>;
+    if (!Array.isArray(parsed.paths)) {
+      return [];
+    }
+    return parsed.paths.filter(
+      (entry): entry is string =>
+        typeof entry === 'string' && isSafeManagedRelativePath(entry),
+    );
+  } catch {
+    return [];
+  }
+}
+
+async function removeDirectoryIfEmpty(dirPath: string): Promise<void> {
+  try {
+    const entries = await fs.readdir(dirPath);
+    if (entries.length === 0) {
+      await fs.rmdir(dirPath);
+    }
+  } catch {
+    // Directory is missing or not empty; either state is fine.
+  }
+}
+
+async function removeEmptyParentsUntil(
+  boundaryDir: string,
+  startDir: string,
+): Promise<void> {
+  let current = startDir;
+  while (current !== boundaryDir && current.startsWith(boundaryDir)) {
+    await removeDirectoryIfEmpty(current);
+    const next = path.dirname(current);
+    if (next === current) {
+      return;
+    }
+    current = next;
+  }
+}
+
+async function removeManagedEntries(
+  targetDir: string,
+  managedPaths: string[],
+  projectRoot: string,
+): Promise<void> {
+  const sortedPaths = Array.from(new Set(managedPaths)).sort(
+    (a, b) => b.length - a.length,
+  );
+
+  for (const managedPath of sortedPaths) {
+    const outputPath = path.join(targetDir, managedPath);
+    await assertManagedPathInsideRoot(
+      outputPath,
+      projectRoot,
+      'Refusing to remove managed subagent entry through symlinked path',
+    );
+    await fs.rm(outputPath, { recursive: true, force: true });
+    await removeEmptyParentsUntil(targetDir, path.dirname(outputPath));
+  }
+}
+
+async function removeManagedManifest(
+  targetDir: string,
+  projectRoot: string,
+): Promise<void> {
+  const manifestPath = path.join(targetDir, RULER_MANAGED_MANIFEST);
+  await assertManagedPathInsideRoot(
+    manifestPath,
+    projectRoot,
+    'Refusing to remove subagents manifest through symlinked path',
+  );
+  await fs.rm(manifestPath, { force: true });
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function writeManagedManifest(
+  targetDir: string,
+  managedPaths: string[],
+  projectRoot: string,
+): Promise<void> {
+  const manifestPath = path.join(targetDir, RULER_MANAGED_MANIFEST);
+  await assertManagedPathInsideRoot(
+    manifestPath,
+    projectRoot,
+    'Refusing to write subagents manifest through symlinked path',
+  );
+  const manifest: ManagedManifest = {
+    version: 1,
+    paths: Array.from(new Set(managedPaths)).sort(),
+  };
+  await fs.writeFile(
+    manifestPath,
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    'utf8',
+  );
+}
+
+/**
+ * Writes generated subagent files without taking ownership of the whole native
+ * directory. The manifest lets later applies remove stale Ruler-owned files
+ * while preserving user-created native files.
+ */
+async function writeManagedAgentsDirectory(
+  targetDir: string,
+  files: { name: string; content: string }[],
+  projectRoot: string,
+): Promise<void> {
+  const parent = path.dirname(targetDir);
+  await assertManagedPathInsideRoot(
+    targetDir,
+    projectRoot,
+    'Refusing to replace subagents directory through symlinked path',
+  );
+  await fs.mkdir(parent, { recursive: true });
+  await fs.mkdir(targetDir, { recursive: true });
+
+  const previousManagedPaths = await readManagedManifest(targetDir);
+  const previousManagedPathSet = new Set(previousManagedPaths);
+  await removeManagedEntries(targetDir, previousManagedPaths, projectRoot);
+  await removeManagedManifest(targetDir, projectRoot);
+
+  const writtenFiles: string[] = [];
+  for (const { name, content } of files) {
+    if (!isSafeManagedRelativePath(name)) {
+      throw new Error(`Refusing to write unsafe subagent path: ${name}`);
+    }
+    const outputPath = path.join(targetDir, name);
+    await assertManagedPathInsideRoot(
+      outputPath,
+      projectRoot,
+      'Refusing to write subagent through symlinked path',
+    );
+    if (!previousManagedPathSet.has(name) && (await pathExists(outputPath))) {
+      logWarn(
+        `Skipping native subagent file that is not Ruler-managed: ${path.relative(projectRoot, outputPath)}`,
+      );
+      continue;
+    }
+    await fs.mkdir(path.dirname(outputPath), { recursive: true });
+    await fs.writeFile(outputPath, content, 'utf8');
+    writtenFiles.push(name);
+  }
+  await writeManagedManifest(targetDir, writtenFiles, projectRoot);
+}
+
+/* ------------------------------------------------------------------ */
+/* Per-agent transformers                                              */
+/* ------------------------------------------------------------------ */
+
+interface PropagateOptions {
+  dryRun: boolean;
+  verbose?: boolean;
+}
+
+function getSourceRelativeMdPath(sub: SubagentInfo): string {
+  const fromSource = sub.sourceRelativePath;
+  if (
+    typeof fromSource === 'string' &&
+    fromSource.length > 0 &&
+    !path.isAbsolute(fromSource) &&
+    !fromSource.startsWith('..')
+  ) {
+    return fromSource;
+  }
+  return `${sub.name}.md`;
+}
+
+function withExtension(filePath: string, ext: '.md' | '.toml'): string {
+  return filePath.replace(/\.md$/i, ext);
+}
+
+function buildClaudeFile(sub: SubagentInfo): string {
+  const fm = sub.frontmatter as SubagentFrontmatter;
+  const meta: Record<string, unknown> = {
+    name: fm.name,
+    description: fm.description,
+  };
+  if (fm.tools !== undefined) meta.tools = fm.tools;
+  if (fm.model !== undefined) meta.model = fm.model;
+  // Pass through readonly and is_background verbatim so authoring intent
+  // survives the Claude transform. Claude Code ignores unknown frontmatter
+  // keys, but downstream tooling that reads .claude/agents/*.md can still
+  // observe the original values.
+  if (fm.readonly !== undefined) meta.readonly = fm.readonly;
+  if (fm.is_background !== undefined) meta.is_background = fm.is_background;
+  return `${buildFrontmatterBlock(meta)}\n${ensureBodyFormatting(sub.body)}`;
+}
+
+function buildCursorFile(sub: SubagentInfo): string {
+  const fm = sub.frontmatter as SubagentFrontmatter;
+  const meta: Record<string, unknown> = {
+    name: fm.name,
+    description: fm.description,
+    model: fm.model ?? 'inherit',
+    readonly: fm.readonly ?? false,
+    is_background: fm.is_background ?? false,
+  };
+  return `${buildFrontmatterBlock(meta)}\n${ensureBodyFormatting(sub.body)}`;
+}
+
+function buildCodexFile(sub: SubagentInfo): string {
+  const fm = sub.frontmatter as SubagentFrontmatter;
+  const config: Record<string, unknown> = {
+    name: fm.name,
+    description: fm.description,
+    developer_instructions: ensureBodyFormatting(sub.body),
+  };
+  if (fm.model !== undefined && fm.model !== 'inherit') {
+    config.model = fm.model;
+  }
+  if (fm.readonly === true) {
+    config.sandbox_mode = 'read-only';
+  }
+  // @iarna/toml requires JsonMap; the cast is safe because every value is a
+  // string/boolean/number/object that the library knows how to serialize.
+  return stringifyTOML(config as Parameters<typeof stringifyTOML>[0]);
+}
+
+function buildCopilotFile(
+  sub: SubagentInfo,
+  dryRun: boolean,
+  verbose: boolean,
+): { content: string; warnings: string[] } {
+  const fm = sub.frontmatter as SubagentFrontmatter;
+  const meta: Record<string, unknown> = {
+    name: fm.name,
+    description: fm.description,
+    'user-invocable': true,
+  };
+  const warnings: string[] = [];
+  if (fm.tools && fm.tools.length > 0) {
+    const { tools, unknown } = mapToolsForCopilot(fm.tools);
+    if (tools.length > 0) {
+      meta.tools = tools;
+    }
+    if (unknown.length > 0) {
+      warnings.push(
+        `Subagent "${fm.name}": dropping tools not mappable to Copilot aliases: ${unknown.join(', ')}`,
+      );
+    }
+  }
+  if (fm.model !== undefined && fm.model !== 'inherit') {
+    meta.model = fm.model;
+  }
+  if (fm.readonly === true) {
+    meta['disable-model-invocation'] = true;
+  }
+  // Tool-drop is informational — surface it only when the user explicitly
+  // asked for detail (--verbose) or when previewing changes (--dry-run).
+  // A normal apply stays quiet to avoid noise on every run.
+  if (verbose || dryRun) {
+    for (const warning of warnings) {
+      logWarn(warning, dryRun);
+    }
+  }
+  return {
+    content: `${buildFrontmatterBlock(meta)}\n${ensureBodyFormatting(sub.body)}`,
+    warnings,
+  };
+}
+
+export async function propagateSubagentsForClaude(
+  projectRoot: string,
+  subagents: SubagentInfo[],
+  options: PropagateOptions,
+): Promise<string[]> {
+  if (subagents.length === 0) return [];
+  const targetDir = path.join(projectRoot, CLAUDE_SUBAGENTS_PATH);
+  if (options.dryRun) {
+    return subagents.map(
+      (s) =>
+        `Write ${path.join(CLAUDE_SUBAGENTS_PATH, getSourceRelativeMdPath(s))}`,
+    );
+  }
+  const files = subagents.map((s) => ({
+    name: getSourceRelativeMdPath(s),
+    content: buildClaudeFile(s),
+  }));
+  await writeManagedAgentsDirectory(targetDir, files, projectRoot);
+  return [];
+}
+
+export async function propagateSubagentsForCursor(
+  projectRoot: string,
+  subagents: SubagentInfo[],
+  options: PropagateOptions,
+): Promise<string[]> {
+  if (subagents.length === 0) return [];
+  const targetDir = path.join(projectRoot, CURSOR_SUBAGENTS_PATH);
+  if (options.dryRun) {
+    return subagents.map(
+      (s) =>
+        `Write ${path.join(CURSOR_SUBAGENTS_PATH, getSourceRelativeMdPath(s))}`,
+    );
+  }
+  const files = subagents.map((s) => ({
+    name: getSourceRelativeMdPath(s),
+    content: buildCursorFile(s),
+  }));
+  await writeManagedAgentsDirectory(targetDir, files, projectRoot);
+  return [];
+}
+
+export async function propagateSubagentsForCodex(
+  projectRoot: string,
+  subagents: SubagentInfo[],
+  options: PropagateOptions,
+): Promise<string[]> {
+  if (subagents.length === 0) return [];
+  const targetDir = path.join(projectRoot, CODEX_SUBAGENTS_PATH);
+  if (options.dryRun) {
+    return subagents.map(
+      (s) =>
+        `Write ${path.join(CODEX_SUBAGENTS_PATH, withExtension(getSourceRelativeMdPath(s), '.toml'))}`,
+    );
+  }
+  const files = subagents.map((s) => ({
+    name: withExtension(getSourceRelativeMdPath(s), '.toml'),
+    content: buildCodexFile(s),
+  }));
+  await writeManagedAgentsDirectory(targetDir, files, projectRoot);
+  return [];
+}
+
+export async function propagateSubagentsForCopilot(
+  projectRoot: string,
+  subagents: SubagentInfo[],
+  options: PropagateOptions,
+): Promise<string[]> {
+  if (subagents.length === 0) return [];
+  const targetDir = path.join(projectRoot, COPILOT_SUBAGENTS_PATH);
+  const verbose = options.verbose ?? false;
+  if (options.dryRun) {
+    const planLines: string[] = [];
+    for (const s of subagents) {
+      // Surface tool-mapping warnings during dry-run too — buildCopilotFile
+      // emits when dryRun is true so users previewing a change can see
+      // which tools would be dropped before it actually happens.
+      buildCopilotFile(s, true, verbose);
+      planLines.push(
+        `Write ${path.join(COPILOT_SUBAGENTS_PATH, getSourceRelativeMdPath(s))}`,
+      );
+    }
+    return planLines;
+  }
+  const files = subagents.map((s) => ({
+    name: getSourceRelativeMdPath(s),
+    content: buildCopilotFile(s, false, verbose).content,
+  }));
+  await writeManagedAgentsDirectory(targetDir, files, projectRoot);
+  return [];
+}
+
+/* ------------------------------------------------------------------ */
+/* Cleanup-on-disable                                                  */
+/* ------------------------------------------------------------------ */
+
+async function cleanupSubagentsDir(
+  projectRoot: string,
+  relPath: string,
+  dryRun: boolean,
+  verbose: boolean,
+): Promise<void> {
+  const target = path.join(projectRoot, relPath);
+  try {
+    await fs.access(target);
+  } catch {
+    return;
+  }
+  if (dryRun) {
+    logVerboseInfo(
+      `DRY RUN: Would remove Ruler-managed entries from ${relPath}`,
+      verbose,
+      dryRun,
+    );
+    return;
+  }
+  await assertManagedPathInsideRoot(
+    target,
+    projectRoot,
+    'Refusing to clean subagents directory through symlinked path',
+  );
+  const managedPaths = await readManagedManifest(target);
+  if (managedPaths.length === 0) {
+    logVerboseInfo(
+      `No Ruler-managed subagents found in ${relPath}; leaving directory unchanged`,
+      verbose,
+      dryRun,
+    );
+    return;
+  }
+  await removeManagedEntries(target, managedPaths, projectRoot);
+  await removeManagedManifest(target, projectRoot);
+  await removeDirectoryIfEmpty(target);
+  logVerboseInfo(
+    `Removed Ruler-managed entries from ${relPath} (subagents disabled)`,
+    verbose,
+    dryRun,
+  );
+}
+
+async function cleanupAllSubagentsDirectories(
+  projectRoot: string,
+  dryRun: boolean,
+  verbose: boolean,
+): Promise<void> {
+  await cleanupSubagentsDir(
+    projectRoot,
+    CLAUDE_SUBAGENTS_PATH,
+    dryRun,
+    verbose,
+  );
+  await cleanupSubagentsDir(
+    projectRoot,
+    CURSOR_SUBAGENTS_PATH,
+    dryRun,
+    verbose,
+  );
+  await cleanupSubagentsDir(projectRoot, CODEX_SUBAGENTS_PATH, dryRun, verbose);
+  await cleanupSubagentsDir(
+    projectRoot,
+    COPILOT_SUBAGENTS_PATH,
+    dryRun,
+    verbose,
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Orchestrator                                                        */
+/* ------------------------------------------------------------------ */
+
+export async function propagateSubagents(
+  projectRoot: string,
+  agents: IAgent[],
+  subagentsEnabled: boolean,
+  cleanupOrphaned: boolean,
+  verbose: boolean,
+  dryRun: boolean,
+): Promise<void> {
+  const maybeCleanupAllSubagentsDirectories = async (): Promise<void> => {
+    if (!cleanupOrphaned) {
+      logVerboseInfo(
+        'Subagent cleanup skipped (set [agents] cleanup_orphaned = true to enable directory cleanup)',
+        verbose,
+        dryRun,
+      );
+      return;
+    }
+    await cleanupAllSubagentsDirectories(projectRoot, dryRun, verbose);
+  };
+  const maybeCleanupSubagentsDir = async (relPath: string): Promise<void> => {
+    if (!cleanupOrphaned) return;
+    await cleanupSubagentsDir(projectRoot, relPath, dryRun, verbose);
+  };
+
+  if (!subagentsEnabled) {
+    logVerboseInfo(
+      cleanupOrphaned
+        ? 'Subagents support disabled, cleaning up subagent directories'
+        : 'Subagents support disabled, leaving existing subagent directories unchanged',
+      verbose,
+      dryRun,
+    );
+    await maybeCleanupAllSubagentsDirectories();
+    return;
+  }
+
+  const sourceDir = path.join(projectRoot, RULER_SUBAGENTS_PATH);
+  try {
+    await fs.access(sourceDir);
+  } catch {
+    logVerboseInfo(
+      cleanupOrphaned
+        ? 'No .ruler/agents directory found, cleaning up any stale managed subagent directories'
+        : 'No .ruler/agents directory found; leaving existing subagent directories unchanged',
+      verbose,
+      dryRun,
+    );
+    await maybeCleanupAllSubagentsDirectories();
+    return;
+  }
+
+  const { subagents, warnings } = await discoverSubagents(projectRoot);
+  for (const w of warnings) logWarn(w, dryRun);
+
+  if (subagents.length === 0) {
+    logVerboseInfo(
+      cleanupOrphaned
+        ? 'No valid subagents found in .ruler/agents; cleaning up any stale managed subagent directories'
+        : 'No valid subagents found in .ruler/agents; leaving existing subagent directories unchanged',
+      verbose,
+      dryRun,
+    );
+    await maybeCleanupAllSubagentsDirectories();
+    return;
+  }
+
+  logVerboseInfo(`Discovered ${subagents.length} subagent(s)`, verbose, dryRun);
+
+  const supporting = agents.filter((a) => a.supportsNativeSubagents?.());
+  const nonSupporting = agents.filter((a) => !a.supportsNativeSubagents?.());
+
+  if (nonSupporting.length > 0) {
+    const names = nonSupporting.map((a) => a.getName()).join(', ');
+    logWarn(
+      `Subagents are configured, but the following agents do not support native subagents and will be skipped: ${names}`,
+      dryRun,
+    );
+  }
+
+  const targets = getSelectedSubagentTargets(agents);
+
+  // Reconcile: any managed target directory that is not in the current
+  // selection set is stale and must be removed. This catches the case where
+  // a user drops an agent (e.g. claude+cursor → claude only) so the previously
+  // generated .cursor/agents/ directory does not linger as orphaned config.
+  const allTargets: SubagentTarget[] = ['claude', 'cursor', 'codex', 'copilot'];
+  for (const target of allTargets) {
+    if (!targets.has(target)) {
+      await maybeCleanupSubagentsDir(SUBAGENT_TARGET_PATHS[target]);
+    }
+  }
+
+  if (supporting.length === 0) {
+    logVerboseInfo(
+      'No agents support native subagents, skipping subagent propagation',
+      verbose,
+      dryRun,
+    );
+    return;
+  }
+
+  warnOnceExperimental(dryRun);
+
+  if (targets.has('claude')) {
+    logVerboseInfo(
+      `Writing subagents to ${CLAUDE_SUBAGENTS_PATH} for Claude Code`,
+      verbose,
+      dryRun,
+    );
+    await propagateSubagentsForClaude(projectRoot, subagents, {
+      dryRun,
+      verbose,
+    });
+  }
+  if (targets.has('cursor')) {
+    logVerboseInfo(
+      `Writing subagents to ${CURSOR_SUBAGENTS_PATH} for Cursor`,
+      verbose,
+      dryRun,
+    );
+    await propagateSubagentsForCursor(projectRoot, subagents, {
+      dryRun,
+      verbose,
+    });
+  }
+  if (targets.has('codex')) {
+    logVerboseInfo(
+      `Writing subagents to ${CODEX_SUBAGENTS_PATH} for OpenAI Codex CLI`,
+      verbose,
+      dryRun,
+    );
+    await propagateSubagentsForCodex(projectRoot, subagents, {
+      dryRun,
+      verbose,
+    });
+  }
+  if (targets.has('copilot')) {
+    logVerboseInfo(
+      `Writing subagents to ${COPILOT_SUBAGENTS_PATH} for GitHub Copilot`,
+      verbose,
+      dryRun,
+    );
+    await propagateSubagentsForCopilot(projectRoot, subagents, {
+      dryRun,
+      verbose,
+    });
+  }
+}

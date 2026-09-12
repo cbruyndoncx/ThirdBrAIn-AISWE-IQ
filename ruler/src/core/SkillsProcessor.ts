@@ -1,0 +1,1115 @@
+import * as path from 'path';
+import * as fs from 'fs/promises';
+import { SkillInfo } from '../types';
+import {
+  RULER_SKILLS_PATH,
+  CLAUDE_SKILLS_PATH,
+  CODEX_SKILLS_PATH,
+  OPENCODE_SKILLS_PATH,
+  PI_SKILLS_PATH,
+  GOOSE_SKILLS_PATH,
+  VIBE_SKILLS_PATH,
+  ROO_SKILLS_PATH,
+  GEMINI_SKILLS_PATH,
+  JUNIE_SKILLS_PATH,
+  CURSOR_SKILLS_PATH,
+  WINDSURF_SKILLS_PATH,
+  FACTORY_SKILLS_PATH,
+  ANTIGRAVITY_SKILLS_PATH,
+  KIRO_SKILLS_PATH,
+  logWarn,
+  logVerboseInfo,
+} from '../constants';
+import { walkSkillsTree, copySkillsDirectory, pathExists } from './SkillsUtils';
+import type { IAgent } from '../agents/IAgent';
+import { assertManagedPathInsideRoot } from './FileSystemUtils';
+
+const RULER_MANAGED_MANIFEST = '.ruler-managed.json';
+
+interface ManagedManifest {
+  version: 1;
+  paths: string[];
+}
+
+/**
+ * Discovers skills in the project's .ruler/skills directory.
+ * Returns discovered skills and any validation warnings.
+ */
+export async function discoverSkills(
+  projectRoot: string,
+): Promise<{ skills: SkillInfo[]; warnings: string[] }> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+
+  // Check if skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // Skills directory doesn't exist - this is fine, just return empty
+    return { skills: [], warnings: [] };
+  }
+
+  // Walk the skills tree
+  return await walkSkillsTree(skillsDir);
+}
+
+/**
+ * Gets the paths that skills will generate, for gitignore purposes.
+ * Returns empty array if skills directory doesn't exist.
+ */
+export async function getSkillsGitignorePaths(
+  projectRoot: string,
+  agents: IAgent[],
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+
+  // Check if skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    return [];
+  }
+
+  // Import here to avoid circular dependency
+  const {
+    CLAUDE_SKILLS_PATH,
+    CODEX_SKILLS_PATH,
+    OPENCODE_SKILLS_PATH,
+    PI_SKILLS_PATH,
+    GOOSE_SKILLS_PATH,
+    VIBE_SKILLS_PATH,
+    ROO_SKILLS_PATH,
+    GEMINI_SKILLS_PATH,
+    JUNIE_SKILLS_PATH,
+    CURSOR_SKILLS_PATH,
+    WINDSURF_SKILLS_PATH,
+    FACTORY_SKILLS_PATH,
+    ANTIGRAVITY_SKILLS_PATH,
+  } = await import('../constants');
+
+  const selectedTargets = getSelectedSkillTargets(agents);
+  const targetPaths: Record<SkillTarget, string> = {
+    claude: CLAUDE_SKILLS_PATH,
+    codex: CODEX_SKILLS_PATH,
+    opencode: OPENCODE_SKILLS_PATH,
+    pi: PI_SKILLS_PATH,
+    goose: GOOSE_SKILLS_PATH,
+    vibe: VIBE_SKILLS_PATH,
+    roo: ROO_SKILLS_PATH,
+    gemini: GEMINI_SKILLS_PATH,
+    junie: JUNIE_SKILLS_PATH,
+    cursor: CURSOR_SKILLS_PATH,
+    windsurf: WINDSURF_SKILLS_PATH,
+    factory: FACTORY_SKILLS_PATH,
+    antigravity: ANTIGRAVITY_SKILLS_PATH,
+    kiro: KIRO_SKILLS_PATH,
+  };
+
+  const managedEntries = await getSourceTopLevelEntries(skillsDir);
+  if (managedEntries.length === 0) {
+    return [];
+  }
+
+  const pathSet = new Set<string>();
+  for (const target of selectedTargets) {
+    const targetPath = path.join(projectRoot, targetPaths[target]);
+    pathSet.add(path.join(targetPath, RULER_MANAGED_MANIFEST));
+    for (const managedEntry of managedEntries) {
+      pathSet.add(path.join(targetPath, managedEntry));
+    }
+  }
+  return Array.from(pathSet);
+}
+
+/**
+ * Module-level state to track if experimental warning has been shown.
+ * This ensures the warning appears once per process (CLI invocation), not once per apply call.
+ * This is intentional: warnings about experimental features should not spam the user
+ * if they run multiple applies in the same process or test suite.
+ */
+let hasWarnedExperimental = false;
+
+/**
+ * Warns once per process about experimental skills support.
+ * Uses module-level state to prevent duplicate warnings within the same process.
+ */
+function warnOnceExperimental(verbose: boolean, dryRun: boolean): void {
+  if (hasWarnedExperimental) {
+    return;
+  }
+  hasWarnedExperimental = true;
+  logWarn(
+    'Skills support is experimental and behavior may change in future releases.',
+    dryRun,
+  );
+}
+
+type SkillTarget =
+  | 'claude'
+  | 'codex'
+  | 'opencode'
+  | 'pi'
+  | 'goose'
+  | 'vibe'
+  | 'roo'
+  | 'gemini'
+  | 'junie'
+  | 'cursor'
+  | 'windsurf'
+  | 'factory'
+  | 'antigravity'
+  | 'kiro';
+
+const SKILL_TARGET_TO_IDENTIFIERS = new Map<SkillTarget, readonly string[]>([
+  ['claude', ['claude', 'copilot', 'kilocode']],
+  ['codex', ['codex']],
+  ['opencode', ['opencode']],
+  ['pi', ['pi']],
+  ['goose', ['goose', 'amp', 'zed']],
+  ['vibe', ['mistral']],
+  ['roo', ['roo']],
+  ['gemini', ['gemini-cli']],
+  ['junie', ['junie']],
+  ['cursor', ['cursor']],
+  ['windsurf', ['windsurf']],
+  ['factory', ['factory']],
+  ['antigravity', ['antigravity']],
+  ['kiro', ['kiro']],
+]);
+
+const SKILL_TARGET_PATHS: readonly string[] = Array.from(
+  new Set([
+    CLAUDE_SKILLS_PATH,
+    CODEX_SKILLS_PATH,
+    OPENCODE_SKILLS_PATH,
+    PI_SKILLS_PATH,
+    GOOSE_SKILLS_PATH,
+    VIBE_SKILLS_PATH,
+    ROO_SKILLS_PATH,
+    GEMINI_SKILLS_PATH,
+    JUNIE_SKILLS_PATH,
+    CURSOR_SKILLS_PATH,
+    WINDSURF_SKILLS_PATH,
+    FACTORY_SKILLS_PATH,
+    ANTIGRAVITY_SKILLS_PATH,
+    KIRO_SKILLS_PATH,
+  ]),
+);
+
+function getSelectedSkillTargets(agents: IAgent[]): Set<SkillTarget> {
+  const selectedIdentifiers = new Set(
+    agents
+      .filter((agent) => agent.supportsNativeSkills?.())
+      .map((agent) => agent.getIdentifier()),
+  );
+  const targets = new Set<SkillTarget>();
+
+  for (const [target, identifiers] of SKILL_TARGET_TO_IDENTIFIERS) {
+    if (identifiers.some((id) => selectedIdentifiers.has(id))) {
+      targets.add(target);
+    }
+  }
+
+  return targets;
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: string }).code === 'ENOENT'
+  );
+}
+
+async function cleanupSkillsDirectory(
+  projectRoot: string,
+  relativePath: string,
+  dryRun: boolean,
+  verbose: boolean,
+): Promise<void> {
+  const targetPath = path.join(projectRoot, relativePath);
+
+  try {
+    await fs.access(targetPath);
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return;
+    }
+    throw error;
+  }
+
+  if (dryRun) {
+    logVerboseInfo(
+      `DRY RUN: Would remove Ruler-managed entries from ${relativePath}`,
+      verbose,
+      dryRun,
+    );
+    return;
+  }
+
+  await assertManagedPathInsideRoot(
+    targetPath,
+    projectRoot,
+    'Refusing to clean skills directory through symlinked path',
+  );
+  const managedPaths = await readManagedManifest(targetPath);
+  if (managedPaths.length === 0) {
+    logVerboseInfo(
+      `No Ruler-managed skills found in ${relativePath}; leaving directory unchanged`,
+      verbose,
+      dryRun,
+    );
+    return;
+  }
+  await removeManagedEntries(targetPath, managedPaths, projectRoot);
+  await removeManagedManifest(targetPath, projectRoot);
+  await removeDirectoryIfEmpty(targetPath);
+  logVerboseInfo(
+    `Removed Ruler-managed entries from ${relativePath} (skills disabled)`,
+    verbose,
+    dryRun,
+  );
+}
+
+const TRANSIENT_RENAME_ERROR_CODES = new Set(['EPERM', 'EBUSY', 'ENOTEMPTY']);
+const RENAME_RETRY_ATTEMPTS = 5;
+const RENAME_RETRY_DELAY_MS = 50;
+type ReplaceSkillsFsOps = Pick<typeof fs, 'rename' | 'cp' | 'rm'>;
+
+function isTransientRenameError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    typeof (error as { code?: unknown }).code === 'string' &&
+    TRANSIENT_RENAME_ERROR_CODES.has((error as { code: string }).code)
+  );
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function replaceSkillsDirectory(
+  tempDir: string,
+  targetDir: string,
+  fsOps: ReplaceSkillsFsOps = fs,
+  containmentRoot?: string,
+): Promise<void> {
+  if (containmentRoot) {
+    await assertManagedPathInsideRoot(
+      targetDir,
+      containmentRoot,
+      'Refusing to replace skills directory through symlinked path',
+    );
+  }
+
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= RENAME_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      await fsOps.rename(tempDir, targetDir);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isTransientRenameError(error) || attempt === RENAME_RETRY_ATTEMPTS) {
+        break;
+      }
+      await wait(RENAME_RETRY_DELAY_MS * attempt);
+    }
+  }
+
+  if (isTransientRenameError(lastError)) {
+    await fsOps.cp(tempDir, targetDir, { recursive: true, force: true });
+    await fsOps.rm(tempDir, { recursive: true, force: true });
+    return;
+  }
+
+  throw lastError;
+}
+
+function isSafeManagedRelativePath(relativePath: string): boolean {
+  return (
+    relativePath.length > 0 &&
+    !path.isAbsolute(relativePath) &&
+    !relativePath.split(path.sep).includes('..') &&
+    !relativePath.split('/').includes('..')
+  );
+}
+
+async function readManagedManifest(targetDir: string): Promise<string[]> {
+  try {
+    const content = await fs.readFile(
+      path.join(targetDir, RULER_MANAGED_MANIFEST),
+      'utf8',
+    );
+    const parsed = JSON.parse(content) as Partial<ManagedManifest>;
+    if (!Array.isArray(parsed.paths)) {
+      return [];
+    }
+    return parsed.paths.filter(
+      (entry): entry is string =>
+        typeof entry === 'string' && isSafeManagedRelativePath(entry),
+    );
+  } catch {
+    return [];
+  }
+}
+
+async function removeDirectoryIfEmpty(dirPath: string): Promise<void> {
+  try {
+    const entries = await fs.readdir(dirPath);
+    if (entries.length === 0) {
+      await fs.rmdir(dirPath);
+    }
+  } catch {
+    // Directory is missing or not empty; either state is fine.
+  }
+}
+
+async function removeEmptyParentsUntil(
+  boundaryDir: string,
+  startDir: string,
+): Promise<void> {
+  let current = startDir;
+  while (current !== boundaryDir && current.startsWith(boundaryDir)) {
+    await removeDirectoryIfEmpty(current);
+    const next = path.dirname(current);
+    if (next === current) {
+      return;
+    }
+    current = next;
+  }
+}
+
+async function removeManagedEntries(
+  targetDir: string,
+  managedPaths: string[],
+  projectRoot: string,
+): Promise<void> {
+  const sortedPaths = Array.from(new Set(managedPaths)).sort(
+    (a, b) => b.length - a.length,
+  );
+
+  for (const managedPath of sortedPaths) {
+    const outputPath = path.join(targetDir, managedPath);
+    await assertManagedPathInsideRoot(
+      outputPath,
+      projectRoot,
+      'Refusing to remove managed skills entry through symlinked path',
+    );
+    await fs.rm(outputPath, { recursive: true, force: true });
+    await removeEmptyParentsUntil(targetDir, path.dirname(outputPath));
+  }
+}
+
+async function removeManagedManifest(
+  targetDir: string,
+  projectRoot: string,
+): Promise<void> {
+  const manifestPath = path.join(targetDir, RULER_MANAGED_MANIFEST);
+  await assertManagedPathInsideRoot(
+    manifestPath,
+    projectRoot,
+    'Refusing to remove skills manifest through symlinked path',
+  );
+  await fs.rm(manifestPath, { force: true });
+}
+
+async function writeManagedManifest(
+  targetDir: string,
+  managedPaths: string[],
+  projectRoot: string,
+): Promise<void> {
+  const manifestPath = path.join(targetDir, RULER_MANAGED_MANIFEST);
+  await assertManagedPathInsideRoot(
+    manifestPath,
+    projectRoot,
+    'Refusing to write skills manifest through symlinked path',
+  );
+  const manifest: ManagedManifest = {
+    version: 1,
+    paths: Array.from(new Set(managedPaths)).sort(),
+  };
+  await fs.writeFile(
+    manifestPath,
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    'utf8',
+  );
+}
+
+async function getSourceTopLevelEntries(sourceDir: string): Promise<string[]> {
+  const entries = await fs.readdir(sourceDir, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isDirectory() || entry.isFile())
+    .map((entry) => entry.name)
+    .filter(isSafeManagedRelativePath)
+    .sort();
+}
+
+async function syncSkillsDirectory(
+  sourceDir: string,
+  targetDir: string,
+  projectRoot: string,
+): Promise<void> {
+  const targetParent = path.dirname(targetDir);
+  await assertManagedPathInsideRoot(
+    targetDir,
+    projectRoot,
+    'Refusing to sync skills directory through symlinked path',
+  );
+  await fs.mkdir(targetParent, { recursive: true });
+  await fs.mkdir(targetDir, { recursive: true });
+
+  const previousManagedPaths = await readManagedManifest(targetDir);
+  await removeManagedEntries(targetDir, previousManagedPaths, projectRoot);
+  await removeManagedManifest(targetDir, projectRoot);
+
+  const sourceEntries = await getSourceTopLevelEntries(sourceDir);
+  const nonCollidingEntries: string[] = [];
+  for (const sourceEntry of sourceEntries) {
+    if (await pathExists(path.join(targetDir, sourceEntry))) {
+      continue;
+    }
+    nonCollidingEntries.push(sourceEntry);
+  }
+  await copySkillsDirectory(sourceDir, targetDir, nonCollidingEntries);
+  await writeManagedManifest(targetDir, nonCollidingEntries, projectRoot);
+}
+
+/**
+ * Cleans up skills directories when skills are disabled.
+ * This ensures that stale skills from previous runs don't persist when skills are turned off.
+ */
+async function cleanupSkillsDirectories(
+  projectRoot: string,
+  dryRun: boolean,
+  verbose: boolean,
+): Promise<void> {
+  for (const skillPath of SKILL_TARGET_PATHS) {
+    await cleanupSkillsDirectory(projectRoot, skillPath, dryRun, verbose);
+  }
+}
+
+/**
+ * Propagates skills for agents that need them.
+ */
+export async function propagateSkills(
+  projectRoot: string,
+  agents: IAgent[],
+  skillsEnabled: boolean,
+  verbose: boolean,
+  dryRun: boolean,
+): Promise<void> {
+  if (!skillsEnabled) {
+    logVerboseInfo(
+      'Skills support disabled, cleaning up skills directories',
+      verbose,
+      dryRun,
+    );
+    // Clean up skills directories when skills are disabled
+    await cleanupSkillsDirectories(projectRoot, dryRun, verbose);
+    return;
+  }
+
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+
+  // Check if skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // No skills directory - this is fine
+    logVerboseInfo(
+      'No .ruler/skills directory found, skipping skills propagation',
+      verbose,
+      dryRun,
+    );
+    return;
+  }
+
+  // Discover skills
+  const { skills, warnings } = await discoverSkills(projectRoot);
+
+  if (warnings.length > 0) {
+    warnings.forEach((warning) => logWarn(warning, dryRun));
+  }
+
+  if (skills.length === 0) {
+    logVerboseInfo('No valid skills found in .ruler/skills', verbose, dryRun);
+    return;
+  }
+
+  logVerboseInfo(`Discovered ${skills.length} skill(s)`, verbose, dryRun);
+
+  const hasNativeSkillsAgent = agents.some((a) => a.supportsNativeSkills?.());
+  const nonNativeAgents = agents.filter(
+    (agent) => !agent.supportsNativeSkills?.(),
+  );
+
+  if (nonNativeAgents.length > 0) {
+    const agentList = nonNativeAgents
+      .map((agent) => agent.getName())
+      .join(', ');
+    logWarn(
+      `Skills are configured, but the following agents do not support native skills and will be skipped: ${agentList}`,
+      dryRun,
+    );
+  }
+
+  if (!hasNativeSkillsAgent) {
+    logVerboseInfo(
+      'No agents support native skills, skipping skills propagation',
+      verbose,
+      dryRun,
+    );
+    return;
+  }
+
+  // Warn about experimental features
+  warnOnceExperimental(verbose, dryRun);
+
+  const selectedTargets = getSelectedSkillTargets(agents);
+  if (selectedTargets.size === 0) {
+    logVerboseInfo(
+      'No selected agents require skills propagation, skipping skills propagation',
+      verbose,
+      dryRun,
+    );
+    return;
+  }
+
+  // Copy to Claude skills directory if needed
+  if (selectedTargets.has('claude')) {
+    logVerboseInfo(
+      `Copying skills to ${CLAUDE_SKILLS_PATH} for Claude Code, GitHub Copilot, and KiloCode`,
+      verbose,
+      dryRun,
+    );
+    await propagateSkillsForClaude(projectRoot, { dryRun });
+  }
+
+  if (selectedTargets.has('codex')) {
+    logVerboseInfo(
+      `Copying skills to ${CODEX_SKILLS_PATH} for OpenAI Codex CLI`,
+      verbose,
+      dryRun,
+    );
+    await propagateSkillsForCodex(projectRoot, { dryRun });
+  }
+
+  if (selectedTargets.has('opencode')) {
+    logVerboseInfo(
+      `Copying skills to ${OPENCODE_SKILLS_PATH} for OpenCode`,
+      verbose,
+      dryRun,
+    );
+    await propagateSkillsForOpenCode(projectRoot, { dryRun });
+  }
+
+  if (selectedTargets.has('pi')) {
+    logVerboseInfo(
+      `Copying skills to ${PI_SKILLS_PATH} for Pi Coding Agent`,
+      verbose,
+      dryRun,
+    );
+    await propagateSkillsForPi(projectRoot, { dryRun });
+  }
+
+  if (selectedTargets.has('goose')) {
+    logVerboseInfo(
+      `Copying skills to ${GOOSE_SKILLS_PATH} for Goose, Amp and Zed`,
+      verbose,
+      dryRun,
+    );
+    await propagateSkillsForGoose(projectRoot, { dryRun });
+  }
+
+  if (selectedTargets.has('vibe')) {
+    logVerboseInfo(
+      `Copying skills to ${VIBE_SKILLS_PATH} for Mistral Vibe`,
+      verbose,
+      dryRun,
+    );
+    await propagateSkillsForVibe(projectRoot, { dryRun });
+  }
+
+  if (selectedTargets.has('roo')) {
+    logVerboseInfo(
+      `Copying skills to ${ROO_SKILLS_PATH} for Roo Code`,
+      verbose,
+      dryRun,
+    );
+    await propagateSkillsForRoo(projectRoot, { dryRun });
+  }
+
+  if (selectedTargets.has('gemini')) {
+    logVerboseInfo(
+      `Copying skills to ${GEMINI_SKILLS_PATH} for Gemini CLI`,
+      verbose,
+      dryRun,
+    );
+    await propagateSkillsForGemini(projectRoot, { dryRun });
+  }
+
+  if (selectedTargets.has('junie')) {
+    logVerboseInfo(
+      `Copying skills to ${JUNIE_SKILLS_PATH} for Junie`,
+      verbose,
+      dryRun,
+    );
+    await propagateSkillsForJunie(projectRoot, { dryRun });
+  }
+
+  if (selectedTargets.has('cursor')) {
+    logVerboseInfo(
+      `Copying skills to ${CURSOR_SKILLS_PATH} for Cursor`,
+      verbose,
+      dryRun,
+    );
+    await propagateSkillsForCursor(projectRoot, { dryRun });
+  }
+
+  if (selectedTargets.has('windsurf')) {
+    logVerboseInfo(
+      `Copying skills to ${WINDSURF_SKILLS_PATH} for Windsurf`,
+      verbose,
+      dryRun,
+    );
+    await propagateSkillsForWindsurf(projectRoot, { dryRun });
+  }
+
+  if (selectedTargets.has('factory')) {
+    logVerboseInfo(
+      `Copying skills to ${FACTORY_SKILLS_PATH} for Factory Droid`,
+      verbose,
+      dryRun,
+    );
+    await propagateSkillsForFactory(projectRoot, { dryRun });
+  }
+
+  if (selectedTargets.has('antigravity')) {
+    logVerboseInfo(
+      `Copying skills to ${ANTIGRAVITY_SKILLS_PATH} for Antigravity`,
+      verbose,
+      dryRun,
+    );
+    await propagateSkillsForAntigravity(projectRoot, { dryRun });
+  }
+
+  if (selectedTargets.has('kiro')) {
+    logVerboseInfo(
+      `Copying skills to ${KIRO_SKILLS_PATH} for Kiro`,
+      verbose,
+      dryRun,
+    );
+    await propagateSkillsForKiro(projectRoot, { dryRun });
+  }
+
+  // No MCP-based propagation; only native skills are supported.
+}
+
+/**
+ * Propagates skills for Claude Code by copying .ruler/skills to .claude/skills.
+ * Updates only Ruler-managed entries so existing native skills are preserved.
+ * Returns dry-run steps if dryRun is true, otherwise returns empty array.
+ */
+export async function propagateSkillsForClaude(
+  projectRoot: string,
+  options: { dryRun: boolean },
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+  const claudeSkillsPath = path.join(projectRoot, CLAUDE_SKILLS_PATH);
+
+  // Check if source skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // No skills directory - return empty
+    return [];
+  }
+
+  if (options.dryRun) {
+    return [`Copy skills from ${RULER_SKILLS_PATH} to ${CLAUDE_SKILLS_PATH}`];
+  }
+
+  await syncSkillsDirectory(skillsDir, claudeSkillsPath, projectRoot);
+
+  return [];
+}
+
+/**
+ * Propagates skills for OpenAI Codex CLI by copying .ruler/skills to .agents/skills.
+ * Updates only Ruler-managed entries so existing native skills are preserved.
+ * Returns dry-run steps if dryRun is true, otherwise returns empty array.
+ */
+export async function propagateSkillsForCodex(
+  projectRoot: string,
+  options: { dryRun: boolean },
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+  const agentsSkillsPath = path.join(projectRoot, CODEX_SKILLS_PATH);
+
+  // Check if source skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // No skills directory - return empty
+    return [];
+  }
+
+  if (options.dryRun) {
+    return [`Copy skills from ${RULER_SKILLS_PATH} to ${CODEX_SKILLS_PATH}`];
+  }
+
+  await syncSkillsDirectory(skillsDir, agentsSkillsPath, projectRoot);
+
+  return [];
+}
+
+/**
+ * Propagates skills for OpenCode by copying .ruler/skills to .opencode/skills.
+ * Updates only Ruler-managed entries so existing native skills are preserved.
+ * Returns dry-run steps if dryRun is true, otherwise returns empty array.
+ */
+export async function propagateSkillsForOpenCode(
+  projectRoot: string,
+  options: { dryRun: boolean },
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+  const opencodeSkillsPath = path.join(projectRoot, OPENCODE_SKILLS_PATH);
+
+  // Check if source skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // No skills directory - return empty
+    return [];
+  }
+
+  if (options.dryRun) {
+    return [`Copy skills from ${RULER_SKILLS_PATH} to ${OPENCODE_SKILLS_PATH}`];
+  }
+
+  await syncSkillsDirectory(skillsDir, opencodeSkillsPath, projectRoot);
+
+  return [];
+}
+
+/**
+ * Propagates skills for Pi Coding Agent by copying .ruler/skills to .pi/skills.
+ * Updates only Ruler-managed entries so existing native skills are preserved.
+ * Returns dry-run steps if dryRun is true, otherwise returns empty array.
+ */
+export async function propagateSkillsForPi(
+  projectRoot: string,
+  options: { dryRun: boolean },
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+  const piSkillsPath = path.join(projectRoot, PI_SKILLS_PATH);
+
+  // Check if source skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // No skills directory - return empty
+    return [];
+  }
+
+  if (options.dryRun) {
+    return [`Copy skills from ${RULER_SKILLS_PATH} to ${PI_SKILLS_PATH}`];
+  }
+
+  await syncSkillsDirectory(skillsDir, piSkillsPath, projectRoot);
+
+  return [];
+}
+
+/**
+ * Propagates skills for Goose by copying .ruler/skills to .agents/skills.
+ * Updates only Ruler-managed entries so existing native skills are preserved.
+ * Returns dry-run steps if dryRun is true, otherwise returns empty array.
+ */
+export async function propagateSkillsForGoose(
+  projectRoot: string,
+  options: { dryRun: boolean },
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+  const gooseSkillsPath = path.join(projectRoot, GOOSE_SKILLS_PATH);
+
+  // Check if source skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // No skills directory - return empty
+    return [];
+  }
+
+  if (options.dryRun) {
+    return [`Copy skills from ${RULER_SKILLS_PATH} to ${GOOSE_SKILLS_PATH}`];
+  }
+
+  await syncSkillsDirectory(skillsDir, gooseSkillsPath, projectRoot);
+
+  return [];
+}
+
+/**
+ * Propagates skills for Mistral Vibe by copying .ruler/skills to .vibe/skills.
+ * Updates only Ruler-managed entries so existing native skills are preserved.
+ * Returns dry-run steps if dryRun is true, otherwise returns empty array.
+ */
+export async function propagateSkillsForVibe(
+  projectRoot: string,
+  options: { dryRun: boolean },
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+  const vibeSkillsPath = path.join(projectRoot, VIBE_SKILLS_PATH);
+
+  // Check if source skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // No skills directory - return empty
+    return [];
+  }
+
+  if (options.dryRun) {
+    return [`Copy skills from ${RULER_SKILLS_PATH} to ${VIBE_SKILLS_PATH}`];
+  }
+
+  await syncSkillsDirectory(skillsDir, vibeSkillsPath, projectRoot);
+
+  return [];
+}
+
+/**
+ * Propagates skills for Roo Code by copying .ruler/skills to .roo/skills.
+ * Updates only Ruler-managed entries so existing native skills are preserved.
+ * Returns dry-run steps if dryRun is true, otherwise returns empty array.
+ */
+export async function propagateSkillsForRoo(
+  projectRoot: string,
+  options: { dryRun: boolean },
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+  const rooSkillsPath = path.join(projectRoot, ROO_SKILLS_PATH);
+
+  // Check if source skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // No skills directory - return empty
+    return [];
+  }
+
+  if (options.dryRun) {
+    return [`Copy skills from ${RULER_SKILLS_PATH} to ${ROO_SKILLS_PATH}`];
+  }
+
+  await syncSkillsDirectory(skillsDir, rooSkillsPath, projectRoot);
+
+  return [];
+}
+
+/**
+ * Propagates skills for Gemini CLI by copying .ruler/skills to .gemini/skills.
+ * Updates only Ruler-managed entries so existing native skills are preserved.
+ * Returns dry-run steps if dryRun is true, otherwise returns empty array.
+ */
+export async function propagateSkillsForGemini(
+  projectRoot: string,
+  options: { dryRun: boolean },
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+  const geminiSkillsPath = path.join(projectRoot, GEMINI_SKILLS_PATH);
+
+  // Check if source skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // No skills directory - return empty
+    return [];
+  }
+
+  if (options.dryRun) {
+    return [`Copy skills from ${RULER_SKILLS_PATH} to ${GEMINI_SKILLS_PATH}`];
+  }
+
+  await syncSkillsDirectory(skillsDir, geminiSkillsPath, projectRoot);
+
+  return [];
+}
+
+/**
+ * Propagates skills for Junie by copying .ruler/skills to .junie/skills.
+ * Updates only Ruler-managed entries so existing native skills are preserved.
+ * Returns dry-run steps if dryRun is true, otherwise returns empty array.
+ */
+export async function propagateSkillsForJunie(
+  projectRoot: string,
+  options: { dryRun: boolean },
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+  const junieSkillsPath = path.join(projectRoot, JUNIE_SKILLS_PATH);
+
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    return [];
+  }
+
+  if (options.dryRun) {
+    return [`Copy skills from ${RULER_SKILLS_PATH} to ${JUNIE_SKILLS_PATH}`];
+  }
+
+  await syncSkillsDirectory(skillsDir, junieSkillsPath, projectRoot);
+
+  return [];
+}
+
+/**
+ * Propagates skills for Cursor by copying .ruler/skills to .cursor/skills.
+ * Updates only Ruler-managed entries so existing native skills are preserved.
+ * Returns dry-run steps if dryRun is true, otherwise returns empty array.
+ */
+export async function propagateSkillsForCursor(
+  projectRoot: string,
+  options: { dryRun: boolean },
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+  const cursorSkillsPath = path.join(projectRoot, CURSOR_SKILLS_PATH);
+
+  // Check if source skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // No skills directory - return empty
+    return [];
+  }
+
+  if (options.dryRun) {
+    return [`Copy skills from ${RULER_SKILLS_PATH} to ${CURSOR_SKILLS_PATH}`];
+  }
+
+  await syncSkillsDirectory(skillsDir, cursorSkillsPath, projectRoot);
+
+  return [];
+}
+
+/**
+ * Propagates skills for Windsurf by copying .ruler/skills to .windsurf/skills.
+ * Updates only Ruler-managed entries so existing native skills are preserved.
+ * Returns dry-run steps if dryRun is true, otherwise returns empty array.
+ */
+export async function propagateSkillsForWindsurf(
+  projectRoot: string,
+  options: { dryRun: boolean },
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+  const windsurfSkillsPath = path.join(projectRoot, WINDSURF_SKILLS_PATH);
+
+  // Check if source skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // No skills directory - return empty
+    return [];
+  }
+
+  if (options.dryRun) {
+    return [`Copy skills from ${RULER_SKILLS_PATH} to ${WINDSURF_SKILLS_PATH}`];
+  }
+
+  await syncSkillsDirectory(skillsDir, windsurfSkillsPath, projectRoot);
+
+  return [];
+}
+
+/**
+ * Propagates skills for Factory Droid by copying .ruler/skills to .factory/skills.
+ * Updates only Ruler-managed entries so existing native skills are preserved.
+ * Returns dry-run steps if dryRun is true, otherwise returns empty array.
+ */
+export async function propagateSkillsForFactory(
+  projectRoot: string,
+  options: { dryRun: boolean },
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+  const factorySkillsPath = path.join(projectRoot, FACTORY_SKILLS_PATH);
+
+  // Check if source skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // No skills directory - return empty
+    return [];
+  }
+
+  if (options.dryRun) {
+    return [`Copy skills from ${RULER_SKILLS_PATH} to ${FACTORY_SKILLS_PATH}`];
+  }
+
+  await syncSkillsDirectory(skillsDir, factorySkillsPath, projectRoot);
+
+  return [];
+}
+
+/**
+ * Propagates skills for Antigravity by copying .ruler/skills to .agent/skills.
+ * Updates only Ruler-managed entries so existing native skills are preserved.
+ * Returns dry-run steps if dryRun is true, otherwise returns empty array.
+ */
+export async function propagateSkillsForAntigravity(
+  projectRoot: string,
+  options: { dryRun: boolean },
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+  const antigravitySkillsPath = path.join(projectRoot, ANTIGRAVITY_SKILLS_PATH);
+
+  // Check if source skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // No skills directory - return empty
+    return [];
+  }
+
+  if (options.dryRun) {
+    return [
+      `Copy skills from ${RULER_SKILLS_PATH} to ${ANTIGRAVITY_SKILLS_PATH}`,
+    ];
+  }
+
+  await syncSkillsDirectory(skillsDir, antigravitySkillsPath, projectRoot);
+
+  return [];
+}
+
+/**
+ * Propagates skills for Kiro by copying .ruler/skills to .kiro/skills.
+ * Updates only Ruler-managed entries so existing native skills are preserved.
+ * Returns dry-run steps if dryRun is true, otherwise returns empty array.
+ */
+export async function propagateSkillsForKiro(
+  projectRoot: string,
+  options: { dryRun: boolean },
+): Promise<string[]> {
+  const skillsDir = path.join(projectRoot, RULER_SKILLS_PATH);
+  const kiroSkillsPath = path.join(projectRoot, KIRO_SKILLS_PATH);
+
+  // Check if source skills directory exists
+  try {
+    await fs.access(skillsDir);
+  } catch {
+    // No skills directory - return empty
+    return [];
+  }
+
+  if (options.dryRun) {
+    return [`Copy skills from ${RULER_SKILLS_PATH} to ${KIRO_SKILLS_PATH}`];
+  }
+
+  await syncSkillsDirectory(skillsDir, kiroSkillsPath, projectRoot);
+
+  return [];
+}

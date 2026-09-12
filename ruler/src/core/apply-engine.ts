@@ -1,0 +1,1326 @@
+import * as path from 'path';
+import { promises as fs } from 'fs';
+import { parse as parseTOML, stringify } from '@iarna/toml';
+import * as FileSystemUtils from './FileSystemUtils';
+import { concatenateRules } from './RuleProcessor';
+import { loadConfig, LoadedConfig, IAgentConfig } from './ConfigLoader';
+import { updateGitignore as updateGitignoreUtil } from './GitignoreUtils';
+import { IAgent } from '../agents/IAgent';
+import { mergeMcp } from '../mcp/merge';
+import {
+  getNativeMcpPath,
+  readNativeMcp,
+  readNativeMcpToml,
+  writeNativeMcp,
+  writeMcpProvenance,
+  getMcpProvenancePath,
+} from '../paths/mcp';
+import { propagateMcpToOpenHands } from '../mcp/propagateOpenHandsMcp';
+import { propagateMcpToOpenCode } from '../mcp/propagateOpenCodeMcp';
+import {
+  getAgentApplyOutputPaths,
+  getAgentOutputPaths,
+} from '../agents/agent-utils';
+import { agentSupportsMcp, filterMcpConfigForAgent } from '../mcp/capabilities';
+import { isPathInsideOrEqual } from './path-utils';
+import {
+  createRulerError,
+  logVerbose,
+  logVerboseInfo,
+  logInfo,
+  logWarn,
+} from '../constants';
+import { McpStrategy } from '../types';
+import type { ConfigDiagnostic } from './UnifiedConfigTypes';
+
+/**
+ * Configuration data loaded from the ruler setup
+ */
+export interface RulerConfiguration {
+  config: LoadedConfig;
+  concatenatedRules: string;
+  rulerMcpJson: Record<string, unknown> | null;
+  projectRoot: string;
+  diagnostics?: ConfigDiagnostic[];
+}
+
+/**
+ * Configuration data for a specific .ruler directory in hierarchical mode
+ */
+export interface HierarchicalRulerConfiguration extends RulerConfiguration {
+  rulerDir: string;
+}
+
+export /**
+ * Loads configurations for all .ruler directories in hierarchical mode.
+ * Each .ruler directory gets its own independent configuration with separate rules.
+ * @param projectRoot Root directory of the project
+ * @param configPath Optional custom config path
+ * @param localOnly Whether to search only locally for .ruler directories
+ * @returns Promise resolving to array of hierarchical configurations
+ */
+async function loadNestedConfigurations(
+  projectRoot: string,
+  configPath: string | undefined,
+  localOnly: boolean,
+  resolvedNested: boolean,
+): Promise<HierarchicalRulerConfiguration[]> {
+  const { dirs: rulerDirs } = await findRulerDirectories(
+    projectRoot,
+    localOnly,
+    true,
+  );
+
+  const results: HierarchicalRulerConfiguration[] = [];
+
+  // Load config first so we know whether `.ruler/agents/` should be included
+  // in the rule concatenation for each directory.
+  for (const rulerDir of rulerDirs) {
+    const config = await loadConfigForRulerDir(
+      rulerDir,
+      configPath,
+      resolvedNested,
+      localOnly,
+    );
+    const files = await FileSystemUtils.readMarkdownFiles(rulerDir, {
+      includeAgents: shouldIncludeAgentsInRules(config),
+      excludePaths: getExcludedMarkdownOutputPaths(
+        path.dirname(rulerDir),
+        config,
+      ),
+    });
+    results.push(
+      await createHierarchicalConfiguration(
+        rulerDir,
+        files,
+        config,
+        configPath,
+        localOnly,
+      ),
+    );
+  }
+
+  return results;
+}
+
+/**
+ * Returns true when `.ruler/agents/*.md` should be concatenated into the
+ * generated top-level rule files. Defaults to false.
+ */
+function shouldIncludeAgentsInRules(config: LoadedConfig): boolean {
+  return config.subagents?.include_in_rules === true;
+}
+
+function getExcludedMarkdownOutputPaths(
+  projectRoot: string,
+  config: LoadedConfig,
+): ReadonlySet<string> {
+  const excludedPaths = new Set<string>();
+
+  for (const agentConfig of Object.values(config.agentConfigs)) {
+    for (const outputPath of [
+      agentConfig.outputPath,
+      agentConfig.outputPathInstructions,
+      agentConfig.outputPathConfig,
+    ]) {
+      if (outputPath && outputPath.toLowerCase().endsWith('.md')) {
+        excludedPaths.add(
+          path.isAbsolute(outputPath)
+            ? outputPath
+            : path.resolve(projectRoot, outputPath),
+        );
+      }
+    }
+  }
+
+  return excludedPaths;
+}
+
+async function createHierarchicalConfiguration(
+  rulerDir: string,
+  files: { path: string; content: string }[],
+  config: LoadedConfig,
+  cliConfigPath: string | undefined,
+  localOnly: boolean,
+): Promise<HierarchicalRulerConfiguration> {
+  await warnAboutLegacyMcpJson(rulerDir);
+
+  const concatenatedRules = concatenateRules(files, path.dirname(rulerDir));
+
+  const directoryRoot = path.dirname(rulerDir);
+  const localConfigPath = path.join(rulerDir, 'ruler.toml');
+  let configPathToUse = cliConfigPath;
+  try {
+    await fs.access(localConfigPath);
+    configPathToUse = localConfigPath;
+  } catch {
+    // fall back to CLI config or default resolution
+  }
+
+  const { loadUnifiedConfig } = await import('./UnifiedConfigLoader');
+  const unifiedConfig = await loadUnifiedConfig({
+    projectRoot: directoryRoot,
+    configPath: configPathToUse,
+    checkGlobal: !localOnly,
+  });
+
+  let rulerMcpJson: Record<string, unknown> | null = null;
+  if (unifiedConfig.mcp && Object.keys(unifiedConfig.mcp.servers).length > 0) {
+    rulerMcpJson = {
+      mcpServers: unifiedConfig.mcp.servers,
+    };
+  }
+
+  return {
+    rulerDir,
+    config,
+    concatenatedRules,
+    rulerMcpJson,
+    projectRoot: directoryRoot,
+    diagnostics: collectConfigDiagnostics(config, unifiedConfig.diagnostics),
+  };
+}
+
+async function loadConfigForRulerDir(
+  rulerDir: string,
+  cliConfigPath: string | undefined,
+  resolvedNested: boolean,
+  localOnly: boolean,
+): Promise<LoadedConfig> {
+  const directoryRoot = path.dirname(rulerDir);
+  const localConfigPath = path.join(rulerDir, 'ruler.toml');
+
+  let hasLocalConfig = false;
+  try {
+    await fs.access(localConfigPath);
+    hasLocalConfig = true;
+  } catch {
+    hasLocalConfig = false;
+  }
+
+  const loaded = await loadConfig({
+    projectRoot: directoryRoot,
+    configPath: hasLocalConfig ? localConfigPath : cliConfigPath,
+    checkGlobal: !localOnly,
+  });
+
+  const cloned = cloneLoadedConfig(loaded);
+
+  if (resolvedNested) {
+    if (hasLocalConfig && loaded.nestedDefined && loaded.nested === false) {
+      logWarn(
+        `Nested mode is enabled but ${localConfigPath} sets nested = false. Continuing with nested processing.`,
+      );
+    }
+    cloned.nested = true;
+    cloned.nestedDefined = true;
+  }
+
+  return cloned;
+}
+
+function cloneLoadedConfig(config: LoadedConfig): LoadedConfig {
+  const clonedAgentConfigs: Record<string, IAgentConfig> = {};
+  for (const [agent, agentConfig] of Object.entries(config.agentConfigs)) {
+    clonedAgentConfigs[agent] = {
+      ...agentConfig,
+      mcp: agentConfig.mcp ? { ...agentConfig.mcp } : undefined,
+      mcpServers: agentConfig.mcpServers
+        ? Object.fromEntries(
+            Object.entries(agentConfig.mcpServers).map(([name, server]) => [
+              name,
+              { ...server },
+            ]),
+          )
+        : undefined,
+    };
+  }
+
+  return {
+    defaultAgents: config.defaultAgents ? [...config.defaultAgents] : undefined,
+    agentConfigs: clonedAgentConfigs,
+    cliAgents: config.cliAgents ? [...config.cliAgents] : undefined,
+    mcp: config.mcp ? { ...config.mcp } : undefined,
+    gitignore: config.gitignore ? { ...config.gitignore } : undefined,
+    backup: config.backup ? { ...config.backup } : undefined,
+    skills: config.skills ? { ...config.skills } : undefined,
+    subagents: config.subagents ? { ...config.subagents } : undefined,
+    nested: config.nested,
+    nestedDefined: config.nestedDefined,
+    diagnostics: config.diagnostics ? [...config.diagnostics] : undefined,
+  };
+}
+
+function collectConfigDiagnostics(
+  config: LoadedConfig,
+  diagnostics: ConfigDiagnostic[],
+): ConfigDiagnostic[] {
+  return [...(config.diagnostics ?? []), ...diagnostics];
+}
+
+/**
+ * Finds ruler directories based on the specified mode.
+ */
+async function findRulerDirectories(
+  projectRoot: string,
+  localOnly: boolean,
+  hierarchical: boolean,
+): Promise<{ dirs: string[]; primaryDir: string }> {
+  if (hierarchical) {
+    const dirs = await FileSystemUtils.findAllRulerDirs(projectRoot);
+
+    if (dirs.length === 0) {
+      throw createRulerError(
+        `.ruler directory not found`,
+        `Searched from: ${projectRoot}`,
+      );
+    }
+    return { dirs, primaryDir: dirs[0] };
+  } else {
+    const dir = await FileSystemUtils.findRulerDir(projectRoot, !localOnly);
+    if (!dir) {
+      throw createRulerError(
+        `.ruler directory not found`,
+        `Searched from: ${projectRoot}`,
+      );
+    }
+    return { dirs: [dir], primaryDir: dir };
+  }
+}
+
+/**
+ * Warns about legacy mcp.json files if they exist.
+ */
+async function warnAboutLegacyMcpJson(rulerDir: string): Promise<void> {
+  try {
+    const legacyMcpPath = path.join(rulerDir, 'mcp.json');
+    await fs.access(legacyMcpPath);
+    logWarn(
+      'Warning: Using legacy .ruler/mcp.json. Please migrate to ruler.toml. This fallback will be removed in a future release.',
+    );
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Loads configuration for single-directory mode (existing behavior).
+ */
+export /**
+ * Loads configuration for a single .ruler directory.
+ * All rules from the directory are concatenated into a single configuration.
+ * @param projectRoot Root directory of the project
+ * @param configPath Optional custom config path
+ * @param localOnly Whether to search only locally for .ruler directory
+ * @returns Promise resolving to the loaded configuration
+ */
+async function loadSingleConfiguration(
+  projectRoot: string,
+  configPath: string | undefined,
+  localOnly: boolean,
+): Promise<RulerConfiguration> {
+  // Find the single ruler directory
+  const { dirs: rulerDirs, primaryDir } = await findRulerDirectories(
+    projectRoot,
+    localOnly,
+    false, // single mode
+  );
+
+  // Warn about legacy mcp.json
+  await warnAboutLegacyMcpJson(primaryDir);
+  const effectiveProjectRoot = FileSystemUtils.resolveProjectRootForRulerDir(
+    projectRoot,
+    primaryDir,
+  );
+
+  // Load the ruler.toml configuration
+  const config = await loadConfig({
+    projectRoot: effectiveProjectRoot,
+    configPath,
+    checkGlobal: !localOnly,
+  });
+
+  // Read rule files. `.ruler/agents/` is only included when
+  // `[agents] include_in_rules = true`.
+  const files = await FileSystemUtils.readMarkdownFiles(rulerDirs[0], {
+    includeAgents: shouldIncludeAgentsInRules(config),
+    excludePaths: getExcludedMarkdownOutputPaths(effectiveProjectRoot, config),
+  });
+
+  // Concatenate rules
+  const concatenatedRules = concatenateRules(files, path.dirname(primaryDir));
+
+  // Load unified config to get merged MCP configuration
+  const { loadUnifiedConfig } = await import('./UnifiedConfigLoader');
+  const unifiedConfig = await loadUnifiedConfig({
+    projectRoot: effectiveProjectRoot,
+    configPath,
+    checkGlobal: !localOnly,
+  });
+
+  // Synthesize rulerMcpJson from unified MCP bundle for backward compatibility
+  let rulerMcpJson: Record<string, unknown> | null = null;
+  if (unifiedConfig.mcp && Object.keys(unifiedConfig.mcp.servers).length > 0) {
+    rulerMcpJson = {
+      mcpServers: unifiedConfig.mcp.servers,
+    };
+  }
+
+  return {
+    config,
+    concatenatedRules,
+    rulerMcpJson,
+    projectRoot: effectiveProjectRoot,
+    diagnostics: collectConfigDiagnostics(config, unifiedConfig.diagnostics),
+  };
+}
+
+/**
+ * Processes hierarchical configurations by applying rules to each .ruler directory independently.
+ * Each directory gets its own set of rules and generates its own agent files.
+ * @param agents Array of agents to process
+ * @param configurations Array of hierarchical configurations for each .ruler directory
+ * @param verbose Whether to enable verbose logging
+ * @param dryRun Whether to perform a dry run
+ * @param cliMcpEnabled Whether MCP is enabled via CLI
+ * @param cliMcpStrategy MCP strategy from CLI
+ * @returns Promise resolving to array of generated file paths
+ */
+export async function processHierarchicalConfigurations(
+  agents: IAgent[],
+  configurations: HierarchicalRulerConfiguration[],
+  verbose: boolean,
+  dryRun: boolean,
+  cliMcpEnabled: boolean,
+  cliMcpStrategy?: McpStrategy,
+  backup = true,
+  selectedAgentsByRulerDir?: Map<string, IAgent[]>,
+): Promise<string[]> {
+  const allGeneratedPaths: string[] = [];
+
+  for (const config of configurations) {
+    logVerboseInfo(
+      `Processing .ruler directory: ${config.rulerDir}`,
+      verbose,
+      dryRun,
+    );
+    const rulerRoot = path.dirname(config.rulerDir);
+    const selectedAgents =
+      selectedAgentsByRulerDir?.get(config.rulerDir) ?? agents;
+    const paths = await applyConfigurationsToAgents(
+      selectedAgents,
+      config.concatenatedRules,
+      config.rulerMcpJson,
+      config.config,
+      rulerRoot,
+      verbose,
+      dryRun,
+      cliMcpEnabled,
+      cliMcpStrategy,
+      backup,
+    );
+    const normalizedPaths = paths.map((p) =>
+      path.isAbsolute(p) ? p : path.join(rulerRoot, p),
+    );
+    allGeneratedPaths.push(...normalizedPaths);
+  }
+
+  return allGeneratedPaths;
+}
+
+/**
+ * Processes a single configuration by applying rules to all selected agents.
+ * All rules are concatenated and applied to generate agent files in the project root.
+ * @param agents Array of agents to process
+ * @param configuration Single ruler configuration with concatenated rules
+ * @param projectRoot Root directory of the project
+ * @param verbose Whether to enable verbose logging
+ * @param dryRun Whether to perform a dry run
+ * @param cliMcpEnabled Whether MCP is enabled via CLI
+ * @param cliMcpStrategy MCP strategy from CLI
+ * @returns Promise resolving to array of generated file paths
+ */
+export async function processSingleConfiguration(
+  agents: IAgent[],
+  configuration: RulerConfiguration,
+  projectRoot: string,
+  verbose: boolean,
+  dryRun: boolean,
+  cliMcpEnabled: boolean,
+  cliMcpStrategy?: McpStrategy,
+  backup = true,
+): Promise<string[]> {
+  return await applyConfigurationsToAgents(
+    agents,
+    configuration.concatenatedRules,
+    configuration.rulerMcpJson,
+    configuration.config,
+    projectRoot,
+    verbose,
+    dryRun,
+    cliMcpEnabled,
+    cliMcpStrategy,
+    backup,
+  );
+}
+
+/**
+ * Applies configurations to the selected agents (internal function).
+ * @param agents Array of agents to process
+ * @param concatenatedRules Concatenated rule content
+ * @param rulerMcpJson MCP configuration JSON
+ * @param config Loaded configuration
+ * @param projectRoot Root directory of the project
+ * @param verbose Whether to enable verbose logging
+ * @param dryRun Whether to perform a dry run
+ * @returns Promise resolving to array of generated file paths
+ */
+export async function applyConfigurationsToAgents(
+  agents: IAgent[],
+  concatenatedRules: string,
+  rulerMcpJson: Record<string, unknown> | null,
+  config: LoadedConfig,
+  projectRoot: string,
+  verbose: boolean,
+  dryRun: boolean,
+  cliMcpEnabled = true,
+  cliMcpStrategy?: McpStrategy,
+  backup = true,
+): Promise<string[]> {
+  const generatedPaths: string[] = [];
+  let agentsMdWritten = false;
+
+  for (const agent of agents) {
+    logInfo(`Applying rules for ${agent.getName()}...`, dryRun);
+    logVerbose(`Processing agent: ${agent.getName()}`, verbose);
+    const agentConfig = config.agentConfigs[agent.getIdentifier()];
+    const agentRulerMcpJson = mergeAgentMcpServers(rulerMcpJson, agentConfig);
+
+    // Collect paths written by the rules phase for .gitignore. MCP-only
+    // sidecars are added by the MCP handling path once there is a compatible
+    // MCP payload to write.
+    const outputPaths = getAgentApplyOutputPaths(
+      agent,
+      projectRoot,
+      agentConfig,
+    );
+    const allOutputPaths = getAgentOutputPaths(agent, projectRoot, agentConfig);
+    const optionalOutputPaths = allOutputPaths.filter(
+      (outputPath) => !outputPaths.includes(outputPath),
+    );
+    const optionalOutputPathExistedBefore = new Map<string, boolean>();
+    if (!dryRun) {
+      for (const outputPath of optionalOutputPaths) {
+        optionalOutputPathExistedBefore.set(
+          outputPath,
+          await pathExists(resolveOutputPath(projectRoot, outputPath)),
+        );
+      }
+    }
+    logVerbose(
+      `Agent ${agent.getName()} output paths: ${outputPaths.join(', ')}`,
+      verbose,
+    );
+    generatedPaths.push(...outputPaths);
+
+    // Only add the backup file paths to the gitignore list if backups are enabled
+    if (backup) {
+      const backupPaths = outputPaths.map((p) => `${p}.bak`);
+      generatedPaths.push(...backupPaths);
+    }
+
+    if (dryRun) {
+      logVerbose(
+        `DRY RUN: Would write rules to: ${outputPaths.join(', ')}`,
+        verbose,
+      );
+    } else {
+      let skipApplyForThisAgent = false;
+      if (
+        agent.getIdentifier() === 'jules' ||
+        agent.getIdentifier() === 'agentsmd'
+      ) {
+        if (agentsMdWritten) {
+          // Skip rewriting AGENTS.md, but still allow MCP handling below
+          skipApplyForThisAgent = true;
+        } else {
+          agentsMdWritten = true;
+        }
+      }
+      const effectiveMcpEnabled =
+        cliMcpEnabled &&
+        (agentConfig?.mcp?.enabled ?? config.mcp?.enabled ?? true);
+      const effectiveMcpStrategy =
+        cliMcpStrategy ??
+        agentConfig?.mcp?.strategy ??
+        config.mcp?.strategy ??
+        'merge';
+      const finalAgentConfig = {
+        ...agentConfig,
+        mcp: {
+          ...agentConfig?.mcp,
+          enabled: effectiveMcpEnabled,
+          strategy: effectiveMcpStrategy,
+        },
+      };
+
+      const mcpForAgentApply = shouldUseEngineManagedMcp(agent)
+        ? null
+        : effectiveMcpEnabled
+          ? agentRulerMcpJson
+          : null;
+
+      if (!skipApplyForThisAgent) {
+        await agent.applyRulerConfig(
+          concatenatedRules,
+          projectRoot,
+          mcpForAgentApply,
+          finalAgentConfig,
+          backup,
+        );
+        for (const outputPath of outputPaths) {
+          const provenancePath = FileSystemUtils.getGeneratedProvenancePath(
+            resolveOutputPath(projectRoot, outputPath),
+          );
+          if (await pathExists(provenancePath)) {
+            generatedPaths.push(path.relative(projectRoot, provenancePath));
+          }
+        }
+        for (const outputPath of optionalOutputPaths) {
+          await trackOptionalGeneratedArtifacts(
+            outputPath,
+            projectRoot,
+            generatedPaths,
+            optionalOutputPathExistedBefore.get(outputPath) ?? false,
+            backup,
+          );
+        }
+      }
+    }
+
+    // Handle MCP configuration
+    await handleMcpConfiguration(
+      agent,
+      agentConfig,
+      config,
+      agentRulerMcpJson,
+      projectRoot,
+      generatedPaths,
+      verbose,
+      dryRun,
+      cliMcpEnabled,
+      cliMcpStrategy,
+      backup,
+    );
+  }
+
+  return generatedPaths;
+}
+
+function resolveOutputPath(projectRoot: string, outputPath: string): string {
+  return path.isAbsolute(outputPath)
+    ? outputPath
+    : path.resolve(projectRoot, outputPath);
+}
+
+async function handleMcpConfiguration(
+  agent: IAgent,
+  agentConfig: IAgentConfig | undefined,
+  config: LoadedConfig,
+  rulerMcpJson: Record<string, unknown> | null,
+  projectRoot: string,
+  generatedPaths: string[],
+  verbose: boolean,
+  dryRun: boolean,
+  cliMcpEnabled = true,
+  cliMcpStrategy?: McpStrategy,
+  backup = true,
+): Promise<void> {
+  if (!agentSupportsMcp(agent)) {
+    logVerbose(
+      `Agent ${agent.getName()} does not support MCP - skipping MCP configuration`,
+      verbose,
+    );
+    return;
+  }
+
+  const dest = await resolveMcpDestination(agent, agentConfig, projectRoot);
+  const mcpEnabledForAgent =
+    cliMcpEnabled && (agentConfig?.mcp?.enabled ?? config.mcp?.enabled ?? true);
+
+  if (!dest || !mcpEnabledForAgent) {
+    return;
+  }
+
+  const filteredMcpJson = rulerMcpJson
+    ? filterMcpConfigForAgent(rulerMcpJson, agent)
+    : null;
+
+  if (!filteredMcpJson) {
+    logVerbose(
+      `No compatible MCP servers found for ${agent.getName()} - skipping MCP configuration`,
+      verbose,
+    );
+    return;
+  }
+
+  await applyMcpConfiguration(
+    agent,
+    filteredMcpJson,
+    dest,
+    agentConfig,
+    config,
+    projectRoot,
+    cliMcpStrategy,
+    dryRun,
+    verbose,
+    backup,
+  );
+  if (!dryRun) {
+    await trackMcpGeneratedArtifacts(dest, projectRoot, generatedPaths, backup);
+  }
+}
+
+function shouldUseEngineManagedMcp(agent: IAgent): boolean {
+  return (
+    agent.getIdentifier() === 'codex' || agent.getIdentifier() === 'opencode'
+  );
+}
+
+function mergeAgentMcpServers(
+  rulerMcpJson: Record<string, unknown> | null,
+  agentConfig: IAgentConfig | undefined,
+): Record<string, unknown> | null {
+  const baseServers =
+    rulerMcpJson?.mcpServers && typeof rulerMcpJson.mcpServers === 'object'
+      ? (rulerMcpJson.mcpServers as Record<string, unknown>)
+      : {};
+  const agentServers = agentConfig?.mcpServers ?? {};
+  const mergedServers = {
+    ...baseServers,
+    ...agentServers,
+  };
+
+  return Object.keys(mergedServers).length > 0
+    ? { mcpServers: mergedServers }
+    : null;
+}
+
+async function resolveMcpDestination(
+  agent: IAgent,
+  agentConfig: IAgentConfig | undefined,
+  projectRoot: string,
+): Promise<string | null> {
+  if (agentConfig?.outputPathConfig) {
+    return path.resolve(projectRoot, agentConfig.outputPathConfig);
+  }
+
+  return await getNativeMcpPath(agent.getName(), projectRoot);
+}
+
+async function trackOptionalGeneratedArtifacts(
+  outputPath: string,
+  projectRoot: string,
+  generatedPaths: string[],
+  existedBefore: boolean,
+  backup = true,
+): Promise<void> {
+  const absolutePath = resolveOutputPath(projectRoot, outputPath);
+  if (!isPathInsideOrEqual(projectRoot, absolutePath)) {
+    return;
+  }
+
+  if (
+    (await pathExists(absolutePath)) &&
+    (!existedBefore ||
+      (await FileSystemUtils.isRulerGeneratedFile(absolutePath)))
+  ) {
+    generatedPaths.push(path.relative(projectRoot, absolutePath));
+    await trackExistingProvenance(absolutePath, projectRoot, generatedPaths);
+  }
+
+  if (backup) {
+    await trackVerifiedBackupArtifacts(
+      absolutePath,
+      projectRoot,
+      generatedPaths,
+    );
+  }
+}
+
+async function trackMcpGeneratedArtifacts(
+  dest: string,
+  projectRoot: string,
+  generatedPaths: string[],
+  backup = true,
+): Promise<void> {
+  if (!isPathInsideOrEqual(projectRoot, dest)) {
+    return;
+  }
+
+  if (await FileSystemUtils.isRulerGeneratedFile(dest)) {
+    generatedPaths.push(path.relative(projectRoot, dest));
+    await trackExistingProvenance(dest, projectRoot, generatedPaths);
+  }
+
+  if (backup) {
+    await trackVerifiedBackupArtifacts(dest, projectRoot, generatedPaths);
+  }
+}
+
+async function trackExistingProvenance(
+  filePath: string,
+  projectRoot: string,
+  generatedPaths: string[],
+): Promise<void> {
+  const provenancePath = getMcpProvenancePath(filePath);
+  if (await pathExists(provenancePath)) {
+    generatedPaths.push(path.relative(projectRoot, provenancePath));
+  }
+}
+
+async function trackVerifiedBackupArtifacts(
+  filePath: string,
+  projectRoot: string,
+  generatedPaths: string[],
+): Promise<void> {
+  const backupPath = `${filePath}.bak`;
+  if (!(await pathExists(backupPath))) {
+    return;
+  }
+
+  if (await FileSystemUtils.hasGeneratedProvenance(backupPath)) {
+    generatedPaths.push(path.relative(projectRoot, backupPath));
+    await trackExistingProvenance(backupPath, projectRoot, generatedPaths);
+  }
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeMcpTimeoutsForAgent(
+  agent: IAgent,
+  mcpJson: Record<string, unknown>,
+  dryRun: boolean,
+): Record<string, unknown> {
+  if (agent.supportsMcpTimeout?.()) {
+    return mcpJson;
+  }
+
+  if (!mcpJson.mcpServers || typeof mcpJson.mcpServers !== 'object') {
+    return mcpJson;
+  }
+
+  const servers = mcpJson.mcpServers as Record<string, unknown>;
+  const sanitizedServers: Record<string, unknown> = {};
+  const strippedTimeouts: string[] = [];
+
+  for (const [name, serverDef] of Object.entries(servers)) {
+    if (serverDef && typeof serverDef === 'object') {
+      const copy = { ...(serverDef as Record<string, unknown>) };
+      if ('timeout' in copy) {
+        delete copy.timeout;
+        strippedTimeouts.push(name);
+      }
+      sanitizedServers[name] = copy;
+    } else {
+      sanitizedServers[name] = serverDef;
+    }
+  }
+
+  if (strippedTimeouts.length > 0) {
+    logWarn(
+      `${agent.getName()} does not support MCP server timeout configuration; ignoring timeout for: ${strippedTimeouts.join(', ')}`,
+      dryRun,
+    );
+  }
+
+  return {
+    ...mcpJson,
+    mcpServers: sanitizedServers,
+  };
+}
+
+async function applyMcpConfiguration(
+  agent: IAgent,
+  filteredMcpJson: Record<string, unknown>,
+  dest: string,
+  agentConfig: IAgentConfig | undefined,
+  config: LoadedConfig,
+  projectRoot: string,
+  cliMcpStrategy: McpStrategy | undefined,
+  dryRun: boolean,
+  verbose: boolean,
+  backup = true,
+): Promise<void> {
+  // Prevent writing MCP configs outside the project root (e.g., legacy home-directory targets)
+  if (!isPathInsideOrEqual(projectRoot, dest)) {
+    logVerbose(
+      `Skipping MCP config for ${agent.getName()} because target path is outside project: ${dest}`,
+      verbose,
+    );
+    return;
+  }
+
+  const agentMcpJson = sanitizeMcpTimeoutsForAgent(
+    agent,
+    filteredMcpJson,
+    dryRun,
+  );
+
+  if (agent.getIdentifier() === 'openhands') {
+    return await applyOpenHandsMcpConfiguration(
+      agentMcpJson,
+      dest,
+      projectRoot,
+      cliMcpStrategy ?? agentConfig?.mcp?.strategy ?? config.mcp?.strategy,
+      dryRun,
+      verbose,
+      backup,
+    );
+  }
+
+  if (agent.getIdentifier() === 'opencode') {
+    return await applyOpenCodeMcpConfiguration(
+      agentMcpJson,
+      dest,
+      projectRoot,
+      cliMcpStrategy ?? agentConfig?.mcp?.strategy ?? config.mcp?.strategy,
+      dryRun,
+      verbose,
+      backup,
+    );
+  }
+
+  // Agents that handle MCP configuration internally should not have external MCP handling
+  if (
+    agent.getIdentifier() === 'zed' ||
+    agent.getIdentifier() === 'gemini-cli' ||
+    agent.getIdentifier() === 'amazonqcli' ||
+    agent.getIdentifier() === 'amazon-q-cli' ||
+    agent.getIdentifier() === 'crush' ||
+    agent.getIdentifier() === 'mistral'
+  ) {
+    logVerbose(
+      `Skipping external MCP config for ${agent.getName()} - handled internally by agent`,
+      verbose,
+    );
+    return;
+  }
+
+  return await applyStandardMcpConfiguration(
+    agent,
+    agentMcpJson,
+    dest,
+    agentConfig,
+    config,
+    projectRoot,
+    cliMcpStrategy,
+    dryRun,
+    verbose,
+    backup,
+  );
+}
+
+async function applyOpenHandsMcpConfiguration(
+  filteredMcpJson: Record<string, unknown>,
+  dest: string,
+  projectRoot: string,
+  strategy: McpStrategy | undefined,
+  dryRun: boolean,
+  verbose: boolean,
+  backup = true,
+): Promise<void> {
+  if (dryRun) {
+    logVerbose(
+      `DRY RUN: Would apply MCP config by updating TOML file: ${dest}`,
+      verbose,
+    );
+  } else {
+    const existedBefore = await pathExists(dest);
+    await propagateMcpToOpenHands(
+      filteredMcpJson,
+      dest,
+      backup,
+      strategy,
+      projectRoot,
+    );
+    if (!existedBefore) {
+      await writeMcpProvenance(dest, projectRoot);
+    }
+  }
+}
+
+async function applyOpenCodeMcpConfiguration(
+  filteredMcpJson: Record<string, unknown>,
+  dest: string,
+  projectRoot: string,
+  strategy: McpStrategy | undefined,
+  dryRun: boolean,
+  verbose: boolean,
+  backup = true,
+): Promise<void> {
+  if (dryRun) {
+    logVerbose(
+      `DRY RUN: Would apply MCP config by updating OpenCode config file: ${dest}`,
+      verbose,
+    );
+  } else {
+    const existedBefore = await pathExists(dest);
+    await propagateMcpToOpenCode(
+      filteredMcpJson,
+      dest,
+      backup,
+      strategy,
+      projectRoot,
+    );
+    if (!existedBefore) {
+      await writeMcpProvenance(dest, projectRoot);
+    }
+  }
+}
+
+/**
+ * Transform MCP server types for Claude Code compatibility.
+ * Claude expects "http" for HTTP servers and "sse" for SSE servers, not "remote".
+ */
+function transformMcpForClaude(
+  mcpJson: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!mcpJson.mcpServers || typeof mcpJson.mcpServers !== 'object') {
+    return mcpJson;
+  }
+
+  const transformedMcp = { ...mcpJson };
+  const transformedServers: Record<string, unknown> = {};
+
+  for (const [name, serverDef] of Object.entries(
+    mcpJson.mcpServers as Record<string, unknown>,
+  )) {
+    if (serverDef && typeof serverDef === 'object') {
+      const server = serverDef as Record<string, unknown>;
+      const transformedServer = { ...server };
+
+      // Transform type: "remote" to appropriate Claude types
+      if (
+        server.type === 'remote' &&
+        server.url &&
+        typeof server.url === 'string'
+      ) {
+        const url = server.url as string;
+
+        // Check if URL suggests SSE (contains /sse path segment)
+        if (/\/sse(\/|$)/i.test(url)) {
+          transformedServer.type = 'sse';
+        } else {
+          transformedServer.type = 'http';
+        }
+      }
+
+      transformedServers[name] = transformedServer;
+    } else {
+      transformedServers[name] = serverDef;
+    }
+  }
+
+  transformedMcp.mcpServers = transformedServers;
+  return transformedMcp;
+}
+
+/**
+ * Transform MCP server types for Kilo Code compatibility.
+ * Kilo Code expects "streamable-http" for remote HTTP servers, not "remote".
+ */
+function transformMcpForKiloCode(
+  mcpJson: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!mcpJson.mcpServers || typeof mcpJson.mcpServers !== 'object') {
+    return mcpJson;
+  }
+
+  const transformedMcp = { ...mcpJson };
+  const transformedServers: Record<string, unknown> = {};
+
+  for (const [name, serverDef] of Object.entries(
+    mcpJson.mcpServers as Record<string, unknown>,
+  )) {
+    if (serverDef && typeof serverDef === 'object') {
+      const server = serverDef as Record<string, unknown>;
+      const transformedServer = { ...server };
+
+      // Transform type: "remote" to "streamable-http" for HTTP-based servers
+      if (
+        server.type === 'remote' &&
+        server.url &&
+        typeof server.url === 'string'
+      ) {
+        transformedServer.type = 'streamable-http';
+      }
+
+      transformedServers[name] = transformedServer;
+    } else {
+      transformedServers[name] = serverDef;
+    }
+  }
+
+  transformedMcp.mcpServers = transformedServers;
+  return transformedMcp;
+}
+
+/**
+ * Transform MCP server types for Factory Droid compatibility.
+ * Factory Droid expects "http" for remote HTTP servers, not "remote".
+ */
+function transformMcpForFactoryDroid(
+  mcpJson: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!mcpJson.mcpServers || typeof mcpJson.mcpServers !== 'object') {
+    return mcpJson;
+  }
+
+  const transformedMcp = { ...mcpJson };
+  const transformedServers: Record<string, unknown> = {};
+
+  for (const [name, serverDef] of Object.entries(
+    mcpJson.mcpServers as Record<string, unknown>,
+  )) {
+    if (serverDef && typeof serverDef === 'object') {
+      const server = serverDef as Record<string, unknown>;
+      const transformedServer = { ...server };
+
+      if (
+        server.type === 'remote' &&
+        server.url &&
+        typeof server.url === 'string'
+      ) {
+        transformedServer.type = 'http';
+      }
+
+      transformedServers[name] = transformedServer;
+    } else {
+      transformedServers[name] = serverDef;
+    }
+  }
+
+  transformedMcp.mcpServers = transformedServers;
+  return transformedMcp;
+}
+
+async function applyStandardMcpConfiguration(
+  agent: IAgent,
+  filteredMcpJson: Record<string, unknown>,
+  dest: string,
+  agentConfig: IAgentConfig | undefined,
+  config: LoadedConfig,
+  projectRoot: string,
+  cliMcpStrategy: McpStrategy | undefined,
+  dryRun: boolean,
+  verbose: boolean,
+  backup = true,
+): Promise<void> {
+  const strategy =
+    cliMcpStrategy ??
+    agentConfig?.mcp?.strategy ??
+    config.mcp?.strategy ??
+    'merge';
+  const serverKey = agent.getMcpServerKey?.() ?? 'mcpServers';
+
+  // Skip agents with empty server keys (e.g., AgentsMdAgent, GooseAgent)
+  if (serverKey === '') {
+    logVerbose(
+      `Skipping MCP config for ${agent.getName()} - agent has empty server key`,
+      verbose,
+    );
+    return;
+  }
+
+  logVerbose(
+    `Applying filtered MCP config for ${agent.getName()} with strategy: ${strategy} and key: ${serverKey}`,
+    verbose,
+  );
+
+  if (dryRun) {
+    logVerbose(`DRY RUN: Would apply MCP config to: ${dest}`, verbose);
+  } else {
+    // Transform MCP config for agent-specific compatibility
+    let mcpToMerge = filteredMcpJson;
+    if (
+      agent.getIdentifier() === 'claude' ||
+      agent.getIdentifier() === 'aider'
+    ) {
+      mcpToMerge = transformMcpForClaude(filteredMcpJson);
+    } else if (agent.getIdentifier() === 'kilocode') {
+      mcpToMerge = transformMcpForKiloCode(filteredMcpJson);
+    } else if (agent.getIdentifier() === 'factory') {
+      mcpToMerge = transformMcpForFactoryDroid(filteredMcpJson);
+    }
+
+    const CODEX_AGENT_ID = 'codex';
+    const isCodexToml =
+      agent.getIdentifier() === CODEX_AGENT_ID && dest.endsWith('.toml');
+    const existedBefore = await pathExists(dest);
+    const existing = isCodexToml
+      ? await readNativeMcpToml(
+          dest,
+          (text) => parseTOML(text) as Record<string, unknown>,
+        )
+      : await readNativeMcp(dest);
+    let merged = mergeMcp(existing, mcpToMerge, strategy, serverKey);
+    if (isCodexToml) {
+      const { [serverKey]: servers, ...rest } = merged as Record<
+        string,
+        unknown
+      >;
+      merged = {
+        ...rest,
+        // Codex CLI expects MCP servers under mcp_servers in config.toml.
+        mcp_servers: servers ?? {},
+      };
+    }
+
+    // Firebase Studio (IDX) expects no "type" fields in .idx/mcp.json server entries.
+    // Sanitize merged config by stripping 'type' from each server when targeting Firebase.
+    const sanitizeForFirebase = (
+      obj: Record<string, unknown>,
+    ): Record<string, unknown> => {
+      if (agent.getIdentifier() !== 'firebase') return obj;
+      const out: Record<string, unknown> = { ...obj };
+      const servers = (out[serverKey] as Record<string, unknown>) || {};
+      const cleanedServers: Record<string, unknown> = {};
+      for (const [name, def] of Object.entries(servers)) {
+        if (def && typeof def === 'object') {
+          const copy = { ...(def as Record<string, unknown>) };
+          delete (copy as Record<string, unknown>).type;
+          cleanedServers[name] = copy;
+        } else {
+          cleanedServers[name] = def;
+        }
+      }
+      out[serverKey] = cleanedServers;
+      return out;
+    };
+
+    // Gemini CLI (since v0.21.0) no longer accepts the "type" field in MCP server entries.
+    // Following the MCP spec update from Nov 25, 2025, the transport type is now inferred
+    // from the presence of specific keys (command/args -> stdio, url -> sse/http).
+    // Sanitize merged config by stripping 'type' from each server when targeting Gemini.
+    const sanitizeForGemini = (
+      obj: Record<string, unknown>,
+    ): Record<string, unknown> => {
+      if (agent.getIdentifier() !== 'gemini-cli') return obj;
+      const out: Record<string, unknown> = { ...obj };
+      const servers = (out[serverKey] as Record<string, unknown>) || {};
+      const cleanedServers: Record<string, unknown> = {};
+      for (const [name, def] of Object.entries(servers)) {
+        if (def && typeof def === 'object') {
+          const copy = { ...(def as Record<string, unknown>) };
+          delete (copy as Record<string, unknown>).type;
+          cleanedServers[name] = copy;
+        } else {
+          cleanedServers[name] = def;
+        }
+      }
+      out[serverKey] = cleanedServers;
+      return out;
+    };
+
+    let toWrite = sanitizeForFirebase(merged);
+    toWrite = sanitizeForGemini(toWrite);
+
+    // Only backup and write if content would actually change (idempotent)
+    const currentContent = isCodexToml
+      ? stringify(existing as Record<string, unknown>)
+      : JSON.stringify(existing, null, 2);
+    const newContent = isCodexToml
+      ? stringify(toWrite as Record<string, unknown>)
+      : JSON.stringify(toWrite, null, 2);
+
+    if (currentContent !== newContent) {
+      if (backup) {
+        const { backupFile } = await import('../core/FileSystemUtils');
+        await backupFile(dest, projectRoot);
+      }
+      if (isCodexToml) {
+        await FileSystemUtils.writeGeneratedFile(
+          dest,
+          stringify(toWrite as Record<string, unknown>),
+          projectRoot,
+        );
+      } else {
+        await writeNativeMcp(dest, toWrite, projectRoot);
+      }
+      if (!existedBefore) {
+        await writeMcpProvenance(dest, projectRoot);
+      }
+    } else {
+      logVerbose(
+        `MCP config for ${agent.getName()} is already up to date - skipping backup and write`,
+        verbose,
+      );
+    }
+  }
+}
+
+/**
+ * Updates the .gitignore file with generated paths.
+ * @param projectRoot Root directory of the project
+ * @param generatedPaths Array of generated file paths
+ * @param config Loaded configuration
+ * @param cliGitignoreEnabled CLI gitignore setting
+ * @param dryRun Whether to perform a dry run
+ * @param cliGitignoreLocal CLI toggle for .git/info/exclude usage
+ */
+export async function updateGitignore(
+  projectRoot: string,
+  generatedPaths: string[],
+  config: LoadedConfig,
+  cliGitignoreEnabled: boolean | undefined,
+  dryRun: boolean,
+  cliGitignoreLocal?: boolean,
+): Promise<void> {
+  // Configuration precedence: CLI > TOML > Default (enabled)
+  let gitignoreEnabled: boolean;
+  if (cliGitignoreEnabled !== undefined) {
+    gitignoreEnabled = cliGitignoreEnabled;
+  } else if (config.gitignore?.enabled !== undefined) {
+    gitignoreEnabled = config.gitignore.enabled;
+  } else {
+    gitignoreEnabled = true; // Default enabled
+  }
+  const gitignoreTarget =
+    cliGitignoreLocal !== undefined
+      ? cliGitignoreLocal
+        ? '.git/info/exclude'
+        : '.gitignore'
+      : config.gitignore?.local
+        ? '.git/info/exclude'
+        : '.gitignore';
+
+  if (gitignoreEnabled && generatedPaths.length > 0) {
+    const uniquePaths = [...new Set(generatedPaths)];
+
+    // Note: Individual backup patterns are added per-file in the collection phase
+    // No need to add a broad *.bak pattern here
+
+    if (uniquePaths.length > 0) {
+      if (dryRun) {
+        logInfo(
+          `Would update ${gitignoreTarget} with ${uniquePaths.length} unique path(s): ${uniquePaths.join(', ')}`,
+          dryRun,
+        );
+      } else {
+        await updateGitignoreUtil(projectRoot, uniquePaths, gitignoreTarget);
+        logInfo(
+          `Updated ${gitignoreTarget} with ${uniquePaths.length} unique path(s) in the Ruler block.`,
+          dryRun,
+        );
+      }
+    }
+  }
+}

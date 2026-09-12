@@ -1,0 +1,184 @@
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import os from 'os';
+import { findAllRulerDirs } from '../../../src/core/FileSystemUtils';
+
+describe('FileSystemUtils - Nested', () => {
+  let tmpDir: string;
+
+  beforeAll(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ruler-nested-test-'));
+  });
+
+  afterAll(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  describe('findAllRulerDirs', () => {
+    it('finds all .ruler directories in hierarchy', async () => {
+      // Create nested directory structure
+      const projectDir = path.join(tmpDir, 'project');
+      const moduleDir = path.join(projectDir, 'module');
+      const submoduleDir = path.join(moduleDir, 'submodule');
+
+      await fs.mkdir(path.join(projectDir, '.ruler'), { recursive: true });
+      await fs.mkdir(path.join(moduleDir, '.ruler'), { recursive: true });
+      await fs.mkdir(path.join(submoduleDir, '.ruler'), { recursive: true });
+
+      const rulerDirs = await findAllRulerDirs(projectDir);
+
+      // Should find all three .ruler directories, most specific first
+      expect(rulerDirs).toHaveLength(3);
+      expect(rulerDirs[0]).toBe(path.join(submoduleDir, '.ruler'));
+      expect(rulerDirs[1]).toBe(path.join(moduleDir, '.ruler'));
+      expect(rulerDirs[2]).toBe(path.join(projectDir, '.ruler'));
+    });
+
+    it('returns empty array when no .ruler directories found', async () => {
+      const someDir = path.join(tmpDir, 'empty');
+      await fs.mkdir(someDir, { recursive: true });
+
+      const rulerDirs = await findAllRulerDirs(someDir);
+      expect(rulerDirs).toHaveLength(0);
+    });
+
+    it('skips .ruler directories inside nested git repositories', async () => {
+      const projectDir = path.join(tmpDir, 'git-boundaries');
+      const nestedGitDir = path.join(projectDir, 'sub');
+      const siblingDir = path.join(projectDir, 'module');
+
+      await fs.mkdir(path.join(projectDir, '.git'), { recursive: true });
+      await fs.mkdir(path.join(projectDir, '.ruler'), { recursive: true });
+
+      await fs.mkdir(path.join(nestedGitDir, '.git'), { recursive: true });
+      await fs.mkdir(path.join(nestedGitDir, '.ruler'), { recursive: true });
+
+      await fs.mkdir(path.join(siblingDir, '.ruler'), { recursive: true });
+
+      const rulerDirs = await findAllRulerDirs(projectDir);
+
+      expect(rulerDirs).toEqual([
+        path.join(siblingDir, '.ruler'),
+        path.join(projectDir, '.ruler'),
+      ]);
+    });
+
+    it('skips .ruler directories inside nested file-backed git worktrees', async () => {
+      const projectDir = path.join(tmpDir, 'file-git-boundaries');
+      const linkedWorktreeDir = path.join(projectDir, 'linked');
+      const siblingDir = path.join(projectDir, 'module');
+
+      await fs.mkdir(path.join(projectDir, '.ruler'), { recursive: true });
+      await fs.mkdir(path.join(linkedWorktreeDir, '.ruler'), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        path.join(linkedWorktreeDir, '.git'),
+        'gitdir: /path/to/main-repository/.git/worktrees/linked\n',
+      );
+      await fs.mkdir(path.join(siblingDir, '.ruler'), { recursive: true });
+
+      const rulerDirs = await findAllRulerDirs(projectDir);
+
+      expect(rulerDirs).toEqual([
+        path.join(siblingDir, '.ruler'),
+        path.join(projectDir, '.ruler'),
+      ]);
+    });
+
+    it('does not treat arbitrary .git files as repository boundaries', async () => {
+      const projectDir = path.join(tmpDir, 'non-git-file');
+      const nestedDir = path.join(projectDir, 'nested');
+
+      await fs.mkdir(path.join(projectDir, '.ruler'), { recursive: true });
+      await fs.mkdir(path.join(nestedDir, '.ruler'), { recursive: true });
+      await fs.writeFile(path.join(nestedDir, '.git'), 'not git metadata\n');
+
+      const rulerDirs = await findAllRulerDirs(projectDir);
+
+      expect(rulerDirs).toEqual([
+        path.join(nestedDir, '.ruler'),
+        path.join(projectDir, '.ruler'),
+      ]);
+    });
+
+    it('does not treat multiline .git files with a later gitdir line as repository boundaries', async () => {
+      const projectDir = path.join(tmpDir, 'multiline-non-git-file');
+      const nestedDir = path.join(projectDir, 'nested');
+
+      await fs.mkdir(path.join(projectDir, '.ruler'), { recursive: true });
+      await fs.mkdir(path.join(nestedDir, '.ruler'), { recursive: true });
+      await fs.writeFile(
+        path.join(nestedDir, '.git'),
+        'arbitrary metadata\ngitdir: /not/a/git/marker\n',
+      );
+
+      const rulerDirs = await findAllRulerDirs(projectDir);
+
+      expect(rulerDirs).toEqual([
+        path.join(nestedDir, '.ruler'),
+        path.join(projectDir, '.ruler'),
+      ]);
+    });
+
+    it('skips .ruler directories inside generated and fixture directories', async () => {
+      const projectDir = path.join(tmpDir, 'ignored-generated-trees');
+      const moduleDir = path.join(projectDir, 'packages', 'app');
+      const generatedDirs = [
+        'node_modules',
+        'dist',
+        'build',
+        'coverage',
+        'fixtures',
+        '__fixtures__',
+        'tmp',
+        'temp',
+        'generated',
+        '__generated__',
+      ];
+
+      await fs.mkdir(path.join(projectDir, '.ruler'), { recursive: true });
+      await fs.mkdir(path.join(moduleDir, '.ruler'), { recursive: true });
+
+      await Promise.all(
+        generatedDirs.map((dirName) =>
+          fs.mkdir(path.join(projectDir, dirName, 'nested', '.ruler'), {
+            recursive: true,
+          }),
+        ),
+      );
+
+      const rulerDirs = await findAllRulerDirs(projectDir);
+
+      expect(rulerDirs).toEqual([
+        path.join(moduleDir, '.ruler'),
+        path.join(projectDir, '.ruler'),
+      ]);
+    });
+
+    it('still discovers normal nested project directories', async () => {
+      const projectDir = path.join(tmpDir, 'normal-nested-projects');
+      const nestedProjectDirs = [
+        path.join(projectDir, 'apps', 'web'),
+        path.join(projectDir, 'packages', 'core'),
+        path.join(projectDir, 'examples', 'cli'),
+      ];
+
+      await fs.mkdir(path.join(projectDir, '.ruler'), { recursive: true });
+      await Promise.all(
+        nestedProjectDirs.map((nestedProjectDir) =>
+          fs.mkdir(path.join(nestedProjectDir, '.ruler'), { recursive: true }),
+        ),
+      );
+
+      const rulerDirs = await findAllRulerDirs(projectDir);
+
+      expect(rulerDirs).toEqual([
+        path.join(projectDir, 'apps', 'web', '.ruler'),
+        path.join(projectDir, 'examples', 'cli', '.ruler'),
+        path.join(projectDir, 'packages', 'core', '.ruler'),
+        path.join(projectDir, '.ruler'),
+      ]);
+    });
+  });
+});

@@ -1,0 +1,365 @@
+import { applyAllAgentConfigs } from '../lib';
+import { revertAllAgentConfigs } from '../revert';
+import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs/promises';
+import { ERROR_PREFIX, DEFAULT_RULES_FILENAME } from '../constants';
+import { McpStrategy } from '../types';
+import { loadConfig } from '../core/ConfigLoader';
+
+type CliStringOption = string | string[];
+
+export interface ApplyArgs {
+  'project-root': CliStringOption;
+  agents?: CliStringOption;
+  config?: CliStringOption;
+  mcp: boolean;
+  'mcp-overwrite': boolean;
+  gitignore?: boolean;
+  'gitignore-local'?: boolean;
+  verbose: boolean;
+  'dry-run': boolean;
+  'local-only': boolean;
+  nested?: boolean;
+  backup?: boolean;
+  skills?: boolean;
+  subagents?: boolean;
+}
+
+export interface InitArgs {
+  'project-root': CliStringOption;
+  global: boolean;
+}
+
+export interface RevertArgs {
+  'project-root': CliStringOption;
+  agents?: CliStringOption;
+  config?: CliStringOption;
+  'keep-backups': boolean;
+  verbose: boolean;
+  'dry-run': boolean;
+  'local-only': boolean;
+  nested?: boolean;
+}
+
+function assertNotInsideRulerDir(projectRoot: string): void {
+  if (getContainingRulerDir(projectRoot) !== undefined) {
+    throw new Error(
+      'Cannot run from inside a .ruler directory. Please run from your project root.',
+    );
+  }
+}
+
+function assertInitRootNotInsideRulerDir(projectRoot: string): void {
+  const containingRulerDir = getContainingRulerDir(projectRoot);
+  if (containingRulerDir !== undefined) {
+    throw new Error(
+      `Cannot initialise inside an existing .ruler directory (${containingRulerDir}). Please choose the project root.`,
+    );
+  }
+}
+
+function getContainingRulerDir(projectRoot: string): string | undefined {
+  const normalized = path.resolve(projectRoot);
+  const segments = normalized.split(path.sep);
+  const rulerIndex = segments.indexOf('.ruler');
+  if (rulerIndex === -1) {
+    return undefined;
+  }
+  return segments.slice(0, rulerIndex + 1).join(path.sep) || path.sep;
+}
+
+function formatCliError(message: string): string {
+  return message.startsWith(ERROR_PREFIX)
+    ? message
+    : `${ERROR_PREFIX} ${message}`;
+}
+
+function parseOptionalStringOption(
+  value: CliStringOption | undefined,
+  optionName: string,
+): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (Array.isArray(value)) {
+    throw new Error(`Option --${optionName} can only be provided once.`);
+  }
+  return value;
+}
+
+function parseRequiredStringOption(
+  value: CliStringOption | undefined,
+  optionName: string,
+): string {
+  const parsed = parseOptionalStringOption(value, optionName);
+  if (parsed === undefined) {
+    throw new Error(`Missing required option --${optionName}.`);
+  }
+  return parsed;
+}
+
+function parseCliAgents(
+  agents: CliStringOption | undefined,
+): string[] | undefined {
+  const agentsString = parseOptionalStringOption(agents, 'agents');
+  if (agentsString === undefined) {
+    return undefined;
+  }
+
+  const parsedAgents = agentsString.split(',').map((agent) => agent.trim());
+  if (parsedAgents.some((agent) => agent.length === 0)) {
+    throw new Error(
+      'Empty agent token in --agents. Remove extra commas or provide an agent name.',
+    );
+  }
+
+  return parsedAgents;
+}
+
+async function resolveNestedPreference(
+  argv: { nested?: boolean },
+  projectRoot: string,
+  configPath: string | undefined,
+  localOnly: boolean,
+): Promise<boolean> {
+  if (argv.nested !== undefined) {
+    // CLI explicitly set nested (either --nested or --no-nested)
+    return argv.nested;
+  }
+
+  // CLI didn't set nested, check TOML configuration
+  const config = await loadConfig({
+    projectRoot,
+    configPath,
+    checkGlobal: !localOnly,
+  });
+  // Use TOML setting if available, otherwise default to false
+  return config.nested ?? false;
+}
+
+/**
+ * Handler for the 'apply' command.
+ */
+export async function applyHandler(argv: ApplyArgs): Promise<void> {
+  const mcpEnabled = argv.mcp;
+  const mcpStrategy: McpStrategy | undefined = argv['mcp-overwrite']
+    ? 'overwrite'
+    : undefined;
+  const verbose = argv.verbose;
+  const dryRun = argv['dry-run'];
+  const localOnly = argv['local-only'];
+  const backup = argv.backup;
+
+  // Determine gitignore preference: CLI > TOML > Default (enabled)
+  // yargs handles --no-gitignore by setting gitignore to false
+  let gitignorePreference: boolean | undefined;
+  if (argv.gitignore !== undefined) {
+    gitignorePreference = argv.gitignore;
+  } else {
+    gitignorePreference = undefined; // Let TOML/default decide
+  }
+  let gitignoreLocalPreference: boolean | undefined;
+  if (argv['gitignore-local'] !== undefined) {
+    gitignoreLocalPreference = argv['gitignore-local'];
+  } else {
+    gitignoreLocalPreference = undefined; // Let TOML/default decide
+  }
+
+  // Determine skills preference: CLI > TOML > Default (enabled)
+  let skillsEnabled: boolean | undefined;
+  if (argv.skills !== undefined) {
+    skillsEnabled = argv.skills;
+  } else {
+    skillsEnabled = undefined; // Let config/default decide
+  }
+
+  // Determine subagents preference: CLI > TOML > Default (disabled)
+  let subagentsEnabled: boolean | undefined;
+  if (argv.subagents !== undefined) {
+    subagentsEnabled = argv.subagents;
+  } else {
+    subagentsEnabled = undefined; // Let config/default decide
+  }
+
+  try {
+    const projectRoot = parseRequiredStringOption(
+      argv['project-root'],
+      'project-root',
+    );
+    assertNotInsideRulerDir(projectRoot);
+    const configPath = parseOptionalStringOption(argv.config, 'config');
+    const agents = parseCliAgents(argv.agents);
+
+    // Determine nested preference: CLI > TOML > Default (false)
+    const nested = await resolveNestedPreference(
+      argv,
+      projectRoot,
+      configPath,
+      localOnly,
+    );
+
+    await applyAllAgentConfigs(
+      projectRoot,
+      agents,
+      configPath,
+      mcpEnabled,
+      mcpStrategy,
+      gitignorePreference,
+      verbose,
+      dryRun,
+      localOnly,
+      nested,
+      backup,
+      skillsEnabled,
+      gitignoreLocalPreference,
+      subagentsEnabled,
+    );
+    console.log('Ruler apply completed successfully.');
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(formatCliError(message));
+    process.exit(1);
+  }
+}
+
+/**
+ * Handler for the 'init' command.
+ */
+export async function initHandler(argv: InitArgs): Promise<void> {
+  const isGlobal = argv['global'];
+
+  try {
+    const projectRoot = parseRequiredStringOption(
+      argv['project-root'],
+      'project-root',
+    );
+    if (!isGlobal) {
+      assertInitRootNotInsideRulerDir(projectRoot);
+    }
+    const rulerDir = isGlobal
+      ? path.join(
+          process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
+          'ruler',
+        )
+      : path.join(projectRoot, '.ruler');
+    await fs.mkdir(rulerDir, { recursive: true });
+    const instructionsPath = path.join(rulerDir, DEFAULT_RULES_FILENAME); // .ruler/AGENTS.md
+    const tomlPath = path.join(rulerDir, 'ruler.toml');
+    const exists = async (p: string) => {
+      try {
+        await fs.access(p);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const DEFAULT_INSTRUCTIONS = `# AGENTS.md\n\nCentralised AI agent instructions. Add coding guidelines, style guides, and project context here.\n\nRuler concatenates all .md files in this directory (and subdirectories), starting with AGENTS.md (if present), then remaining files in sorted order.\n`;
+    const DEFAULT_TOML = `# Ruler Configuration File
+# See https://ai.intellectronica.net/ruler for documentation.
+
+# To specify which agents are active by default when --agents is not used,
+# uncomment and populate the following line. If omitted, all agents are active.
+# default_agents = ["copilot", "claude"]
+
+# Enable nested rule loading from nested .ruler directories
+# When enabled, ruler will search for and process .ruler directories throughout the project hierarchy
+# nested = false
+
+# [gitignore]
+# enabled = true
+# local = false  # set true to write generated ignores to .git/info/exclude instead
+
+# [backup]
+# enabled = true  # set false to disable .bak backup files
+
+# --- Agent Specific Configurations ---
+# You can enable/disable agents and override their default output paths here.
+# Use lowercase agent identifiers: aider, amp, claude, cline, codex, copilot, cursor, jetbrains-ai, kilocode, pi, windsurf
+
+# [agents.copilot]
+# enabled = true
+# output_path = ".github/copilot-instructions.md"
+
+# [agents.aider]
+# enabled = true
+# output_path_instructions = "AGENTS.md"
+# output_path_config = ".aider.conf.yml"
+
+# [agents.gemini-cli]
+# enabled = true
+
+# --- MCP Servers ---
+# Define Model Context Protocol servers here. Two examples:
+# 1. A stdio server (local executable)
+# 2. A remote server (HTTP-based)
+
+# [mcp_servers.example_stdio]
+# command = "node"
+# args = ["scripts/your-mcp-server.js"]
+# env = { API_KEY = "replace_me" }
+
+# [mcp_servers.example_remote]
+# url = "https://api.example.com/mcp"
+# headers = { Authorization = "Bearer REPLACE_ME" }
+`;
+    if (!(await exists(instructionsPath))) {
+      // Create new AGENTS.md regardless of legacy presence.
+      await fs.writeFile(instructionsPath, DEFAULT_INSTRUCTIONS);
+      console.log(`[ruler] Created ${instructionsPath}`);
+    } else {
+      console.log(`[ruler] ${DEFAULT_RULES_FILENAME} already exists, skipping`);
+    }
+    if (!(await exists(tomlPath))) {
+      await fs.writeFile(tomlPath, DEFAULT_TOML);
+      console.log(`[ruler] Created ${tomlPath}`);
+    } else {
+      console.log(`[ruler] ruler.toml already exists, skipping`);
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(formatCliError(message));
+    process.exit(1);
+  }
+}
+
+/**
+ * Handler for the 'revert' command.
+ */
+export async function revertHandler(argv: RevertArgs): Promise<void> {
+  const keepBackups = argv['keep-backups'];
+  const verbose = argv.verbose;
+  const dryRun = argv['dry-run'];
+  const localOnly = argv['local-only'];
+
+  try {
+    const projectRoot = parseRequiredStringOption(
+      argv['project-root'],
+      'project-root',
+    );
+    assertNotInsideRulerDir(projectRoot);
+    const configPath = parseOptionalStringOption(argv.config, 'config');
+    const agents = parseCliAgents(argv.agents);
+    const nested = await resolveNestedPreference(
+      argv,
+      projectRoot,
+      configPath,
+      localOnly,
+    );
+
+    await revertAllAgentConfigs(
+      projectRoot,
+      agents,
+      configPath,
+      keepBackups,
+      verbose,
+      dryRun,
+      localOnly,
+      nested,
+    );
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(formatCliError(message));
+    process.exit(1);
+  }
+}

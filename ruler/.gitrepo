@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/intellectronica/ruler.git
+	branch = main
+	commit = 0fa2caeef4efaef4c5f8ffbedee8feca4b0b00e2
+	parent = e04160fbaf1deb53e86e6191a914bd871a4c48a2
+	method = merge
+	cmdver = 0.4.9

@@ -1,0 +1,121 @@
+import { IAgent, IAgentConfig } from './IAgent';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { AgentsMdAgent } from './AgentsMdAgent';
+import {
+  assertManagedPathInsideRoot,
+  backupFile,
+  writeGeneratedFile,
+} from '../core/FileSystemUtils';
+
+export class OpenCodeAgent implements IAgent {
+  private agentsMdAgent = new AgentsMdAgent();
+
+  getIdentifier(): string {
+    return 'opencode';
+  }
+
+  getName(): string {
+    return 'OpenCode';
+  }
+
+  getDefaultOutputPath(projectRoot: string): Record<string, string> {
+    return {
+      instructions: path.join(projectRoot, 'AGENTS.md'),
+      mcp: path.join(projectRoot, 'opencode.json'),
+    };
+  }
+
+  async applyRulerConfig(
+    concatenatedRules: string,
+    projectRoot: string,
+    rulerMcpJson: Record<string, unknown> | null,
+    agentConfig?: IAgentConfig,
+    backup = true,
+  ): Promise<void> {
+    const outputPaths = this.getDefaultOutputPath(projectRoot);
+    const instructionsPath = path.resolve(
+      projectRoot,
+      agentConfig?.outputPath ??
+        agentConfig?.outputPathInstructions ??
+        outputPaths['instructions'],
+    );
+    const mcpPath = path.resolve(
+      projectRoot,
+      agentConfig?.outputPathConfig ?? outputPaths['mcp'],
+    );
+
+    await this.agentsMdAgent.applyRulerConfig(
+      concatenatedRules,
+      projectRoot,
+      null,
+      { outputPath: instructionsPath },
+      backup,
+    );
+
+    if (!rulerMcpJson) {
+      return;
+    }
+
+    // Create OpenCode config with schema and MCP configuration
+    let finalMcpConfig: { $schema: string; mcp: Record<string, unknown> } = {
+      $schema: 'https://opencode.ai/config.json',
+      mcp: {},
+    };
+
+    await assertManagedPathInsideRoot(
+      mcpPath,
+      projectRoot,
+      'Refusing to write generated file outside project',
+    );
+    try {
+      const existingMcpConfig = JSON.parse(await fs.readFile(mcpPath, 'utf-8'));
+      if (existingMcpConfig && typeof existingMcpConfig === 'object') {
+        finalMcpConfig = {
+          $schema: 'https://opencode.ai/config.json',
+          ...existingMcpConfig,
+          mcp: {
+            ...(existingMcpConfig.mcp || {}),
+            ...((rulerMcpJson?.mcpServers ?? {}) as Record<string, unknown>),
+          },
+        };
+      } else {
+        finalMcpConfig = {
+          $schema: 'https://opencode.ai/config.json',
+          mcp: (rulerMcpJson.mcpServers ?? {}) as Record<string, unknown>,
+        };
+      }
+    } catch {
+      finalMcpConfig = {
+        $schema: 'https://opencode.ai/config.json',
+        mcp: (rulerMcpJson.mcpServers ?? {}) as Record<string, unknown>,
+      };
+    }
+
+    // Always write the config file, even if MCP is empty
+    if (backup) {
+      await backupFile(mcpPath, projectRoot);
+    }
+    await writeGeneratedFile(
+      mcpPath,
+      JSON.stringify(finalMcpConfig, null, 2),
+      projectRoot,
+    );
+  }
+
+  supportsMcpStdio(): boolean {
+    return true;
+  }
+
+  supportsMcpRemote(): boolean {
+    return true;
+  }
+
+  supportsMcpTimeout(): boolean {
+    return true;
+  }
+
+  supportsNativeSkills(): boolean {
+    return true;
+  }
+}
