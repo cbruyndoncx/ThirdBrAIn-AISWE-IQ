@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/coleam00/context-engineering-intro.git
+	branch = main
+	commit = a2d84b021cee1e2f4e77ba854bba0be8cb319035
+	parent = e9ddd6ad47db611a2874ca6ebd8a006bbcabb77b
+	method = merge
+	cmdver = 0.4.9
