@@ -1,0 +1,51 @@
+use std::sync::LazyLock;
+
+use config::{Config, Environment, File};
+use serde::Deserialize;
+
+#[derive(Debug)]
+pub struct GeneralConfig {
+    pub width: u16,
+    pub gitignore: bool,
+    pub centering: Centering,
+    pub help_menu: bool,
+    pub document_header: bool,
+    pub scrollbar: bool,
+    pub remember_position: bool,
+    pub position_cache_ttl_minutes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Centering {
+    Left,
+    Center,
+    Right,
+}
+
+pub static GENERAL_CONFIG: LazyLock<GeneralConfig> = LazyLock::new(|| {
+    let config_dir = dirs::home_dir().unwrap();
+    let config_file = config_dir.join(".config").join("mdt").join("config.toml");
+    let settings = Config::builder()
+        .add_source(File::with_name(config_file.to_str().unwrap()).required(false))
+        .add_source(Environment::with_prefix("MDT").separator("_"))
+        .build()
+        .unwrap_or_default();
+
+    let width = settings.get::<u16>("width").unwrap_or(100);
+    GeneralConfig {
+        // width = 0 means "use full terminal width"
+        width: if width == 0 { u16::MAX } else { width },
+        gitignore: settings.get::<bool>("gitignore").unwrap_or(false),
+        centering: settings
+            .get::<Centering>("alignment")
+            .unwrap_or(Centering::Left),
+        help_menu: settings.get::<bool>("help_menu").unwrap_or(true),
+        document_header: settings.get::<bool>("document_header").unwrap_or(false),
+        scrollbar: settings.get::<bool>("scrollbar").unwrap_or(true),
+        remember_position: settings.get::<bool>("remember_position").unwrap_or(true),
+        position_cache_ttl_minutes: settings
+            .get::<u64>("position_cache_ttl_minutes")
+            .unwrap_or(60),
+    }
+});

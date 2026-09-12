@@ -1,0 +1,590 @@
+use std::{
+    cmp, env,
+    error::Error,
+    fs::read_to_string,
+    io::{self, IsTerminal, Read},
+    panic,
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
+
+use md_tui::nodes::root::{Component, ComponentRoot};
+use md_tui::pages::file_explorer::{FileTree, MdFile};
+use md_tui::parser::parse_markdown;
+use md_tui::resume::ResumeCache;
+use md_tui::search::find_md_files_channel;
+use md_tui::util::{self, App, Boxes, Mode, destruct_terminal, general::GENERAL_CONFIG};
+use md_tui::{
+    event_handler::{KeyBoardAction, handle_keyboard_input},
+    util::colors::color_config,
+};
+
+use crossterm::{
+    cursor,
+    event::{self, Event},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+
+use notify::{Config, PollWatcher, Watcher};
+use ratatui::{
+    DefaultTerminal, Frame,
+    layout::Rect,
+    style::{Modifier, Style, Stylize},
+    text::Line,
+    widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+};
+use ratatui_image::{FilterType, Resize, StatefulImage};
+
+const EMPTY_FILE: &str = "";
+
+fn main() -> Result<(), Box<dyn Error>> {
+    // Set up panic handler. If not set up, the terminal will be left in a broken state if a panic
+    // occurs
+    panic::set_hook(Box::new(|panic_info| {
+        destruct_terminal();
+        better_panic::Settings::auto().create_panic_handler()(panic_info);
+    }));
+
+    let args: Vec<String> = std::env::args().collect();
+    if args
+        .get(1)
+        .is_some_and(|a| a == "--version" || a == "-V" || a == "-v")
+    {
+        println!("mdt {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
+
+    let mut terminal = ratatui::init();
+
+    // create app and run it
+    let tick_rate = Duration::from_millis(100);
+    let app = App::default();
+    let res = run_app(&mut terminal, app, tick_rate);
+
+    // restore terminal
+    ratatui::restore();
+
+    if let Err(err) = res {
+        println!("{err:?}");
+    }
+
+    Ok(())
+}
+
+fn run_app(terminal: &mut DefaultTerminal, mut app: App, tick_rate: Duration) -> io::Result<()> {
+    let (f_tx, f_rx) = mpsc::channel::<Option<MdFile>>();
+
+    thread::spawn(move || find_md_files_channel(f_tx.clone()));
+
+    let mut last_tick = Instant::now();
+    let mut last_position_save = Instant::now();
+    let resume_cache = ResumeCache::new(
+        GENERAL_CONFIG.remember_position,
+        GENERAL_CONFIG.position_cache_ttl_minutes,
+    );
+
+    let (tx, rx) = mpsc::channel();
+
+    let mut watcher = PollWatcher::new(
+        tx,
+        Config::default().with_poll_interval(Duration::from_secs(1)),
+    )
+    .unwrap();
+
+    app.set_width(terminal.size()?.width - 1);
+    let mut markdown = parse_markdown(None, EMPTY_FILE, app.width() - 2);
+
+    let potential_input = io::stdin();
+    let mut stdin_buf = String::new();
+
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(arg) = args.get(1) {
+        if let Ok(file) = read_to_string(arg) {
+            let path = std::path::Path::new(arg);
+            let _ = watcher.watch(path, notify::RecursiveMode::NonRecursive);
+            markdown = parse_markdown(Some(arg), &file, app.width() - 2);
+            app.mode = Mode::View;
+        } else {
+            app.message_box
+                .set_message(format!("Could not open file {arg}"));
+            app.boxes = Boxes::Error;
+        }
+    } else if !potential_input.is_terminal() {
+        let _ = potential_input.lock().read_to_string(&mut stdin_buf);
+        markdown = parse_markdown(None, &stdin_buf, app.width() - 2);
+        app.mode = Mode::View;
+    }
+
+    restore_position(&resume_cache, &markdown, &mut app, terminal.size()?.height);
+
+    let mut file_tree = FileTree::default();
+
+    loop {
+        let height = terminal.size()?.height;
+
+        for event in rx.try_iter() {
+            if event.is_err() {
+                continue;
+            }
+            let event = event.unwrap();
+
+            if let notify::EventKind::Modify(_) = event.kind {
+                // Watches are never removed, so a Modify event can arrive after
+                // returning to the file tree (markdown.clear() drops file_name).
+                if let Some(name) = markdown.file_name().map(str::to_owned)
+                    && let Ok(file) = read_to_string(&name)
+                {
+                    markdown = parse_markdown(Some(&name), &file, app.width() - 2);
+                    app.mode = Mode::View;
+                    app.vertical_scroll = cmp::min(
+                        app.vertical_scroll,
+                        markdown.height().saturating_sub(height / 2),
+                    );
+                }
+
+                break;
+            }
+        }
+        if app.set_width(terminal.size()?.width - 1) {
+            let url = if let Some(url) = markdown.file_name() {
+                url
+            } else {
+                app.mode = Mode::FileTree;
+                continue;
+            };
+            let text = if let Ok(file) = read_to_string(url) {
+                app.vertical_scroll = 0;
+                file
+            } else {
+                app.message_box
+                    .set_message(format!("Could not open file {:?}", markdown.file_name()));
+                app.boxes = Boxes::Error;
+                app.mode = Mode::FileTree;
+                continue;
+            };
+            markdown = parse_markdown(markdown.file_name(), &text, app.width() - 2);
+        }
+
+        markdown.set_scroll(app.vertical_scroll);
+
+        terminal.draw(|f| {
+            match app.mode {
+                Mode::View => {
+                    render_markdown(f, &app, &mut markdown);
+                }
+                Mode::FileTree => {
+                    if !file_tree.loaded() {
+                        while let Ok(e) = f_rx.try_recv() {
+                            match e {
+                                Some(file) => {
+                                    file_tree.add_file(file);
+                                }
+                                None => {
+                                    file_tree = file_tree.clone().finish();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    render_file_tree(f, &app, file_tree.clone());
+                }
+            }
+            if app.boxes == Boxes::Search {
+                let (search_height, search_width) = app.search_box.dimensions();
+                let search_area = Rect {
+                    x: app.search_box.x(),
+                    y: app.search_box.y(),
+                    width: search_width,
+                    height: search_height,
+                };
+                f.render_widget(app.search_box.clone(), search_area);
+            } else if app.boxes == Boxes::Error {
+                let (error_height, error_width) = app.message_box.dimensions();
+                let error_area = Rect {
+                    x: app.width() / 2 - error_width / 2,
+                    y: height / 2,
+                    width: error_width,
+                    height: error_height,
+                };
+
+                if app.width() > error_width {
+                    f.render_widget(Clear, error_area);
+                    f.render_widget(app.message_box.clone(), error_area);
+                }
+            } else if app.boxes == Boxes::LinkPreview {
+                let (link_height, link_width) = app.link_box.dimensions();
+                let link_area = Rect {
+                    x: height / 2,
+                    y: height / 2,
+                    width: link_width,
+                    height: link_height,
+                };
+
+                f.render_widget(Clear, link_area);
+                f.render_widget(app.link_box.clone(), link_area);
+            }
+        })?;
+
+        let timeout = tick_rate
+            .checked_sub(last_tick.elapsed())
+            .unwrap_or_else(|| Duration::from_secs(0));
+
+        if event::poll(timeout)?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != event::KeyEventKind::Press {
+                continue;
+            }
+            let previous_view = app.mode == Mode::View;
+            let previous_document = markdown.file_name().map(str::to_owned);
+            let previous_source_line = markdown.source_line_at_scroll(app.vertical_scroll, height);
+            match handle_keyboard_input(
+                key.code,
+                &mut app,
+                &mut markdown,
+                &mut file_tree,
+                height,
+                &mut watcher,
+            ) {
+                KeyBoardAction::Exit => {
+                    if previous_view && let Some(path) = previous_document.as_deref() {
+                        let _ = resume_cache.save(path, previous_source_line);
+                    }
+                    return Ok(());
+                }
+                KeyBoardAction::Continue => {
+                    let document_changed = app.mode == Mode::View
+                        && (!previous_view || markdown.file_name() != previous_document.as_deref());
+                    if document_changed {
+                        if previous_view && let Some(path) = previous_document.as_deref() {
+                            let _ = resume_cache.save(path, previous_source_line);
+                        }
+                        restore_position(&resume_cache, &markdown, &mut app, height);
+                    }
+                }
+                KeyBoardAction::Edit => {
+                    if let Some(path) = markdown.file_name() {
+                        let _ = resume_cache.save(path, previous_source_line);
+                    }
+                    let source_line = markdown.source_line_at_scroll(app.vertical_scroll, height);
+                    terminal.draw(|f| {
+                        open_editor(f, &mut app, markdown.file_name(), source_line);
+                    })?;
+                }
+            }
+        }
+        if last_tick.elapsed() >= tick_rate {
+            last_tick = Instant::now();
+        }
+        if last_position_save.elapsed() >= Duration::from_secs(5) {
+            if app.mode == Mode::View
+                && let Some(path) = markdown.file_name()
+            {
+                let source_line = markdown.source_line_at_scroll(app.vertical_scroll, height);
+                let _ = resume_cache.save(path, source_line);
+            }
+            last_position_save = Instant::now();
+        }
+    }
+}
+
+fn restore_position(
+    cache: &ResumeCache,
+    markdown: &ComponentRoot,
+    app: &mut App,
+    viewport_height: u16,
+) {
+    if let Some(source_line) = markdown.file_name().and_then(|path| cache.load(path)) {
+        app.vertical_scroll = markdown.scroll_for_source_line(source_line, viewport_height);
+    }
+}
+
+fn render_file_tree(f: &mut Frame, app: &App, file_tree: FileTree) {
+    let size = f.area();
+    let x = match GENERAL_CONFIG.centering {
+        util::general::Centering::Left => 2,
+        util::general::Centering::Center => {
+            cmp::max((size.width / 2).saturating_sub(GENERAL_CONFIG.width / 2), 2)
+        }
+        util::general::Centering::Right => {
+            cmp::max(size.width.saturating_sub(GENERAL_CONFIG.width + 2), 2)
+        }
+    };
+    let area = Rect {
+        x,
+        width: app.width() - 3,
+        ..size
+    };
+    f.render_widget(file_tree, area);
+
+    if GENERAL_CONFIG.help_menu {
+        let area = Rect {
+            x: x + 2,
+            y: size.height.saturating_sub(13),
+            height: cmp::min(10, size.height),
+            width: app.width().saturating_sub(5),
+        };
+        f.render_widget(Clear, area);
+        f.render_widget(app.help_box, area);
+    }
+}
+
+fn render_markdown(f: &mut Frame, app: &App, markdown: &mut ComponentRoot) {
+    let size = f.area();
+
+    let x = match GENERAL_CONFIG.centering {
+        util::general::Centering::Left => 2,
+        util::general::Centering::Center => {
+            let x = (size.width / 2).saturating_sub(GENERAL_CONFIG.width / 2);
+
+            if x > 2 { x } else { 2 }
+        }
+        util::general::Centering::Right => {
+            let x = size.width.saturating_sub(GENERAL_CONFIG.width + 2);
+            if x > 2 { x } else { 2 }
+        }
+    };
+
+    let header_height = u16::from(GENERAL_CONFIG.document_header && markdown.file_name().is_some());
+    let area = Rect {
+        width: cmp::min(app.width() - 3, size.width - 1),
+        height: if GENERAL_CONFIG.help_menu {
+            size.height.saturating_sub(5 + header_height)
+        } else {
+            size.height.saturating_sub(header_height)
+        },
+        x,
+        y: header_height,
+    };
+
+    if let Some(file_name) = markdown
+        .file_name()
+        .filter(|_| GENERAL_CONFIG.document_header)
+    {
+        let header_area = Rect::new(x, 0, area.width, 1);
+        let header = Paragraph::new(Line::from(format!(" {file_name}"))).style(
+            Style::default()
+                .fg(color_config().help_fg_color)
+                .bg(color_config().help_bg_color)
+                .add_modifier(Modifier::DIM),
+        );
+        f.render_widget(header, header_area);
+    }
+
+    for child in markdown.children_mut() {
+        match child {
+            Component::TextComponent(comp) => {
+                if comp.is_hidden() {
+                    continue;
+                }
+                if comp.y_offset().saturating_sub(comp.scroll_offset()) >= area.height
+                    || (comp.y_offset() + comp.height()).saturating_sub(comp.scroll_offset()) == 0
+                {
+                    continue;
+                }
+
+                f.render_widget(comp.clone(), area);
+            }
+            Component::Image(img) => {
+                if img.y_offset().saturating_sub(img.scroll_offset()) >= area.height
+                    || (img.y_offset() + img.height()).saturating_sub(img.scroll_offset()) == 0
+                {
+                    continue;
+                }
+
+                let image = StatefulImage::default().resize(Resize::Fit(Some(FilterType::Nearest)));
+
+                // Resize height based on clipping top
+                let height = cmp::min(
+                    img.height(),
+                    (img.y_offset() + img.height()).saturating_sub(img.scroll_offset()),
+                );
+
+                // Resize height based on clipping bottom
+                let height = cmp::min(
+                    height,
+                    area.height
+                        .saturating_add(img.scroll_offset())
+                        .saturating_sub(img.y_offset()),
+                );
+
+                let inner_area = Rect::new(
+                    area.x,
+                    area.y
+                        .saturating_add(img.y_offset().saturating_sub(img.scroll_offset())),
+                    area.width,
+                    height,
+                );
+
+                f.render_stateful_widget(image, inner_area, img.image_mut());
+            }
+        }
+    }
+
+    if GENERAL_CONFIG.scrollbar && markdown.height() > area.height {
+        // Draw beside the document viewport. Drawing at `area.right() - 1`
+        // overwrites content that legitimately occupies its final column.
+        let scrollbar_area = Rect::new(area.right(), area.y, 1, area.height);
+        let scrollbar_color = color_config().scrollbar_color;
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("┃")
+            .track_style(
+                Style::default()
+                    .fg(scrollbar_color)
+                    .add_modifier(Modifier::DIM),
+            )
+            .thumb_style(Style::default().fg(scrollbar_color));
+        let mut scrollbar_state = scrollbar_state(
+            markdown.height(),
+            size.height,
+            area.height,
+            app.vertical_scroll,
+        );
+        f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
+
+    // Render a block at the bottom to show the current mode
+    let block = Block::default().bg(color_config().help_bg_color);
+    let area = if app.help_box.expanded() {
+        Rect {
+            y: size.height.saturating_sub(19),
+            height: cmp::min(18, size.height),
+            x,
+            width: area.width - 1,
+        }
+    } else {
+        Rect {
+            y: size.height.saturating_sub(4),
+            height: cmp::min(3, size.height),
+            x,
+            width: area.width - 1,
+        }
+    };
+
+    if GENERAL_CONFIG.help_menu {
+        f.render_widget(Clear, area);
+        f.render_widget(block, area);
+    }
+
+    let area = if app.help_box.expanded() {
+        Rect {
+            x: x + 2,
+            y: size.height.saturating_sub(18),
+            height: cmp::min(16, size.height),
+            width: app.width() - 5,
+        }
+    } else {
+        Rect {
+            x: x + 2,
+            y: size.height.saturating_sub(3),
+            height: cmp::min(3, size.height),
+            width: app.width() - 5,
+        }
+    };
+
+    if app.boxes != Boxes::Search && GENERAL_CONFIG.help_menu {
+        f.render_widget(app.help_box, area);
+    }
+}
+
+fn scrollbar_state(
+    document_height: u16,
+    terminal_height: u16,
+    viewport_height: u16,
+    position: u16,
+) -> ScrollbarState {
+    let max_scroll = document_height.saturating_sub(terminal_height / 2);
+    ScrollbarState::new(usize::from(max_scroll) + 1)
+        .position(usize::from(position.min(max_scroll)))
+        .viewport_content_length(viewport_height.into())
+}
+
+fn open_editor(f: &mut Frame, app: &mut App, file_name: Option<&str>, source_line: usize) {
+    let editor = if let Ok(editor) = env::var("EDITOR") {
+        editor
+    } else {
+        app.message_box
+            .set_message("No editor found. Please set the EDITOR environment variable".to_owned());
+        app.boxes = Boxes::Error;
+        return;
+    };
+
+    let file_name = if let Some(file_name) = file_name {
+        file_name
+    } else {
+        app.message_box
+            .set_message("No file found to open in editor".to_owned());
+        app.boxes = Boxes::Error;
+        return;
+    };
+
+    disable_raw_mode().unwrap();
+    execute!(io::stdout(), LeaveAlternateScreen).unwrap();
+    execute!(io::stdout(), cursor::Show).unwrap();
+
+    let _ = std::process::Command::new(editor)
+        .arg(format!("+{source_line}"))
+        .arg(file_name)
+        .spawn()
+        .expect("Failed to open editor")
+        .wait();
+
+    enable_raw_mode().expect("Failed to enable raw mode");
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen).unwrap();
+
+    app.boxes = Boxes::None;
+    f.render_widget(Clear, f.area());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::widgets::Widget;
+
+    #[test]
+    fn scrollbar_does_not_overwrite_the_document_last_column() {
+        let buffer_area = Rect::new(0, 0, 6, 2);
+        let document_area = Rect::new(0, 0, 5, 2);
+        let scrollbar_area = Rect::new(document_area.right(), 0, 1, 2);
+        let mut buffer = ratatui::buffer::Buffer::empty(buffer_area);
+
+        Paragraph::new("ABCDE").render(document_area, &mut buffer);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("┃");
+        let mut state = scrollbar_state(20, 4, 2, 0);
+        ratatui::widgets::StatefulWidget::render(
+            scrollbar,
+            scrollbar_area,
+            &mut buffer,
+            &mut state,
+        );
+
+        assert_eq!(buffer[(4, 0)].symbol(), "E");
+        assert!(matches!(buffer[(5, 0)].symbol(), "│" | "┃"));
+    }
+
+    #[test]
+    fn scrollbar_reaches_its_final_position_at_document_end() {
+        let area = Rect::new(0, 0, 1, 10);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("┃");
+        let mut state = scrollbar_state(200, 40, 35, 180);
+
+        ratatui::widgets::StatefulWidget::render(scrollbar, area, &mut buffer, &mut state);
+
+        assert_eq!(buffer[(0, 9)].symbol(), "┃");
+    }
+}

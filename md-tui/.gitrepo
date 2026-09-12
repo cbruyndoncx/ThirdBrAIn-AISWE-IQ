@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/henriklovhaug/md-tui.git
+	branch = main
+	commit = 37bbe545642e957684a45b47569242753cd1cb4e
+	parent = ecda3d07766550612462158586b3f8c78e0999f1
+	method = merge
+	cmdver = 0.4.9

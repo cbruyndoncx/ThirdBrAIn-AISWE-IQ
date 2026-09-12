@@ -1,0 +1,267 @@
+# MD-TUI
+
+<!--toc:start-->
+
+- [MD-TUI](#md-tui)
+  - [Installation](#installation)
+    - [Requirements](#requirements)
+  - [Usage](#usage)
+  - [Key binds](#key-binds)
+  - [Syntax highlighting](#syntax-highlighting)
+  - [Configuration](#configuration)
+    - [Keyboard actions](#keyboard-actions)
+    - [Colors and misc](#colors-and-misc)
+  - [Links](#links)
+  - [Neovim plugin](#neovim-plugin)
+  - [Contributions](#contributions)
+  - [Use as library](#use-as-library)
+
+<!--toc:end-->
+
+`MD-TUI` is a terminal-based application for viewing and navigating Markdown
+files. It focuses on keyboard navigation and functional link navigation.
+
+## Capabilities
+
+- Keyboard-driven navigation
+- Internal and external links
+- File tree for browsing Markdown files
+- Search and link selection modes
+- Optional image rendering, depending on terminal support
+
+## Installation
+
+Prebuilt binaries with install script can be found on the release page.
+
+| Target      | Method                          |
+| ----------- | ------------------------------- |
+| Arch        | `pacman -S md-tui`              |
+| Cargo       | `cargo install md-tui --locked` |
+| Conda-Forge | `pixi global install md-tui`    |
+| Homebrew    | `brew install md-tui`           |
+| Nix         | There is a flake                |
+
+### Requirements
+
+1. A terminal
+2. Nerd font
+
+## Usage
+
+Start the program running `mdt <file.md>` or just `mdt`. The latter will search
+recursively from where it was invoked for Markdown files and present them in a
+file tree.
+
+You can also pipe the content into the program. Example: `cat README.md | mdt`.
+
+## Key Binds
+
+These are the default settings. See [keyboard configuration](#keyboard-actions)
+for configuration options.
+
+| Key              | Action                                                            |
+| ---------------- | ----------------------------------------------------------------- |
+| `j` or `<Down>`  | Scroll down                                                       |
+| `k` or `<Up>`    | Scroll up                                                         |
+| `h`              | Go up half a page                                                 |
+| `l`              | Go down half a page                                               |
+| `d` or `<Left>`  | Scroll one page down                                              |
+| `u` or `<Right>` | Scroll one page up                                                |
+| `f` or `/`       | Search                                                            |
+| `n` or `N`       | Jump to next or previous search result                            |
+| `s` or `S`       | Enter select link mode. Different selection strategy              |
+| `D`              | Enter select details mode. Cycle through `<details>` blocks       |
+| `K`              | Hover. Preview link targets without following them                |
+| `<Enter>`        | Select. Open link, search, or toggle fold on selected `<details>` |
+| `Esc`            | Go back to _normal_ mode                                          |
+| `t`              | Go back to files                                                  |
+| `b`              | Go back to previous file (file tree if no previous file)          |
+| `g`              | Go to top of file                                                 |
+| `G`              | Go to bottom of the file                                          |
+| `e`              | Edit file in `$EDITOR`                                            |
+| `o`              | Sort files in file tree                                           |
+| `q`              | Quit the application                                              |
+
+## Syntax Highlighting
+
+`MD-TUI` supports syntax highlighting in code blocks for the following
+languages:
+
+- Bash/sh
+- C/C++
+- CSS
+- Elixir
+- Go
+- HTML
+- Java
+- JavaScript
+- JSON
+- Lua
+- Luau
+- OCaml
+- PHP
+- Python
+- Rust
+- Scala
+- TypeScript
+- YAML
+
+## Configuration
+
+The program checks for the file `~/.config/mdt/config.toml` at startup. The
+following parameters and their defaults are written below.
+
+### Keyboard Actions
+
+Some key actions are not configurable, including:
+
+- Enter
+- Arrow keys
+- Escape
+- Question mark for help menu
+- 'q' to quit the application
+- '/' for search
+
+> If you override another default key, it's undefined behavior if that key does
+> not get reassigned.
+
+> Actions can only be assigned to single characters. Space, fn keys, ctrl+key,
+> backspace etc., will not take effect and the default will be in use.
+
+```toml
+# Keyboard actions
+up = 'k'
+down = 'j'
+page_up = 'u'
+page_down = 'd'
+half_page_down = 'l'
+half_page_up = 'h'
+top = 'g'
+bottom = 'G'
+search = 'f'
+search_next = 'n'
+search_previous = 'N'
+# This will search downwards until it finds one or select the last link in document.
+select_link = 's'
+# Finds the link 2/3 up the page. It will search then for closest in both direction.
+select_link_alt = 'S'
+# Enter select-details mode. Press <Enter> on a selected <details> to fold/unfold it.
+select_details = 'D'
+edit = 'e'
+hover = 'K'
+back = 'b'
+file_tree = 't'
+sort = 'o'
+```
+
+### Colors and Misc
+
+Setting color to `""` will not remove it, but leave it as its default. To remove
+colors, set it to `reset`.
+
+The `code_hl_*` keys color the highlighting inside fenced code blocks.
+
+```toml
+# General settings
+width = 100 # Set to 0 for full terminal width
+gitignore = false
+alignment = "left" # "center" | "right"
+help_menu = true # false hides it
+document_header = false # true shows the current document path
+scrollbar = true # false hides the document position indicator
+remember_position = true # restore recently viewed documents at their last position
+position_cache_ttl_minutes = 60 # ignore older positions; 0 means never expire
+
+# Inline styling
+bold_color = "reset"
+bold_italic_color = "reset"
+code_bg_color = "#2A2A2A"
+code_fg_color = "red"
+italic_color = "reset"
+link_color = "blue"
+link_selected_bg_color = "darkgrey"
+link_selected_fg_color = "green"
+scrollbar_color = "lightgreen"
+strikethrough_color = "reset"
+
+# Block styling
+code_block_bg_color = "#2A2A2A"
+quote_bg_color = "reset"
+table_header_bg_color = "reset"
+table_header_fg_color = "yellow"
+
+# Code block syntax highlighting
+code_hl_attribute = "yellow"
+code_hl_constant = "yellow"
+code_hl_function = "green"
+code_hl_function_builtin = "green"
+code_hl_keyword = "red"
+code_hl_operator = "red"
+code_hl_property = "blue"
+code_hl_punctuation = "blue"
+code_hl_punctuation_bracket = "blue"
+code_hl_punctuation_delimiter = "blue"
+code_hl_string = "magenta"
+code_hl_string_special = "magenta"
+code_hl_tag = "cyan"
+code_hl_type = "cyan"
+code_hl_type_builtin = "cyan"
+code_hl_variable = "reset"
+code_hl_variable_builtin = "reset"
+code_hl_variable_parameter = "reset"
+
+# File tree
+file_tree_name_color = "blue"
+file_tree_page_count_color = "lightgreen"
+file_tree_path_color = "gray"
+file_tree_selected_fg_color = "lightgreen"
+
+# Quote bar
+quote_caution = "lightmagenta"
+quote_default = "white"
+quote_important = "lightred"
+quote_note = "lightblue"
+quote_tip = "lightgreen"
+quote_warning = "lightYellow"
+
+# Heading
+h_bg_color = "blue"
+h_fg_color = "black"
+h2_fg_color = "green"
+h3_fg_color = "magenta"
+h4_fg_color = "cyan"
+h5_fg_color = "yellow"
+h6_fg_color = "lightred"
+
+# Help box
+help_bg_color = "black"
+help_fg_color = "lightgreen"
+help_title_color = "lightgreen"
+```
+
+## Links
+
+MD-TUI supports the following link formats:
+
+- `[text](url)`
+- `[[link]]`
+- `[[link|Some title]]`
+
+## Neovim Plugin
+
+This application also exists as a plugin for Neovim called
+[Preview](https://github.com/henriklovhaug/Preview.nvim).
+
+> [!NOTE]
+>
+> This version does not support images regardless of your terminal capabilities.
+
+## Contributions
+
+Both PRs and issues are appreciated!
+
+## Use as Library
+
+It's possible to use this as a library. It's not well documented for that use,
+but the feature is there. There is one default feature attached, which is the
+whole highlighting of code blocks.
