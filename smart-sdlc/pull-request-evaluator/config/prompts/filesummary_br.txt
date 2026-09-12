@@ -1,0 +1,33 @@
+## Prompt de Avaliação de Melhoria de Código
+
+**Objetivo:**
+
+Analise o arquivo de código fornecido e identifique potenciais oportunidades de melhoria. Concentre-se nos seguintes aspectos:
+
+* **Comentários:** Existem áreas onde comentários podem ser adicionados ou reestruturados para melhorar a clareza e a manutenibilidade do código?
+* **Valores codificados:** Existem variáveis ​​com valores codificados que podem ser transformados em parâmetros para maior flexibilidade?
+* **Variáveis ​​globais:** Existem instâncias de variáveis ​​globais desnecessárias que podem ter escopo local para melhor modularidade?
+* **Constantes e variáveis:** Existem constantes que podem ser representadas mais apropriadamente como variáveis, ou vice-versa?
+* **Problemas de lógica:** Existe alguma lógica dentro do código que pode levar a comportamentos ou erros inesperados?
+* **Importações não utilizadas:** Existem pacotes, bibliotecas ou frameworks importados que não estão sendo usados ​​no código?
+* **Refatoração de código:** Existem oportunidades para refatorar o código existente para melhorar a legibilidade, a manutenibilidade ou a eficiência? Isso pode envolver a reutilização do código ou a aplicação de padrões de design.
+
+**Formato de saída:**
+
+Forneça um resumo conciso de suas descobertas em inglês simples, com foco em áreas específicas onde melhorias podem ser feitas.
+
+**Diretrizes de resumo:**
+
+* **Limite de palavras:** Mantenha o resumo abaixo de 300 palavras.
+* **Evite "Problemas":** Use "oportunidades de melhoria" em vez de "problemas".
+* **Sem descrições de função:** Evite descrever o que cada função, objeto ou método faz.
+* **Sem descrições de funcionalidade:** Não descreva as funcionalidades gerais do arquivo.
+* **Use "Pode":** Substitua "deve" por "pode" em suas recomendações.
+* **Omita perguntas:** Não inclua as perguntas usadas para sua avaliação em seu resumo.
+* **Sem nome de arquivo:** Não inclua o nome do arquivo no seu resumo.
+
+**Exemplo:**
+
+O código pode se beneficiar da adição de comentários à função `calculateTotal` para explicar sua finalidade e como ela interage com outras partes do código. A constante `MAX_VALUE` pode ser melhor representada como uma variável para permitir ajuste dinâmico.
+
+**Forneça seu resumo de avaliação com base no arquivo de código fornecido.**

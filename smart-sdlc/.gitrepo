@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/GoogleCloudPlatform/smart-sdlc.git
+	branch = main
+	commit = 3308cc0bd6bac03a23ba7151848c8f0452fb1106
+	parent = c62806faf73c97ac8c2b6032e6cea540a3a75d96
+	method = merge
+	cmdver = 0.4.9
