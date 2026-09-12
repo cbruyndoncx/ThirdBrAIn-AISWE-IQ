@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/openclaw/openclaw.git
+	branch = main
+	commit = 89e54b9d251249c88b382b7c270d37131de89c1a
+	parent = 3d006b686a8dae30d24b513690201551f26f7448
+	method = merge
+	cmdver = 0.4.9
