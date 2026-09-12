@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/AutoMaker-Org/automaker.git
+	branch = main
+	commit = 5888d2e6f3618e06762803687ea7b181c10edcbd
+	parent = c243cad4c841bd407122b4401a6ae97a90cdb665
+	method = merge
+	cmdver = 0.4.9
