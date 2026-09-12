@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/K-Dense-AI/scientific-agent-skills.git
+	branch = main
+	commit = c1ed16d97dd61ff50a3bd46dd353e4a55fd77f34
+	parent = d110ef2a2cad7022d76d9f442747cbb0f2d7bdbe
+	method = merge
+	cmdver = 0.4.9
