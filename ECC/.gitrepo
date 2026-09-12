@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/affaan-m/ECC.git
+	branch = main
+	commit = 8321021c54d670126ce3b2969d5deb880b4b0c2a
+	parent = d9e7d3b419077b73e116c61fc556be20a3143e43
+	method = merge
+	cmdver = 0.4.9
