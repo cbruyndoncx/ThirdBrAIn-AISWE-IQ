@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/heurema/context-planning-system.git
+	branch = main
+	commit = 6bb027d0f2631865830091bb641b991737e59829
+	parent = 4f6052204641e4aaf4d548e47544ed09974181e7
+	method = merge
+	cmdver = 0.4.9

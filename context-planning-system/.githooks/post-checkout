@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Auto-update project contexts after branch checkout
+# Arguments: $1=prev HEAD, $2=new HEAD, $3=branch flag (1) or file flag (0)
+
+# Only run for branch checkouts
+if [ "$3" = "1" ]; then
+    exec "$(git rev-parse --show-toplevel)/scripts/update_project_contexts.sh" "post-checkout" "$1" "$2"
+fi

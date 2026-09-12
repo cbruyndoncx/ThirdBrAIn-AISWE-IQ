@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Auto-update project contexts after git pull/merge
+exec "$(git rev-parse --show-toplevel)/scripts/update_project_contexts.sh" "post-merge"

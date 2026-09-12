@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Auto-update project contexts after local commit
+exec "$(git rev-parse --show-toplevel)/scripts/update_project_contexts.sh" "post-commit"

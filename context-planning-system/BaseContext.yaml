@@ -1,0 +1,30 @@
+version: 0.2
+timezone: "UTC"
+
+cadence:
+  weekly_review_day: "Monday"
+  monthly_cycle: "next-30-days"
+
+wip_limits:
+  daily_tasks_max: 5
+  weekly_projects_max: 3
+
+prioritization:
+  order: ["P1", "P2", "P3"]
+  tie_breakers:
+    - "unblocker_first"
+    - "short_first"
+
+goals:
+  month:
+    - "Launch MVP for project X"
+    - "Complete security audit"
+    - "Implement CI/CD pipeline"
+    - "Reduce technical debt by 20%"
+
+rules:
+  include_open_tasks_from:
+    - "tasks.md"
+    - "checklists/*.md"
+  task_id_pattern: "T\\d+"
+  priority_patterns: ["P1", "P2", "P3"]
