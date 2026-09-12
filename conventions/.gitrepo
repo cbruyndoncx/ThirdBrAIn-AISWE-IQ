@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/Aider-AI/conventions.git
+	branch = main
+	commit = 5d3b2409726b1ca8fa86835f476248a90a5df700
+	parent = 53d46ed0cddbd6f5f8250fc63aeca3668c84e3e2
+	method = merge
+	cmdver = 0.4.9
