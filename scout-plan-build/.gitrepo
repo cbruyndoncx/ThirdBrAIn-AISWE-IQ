@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/arkaigrowth/scout-plan-build.git
+	branch = main
+	commit = af7e4b9a520286427e733cb5a75da8be5d8dfae1
+	parent = ac76cd41c870db0569452c02d761635ec2264e43
+	method = merge
+	cmdver = 0.4.9
