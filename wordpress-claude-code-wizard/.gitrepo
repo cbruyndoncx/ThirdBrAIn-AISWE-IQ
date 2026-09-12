@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/IncomeStreamSurfer/wordpress-claude-code-wizard.git
+	branch = main
+	commit = 2a6ba98a612812b19fd02def15ade01f413b15f0
+	parent = 8b00c5f129a55b91d7dfcfae463fe098a2f8696b
+	method = merge
+	cmdver = 0.4.9
