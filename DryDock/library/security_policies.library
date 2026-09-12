@@ -1,0 +1,507 @@
+{
+  "library_id": "security_policies",
+  "version": "1.0.0",
+  "type": "component_library",
+  "title": "Security Policies & Practices Library",
+  "description": "Comprehensive security policies, best practices, and constraint templates for building secure agents. Covers data protection, access control, operational security, and compliance requirements.",
+
+  "security_policy_templates": [
+    {
+      "id": "standard_security",
+      "name": "Standard Security Policy",
+      "description": "Baseline security policy for general business agents with standard data handling",
+      "risk_level": "low_to_medium",
+      "suitable_for": ["project_manager", "business_analyst", "technical_writer", "customer_success"],
+
+      "allowed_operations": [
+        "Read non-sensitive business data and documents",
+        "Create and edit agent-specific content",
+        "Generate reports and analysis",
+        "Communicate with authorized users",
+        "Maintain operational context and history",
+        "Access approved external resources"
+      ],
+
+      "restricted_operations": [
+        "Access sensitive customer data without authorization",
+        "Modify production systems or databases",
+        "Execute system commands",
+        "Access financial or payment information",
+        "Share data with unauthorized parties",
+        "Bypass authentication or authorization"
+      ],
+
+      "data_handling": {
+        "pii_handling": "restricted",
+        "data_retention": "session_based_with_configurable_persistence",
+        "data_sharing": "internal_only",
+        "logging": "comprehensive_with_sanitization"
+      },
+
+      "authentication": {
+        "user_verification": "required",
+        "session_management": "standard",
+        "token_handling": "secure_storage"
+      }
+    },
+
+    {
+      "id": "elevated_security",
+      "name": "Elevated Security Policy",
+      "description": "Enhanced security for agents handling code, infrastructure, or technical operations",
+      "risk_level": "medium_to_high",
+      "suitable_for": ["developer", "devops", "qa_engineer"],
+
+      "allowed_operations": [
+        "Read code repositories and technical documentation",
+        "Create and modify non-production code",
+        "Run tests in isolated environments",
+        "Generate technical documentation",
+        "Analyze system configurations",
+        "Access development and staging environments"
+      ],
+
+      "restricted_operations": [
+        "Modify production code without review",
+        "Deploy to production without approval",
+        "Access production databases directly",
+        "Expose secrets, API keys, or credentials",
+        "Execute privileged system commands",
+        "Bypass code review or approval processes",
+        "Disable security controls or monitoring",
+        "Access customer production data"
+      ],
+
+      "data_handling": {
+        "pii_handling": "prohibited_without_explicit_authorization",
+        "sensitive_code": "read_only_with_audit",
+        "secrets_management": "never_log_or_expose",
+        "data_retention": "minimal_with_secure_disposal",
+        "logging": "comprehensive_with_secret_redaction"
+      },
+
+      "code_security": {
+        "secret_scanning": "mandatory",
+        "dependency_scanning": "required",
+        "code_review": "required_before_production",
+        "static_analysis": "recommended",
+        "security_testing": "required_for_security_features"
+      },
+
+      "authentication": {
+        "user_verification": "required_with_mfa_recommended",
+        "session_management": "enhanced",
+        "token_handling": "encrypted_storage",
+        "credential_rotation": "periodic"
+      }
+    },
+
+    {
+      "id": "high_security",
+      "name": "High Security Policy",
+      "description": "Maximum security for agents handling sensitive data, financial information, or regulated industries",
+      "risk_level": "high",
+      "suitable_for": ["financial_analyst", "healthcare_agent", "compliance_agent"],
+
+      "allowed_operations": [
+        "Read authorized sensitive data within defined scope",
+        "Process data according to strict handling procedures",
+        "Generate compliant reports and documentation",
+        "Audit and log all data access",
+        "Operate within defined security boundaries"
+      ],
+
+      "restricted_operations": [
+        "Access data outside defined scope",
+        "Share sensitive information externally",
+        "Modify audit logs",
+        "Bypass compliance controls",
+        "Store sensitive data insecurely",
+        "Process data without encryption",
+        "Operate without comprehensive logging",
+        "Make irreversible changes without approval"
+      ],
+
+      "data_handling": {
+        "pii_handling": "strict_controls_with_encryption",
+        "data_classification": "mandatory",
+        "encryption": "at_rest_and_in_transit",
+        "data_retention": "compliance_driven_with_secure_deletion",
+        "data_masking": "required_for_non_production",
+        "logging": "comprehensive_with_encryption"
+      },
+
+      "compliance": {
+        "audit_trail": "complete_and_immutable",
+        "data_lineage": "tracked",
+        "access_logging": "comprehensive",
+        "regulatory_compliance": ["GDPR", "HIPAA", "SOC2", "PCI_DSS"],
+        "data_residency": "configurable",
+        "right_to_erasure": "supported"
+      },
+
+      "authentication": {
+        "user_verification": "required_with_mfa_mandatory",
+        "session_management": "strict_with_timeout",
+        "token_handling": "encrypted_secure_storage",
+        "credential_rotation": "mandatory_periodic",
+        "access_review": "regular"
+      },
+
+      "monitoring": {
+        "anomaly_detection": "enabled",
+        "security_alerts": "real_time",
+        "incident_response": "defined_procedures",
+        "security_reviews": "periodic"
+      }
+    },
+
+    {
+      "id": "public_facing",
+      "name": "Public-Facing Security Policy",
+      "description": "Security for agents that interact with external users or public interfaces",
+      "risk_level": "variable",
+      "suitable_for": ["customer_support", "public_chatbot", "documentation_assistant"],
+
+      "allowed_operations": [
+        "Respond to public inquiries",
+        "Access public documentation and resources",
+        "Generate helpful responses within guidelines",
+        "Escalate to human agents when needed",
+        "Maintain conversation context"
+      ],
+
+      "restricted_operations": [
+        "Share confidential business information",
+        "Access internal systems or databases",
+        "Make binding commitments",
+        "Process payment information",
+        "Collect unnecessary personal data",
+        "Execute actions on behalf of users without verification",
+        "Provide security-sensitive information"
+      ],
+
+      "data_handling": {
+        "pii_collection": "minimal_necessary_only",
+        "user_consent": "explicit_for_data_collection",
+        "data_retention": "limited_duration",
+        "anonymization": "default_for_analytics",
+        "logging": "sanitized_without_pii"
+      },
+
+      "input_validation": {
+        "injection_protection": "comprehensive",
+        "rate_limiting": "enforced",
+        "abuse_detection": "enabled",
+        "content_filtering": "active"
+      },
+
+      "output_safety": {
+        "information_disclosure_prevention": "active",
+        "prompt_injection_resistance": "hardened",
+        "harmful_content_filtering": "enabled",
+        "bias_mitigation": "implemented"
+      }
+    }
+  ],
+
+  "security_best_practices": {
+    "data_protection": {
+      "principles": [
+        "Principle of Least Privilege - Grant minimum necessary access",
+        "Defense in Depth - Multiple layers of security controls",
+        "Fail Secure - Default to secure state on errors",
+        "Privacy by Design - Build privacy into system architecture",
+        "Data Minimization - Collect only necessary information",
+        "Secure by Default - Security controls active without configuration"
+      ],
+
+      "implementation": {
+        "encryption": {
+          "at_rest": "Use industry-standard encryption (AES-256) for stored data",
+          "in_transit": "Use TLS 1.2+ for all data transmission",
+          "key_management": "Secure key storage and rotation practices"
+        },
+        "data_classification": {
+          "public": "No restrictions, can be freely shared",
+          "internal": "For internal use only, no external sharing",
+          "confidential": "Restricted access, business-sensitive",
+          "restricted": "Highest protection, regulatory requirements"
+        },
+        "sanitization": {
+          "input_sanitization": "Validate and sanitize all inputs",
+          "output_sanitization": "Remove sensitive data before logging",
+          "sql_injection_prevention": "Use parameterized queries",
+          "xss_prevention": "Encode outputs, validate inputs"
+        }
+      }
+    },
+
+    "access_control": {
+      "authentication": {
+        "user_identity_verification": "Verify user identity before granting access",
+        "multi_factor_authentication": "Require MFA for sensitive operations",
+        "session_management": "Secure session tokens, proper timeout",
+        "password_policies": "Strong passwords, regular rotation for critical systems"
+      },
+
+      "authorization": {
+        "role_based_access": "Define clear roles with specific permissions",
+        "attribute_based_access": "Dynamic access based on context",
+        "permission_granularity": "Fine-grained control over operations",
+        "access_review": "Regular review of access rights"
+      },
+
+      "audit": {
+        "comprehensive_logging": "Log all security-relevant events",
+        "immutable_logs": "Prevent log tampering or deletion",
+        "log_retention": "Retain logs per compliance requirements",
+        "log_monitoring": "Active monitoring for suspicious activity"
+      }
+    },
+
+    "operational_security": {
+      "secure_development": {
+        "security_requirements": "Define security requirements early",
+        "threat_modeling": "Identify and mitigate threats proactively",
+        "secure_coding": "Follow secure coding standards",
+        "code_review": "Security-focused code review process",
+        "dependency_management": "Keep dependencies updated, scan for vulnerabilities",
+        "secrets_management": "Never hardcode secrets, use secure vaults"
+      },
+
+      "deployment_security": {
+        "environment_isolation": "Separate dev, staging, production environments",
+        "change_management": "Controlled, reviewed deployment process",
+        "rollback_capability": "Quick rollback on security issues",
+        "security_testing": "Pre-deployment security validation"
+      },
+
+      "monitoring_response": {
+        "security_monitoring": "Continuous monitoring for threats",
+        "anomaly_detection": "Detect unusual patterns or behaviors",
+        "incident_response": "Defined procedures for security incidents",
+        "vulnerability_management": "Regular scanning and patching"
+      }
+    },
+
+    "compliance_frameworks": {
+      "gdpr": {
+        "description": "General Data Protection Regulation (EU)",
+        "key_requirements": [
+          "Lawful basis for data processing",
+          "Data subject rights (access, erasure, portability)",
+          "Privacy by design and default",
+          "Data breach notification within 72 hours",
+          "Data Protection Impact Assessments for high-risk processing"
+        ],
+        "implementation_guidance": {
+          "consent_management": "Explicit, informed consent for data collection",
+          "data_inventory": "Maintain record of processing activities",
+          "privacy_policy": "Clear, accessible privacy information",
+          "data_deletion": "Process for data subject erasure requests",
+          "cross_border_transfers": "Appropriate safeguards for data transfers"
+        }
+      },
+
+      "hipaa": {
+        "description": "Health Insurance Portability and Accountability Act (US Healthcare)",
+        "key_requirements": [
+          "PHI protection with administrative, physical, and technical safeguards",
+          "Access controls and audit logs",
+          "Encryption of PHI at rest and in transit",
+          "Business Associate Agreements",
+          "Breach notification procedures"
+        ],
+        "implementation_guidance": {
+          "minimum_necessary": "Access only minimum necessary PHI",
+          "authorization": "Patient authorization for disclosures",
+          "audit_trails": "Complete logs of PHI access",
+          "workforce_training": "HIPAA training for all personnel",
+          "contingency_planning": "Data backup and disaster recovery"
+        }
+      },
+
+      "pci_dss": {
+        "description": "Payment Card Industry Data Security Standard",
+        "key_requirements": [
+          "Never store sensitive authentication data",
+          "Encrypt cardholder data transmission",
+          "Maintain secure systems and applications",
+          "Implement strong access control measures",
+          "Regular security testing and monitoring"
+        ],
+        "implementation_guidance": {
+          "tokenization": "Replace PANs with tokens where possible",
+          "network_segmentation": "Isolate cardholder data environment",
+          "vulnerability_scanning": "Quarterly scans by approved vendor",
+          "penetration_testing": "Annual testing of critical systems",
+          "incident_response_plan": "Documented and tested procedures"
+        }
+      },
+
+      "soc2": {
+        "description": "Service Organization Control 2 (Trust Services Criteria)",
+        "key_requirements": [
+          "Security - Protection against unauthorized access",
+          "Availability - System availability for operation and use",
+          "Processing Integrity - Complete, valid, accurate, timely processing",
+          "Confidentiality - Protection of confidential information",
+          "Privacy - Personal information handling per commitments"
+        ],
+        "implementation_guidance": {
+          "control_environment": "Documented policies and procedures",
+          "risk_assessment": "Regular identification and assessment of risks",
+          "monitoring": "Continuous monitoring of controls",
+          "change_management": "Controlled changes to systems",
+          "vendor_management": "Oversight of third-party service providers"
+        }
+      }
+    }
+  },
+
+  "security_constraints_builder": {
+    "description": "Templates for defining security constraints in agents",
+
+    "constraint_categories": {
+      "data_access": {
+        "questions": [
+          "What types of data will this agent access?",
+          "Is any data classified as sensitive or regulated?",
+          "What is the minimum necessary data for agent function?",
+          "Who can authorize data access?"
+        ],
+        "controls": [
+          "Define explicit data access boundaries",
+          "Implement need-to-know restrictions",
+          "Log all data access for audit",
+          "Encrypt sensitive data in use"
+        ]
+      },
+
+      "operation_permissions": {
+        "questions": [
+          "What operations must this agent perform?",
+          "Which operations pose security risks?",
+          "What operations should never be allowed?",
+          "What approvals are needed for sensitive operations?"
+        ],
+        "controls": [
+          "Whitelist allowed operations explicitly",
+          "Blacklist prohibited operations",
+          "Require approval for elevated operations",
+          "Implement rate limiting for high-risk operations"
+        ]
+      },
+
+      "external_interaction": {
+        "questions": [
+          "Does agent interact with external systems?",
+          "Does agent handle user-generated content?",
+          "Does agent make external API calls?",
+          "What data leaves the security boundary?"
+        ],
+        "controls": [
+          "Validate all external inputs",
+          "Sanitize outputs to external systems",
+          "Use secure communication protocols",
+          "Monitor and log external interactions"
+        ]
+      },
+
+      "error_handling": {
+        "questions": [
+          "How should errors be handled securely?",
+          "What information can be exposed in errors?",
+          "How are security exceptions logged?",
+          "What is the recovery process for security failures?"
+        ],
+        "controls": [
+          "Fail securely on errors",
+          "Avoid exposing sensitive info in error messages",
+          "Log security exceptions with details",
+          "Implement graceful degradation"
+        ]
+      }
+    }
+  },
+
+  "threat_mitigation_patterns": {
+    "prompt_injection": {
+      "threat": "Malicious input attempting to override agent instructions or extract sensitive information",
+      "mitigation_strategies": [
+        "Input validation and sanitization",
+        "Instruction/data separation with clear boundaries",
+        "Output filtering to prevent instruction leakage",
+        "Context isolation between user input and system prompts",
+        "Monitoring for injection patterns"
+      ],
+      "implementation": {
+        "input_handling": "Treat all user input as untrusted data",
+        "instruction_protection": "Keep system instructions separate from user content",
+        "output_validation": "Filter outputs to prevent system instruction exposure",
+        "anomaly_detection": "Monitor for unusual request patterns"
+      }
+    },
+
+    "data_exfiltration": {
+      "threat": "Unauthorized extraction of sensitive data through agent interactions",
+      "mitigation_strategies": [
+        "Strict data access controls and need-to-know principle",
+        "Output content filtering and data loss prevention",
+        "Comprehensive audit logging of data access",
+        "Rate limiting on data retrieval operations",
+        "Monitoring for suspicious data access patterns"
+      ],
+      "implementation": {
+        "access_control": "Implement granular permissions on data access",
+        "output_filtering": "Scan outputs for sensitive data patterns",
+        "audit_trail": "Log all data access with user, time, data accessed",
+        "anomaly_detection": "Alert on unusual data access volume or patterns"
+      }
+    },
+
+    "privilege_escalation": {
+      "threat": "Attempts to gain unauthorized elevated permissions or access",
+      "mitigation_strategies": [
+        "Principle of least privilege for all operations",
+        "Explicit permission boundaries in agent configuration",
+        "Regular access reviews and permission audits",
+        "Separation of duties for sensitive operations",
+        "Monitoring for permission boundary violations"
+      ],
+      "implementation": {
+        "permission_model": "Define minimal permissions needed for each function",
+        "boundary_enforcement": "Strict enforcement of permission boundaries",
+        "audit_logging": "Log all permission checks and violations",
+        "alerting": "Alert on permission escalation attempts"
+      }
+    },
+
+    "denial_of_service": {
+      "threat": "Resource exhaustion or availability disruption",
+      "mitigation_strategies": [
+        "Rate limiting on operations and requests",
+        "Resource quotas and timeout enforcement",
+        "Input size validation and limits",
+        "Graceful degradation under load",
+        "Monitoring for abnormal resource usage"
+      ],
+      "implementation": {
+        "rate_limiting": "Enforce request rate limits per user/session",
+        "timeouts": "Set reasonable timeouts for all operations",
+        "resource_monitoring": "Monitor CPU, memory, API usage",
+        "circuit_breakers": "Implement circuit breakers for failing operations"
+      }
+    }
+  },
+
+  "usage_guidelines": {
+    "selecting_policy": "Choose security policy based on agent role, data sensitivity, and risk level",
+    "customizing_policy": "Adapt template policies to specific requirements and threat model",
+    "layered_security": "Combine multiple security controls for defense in depth",
+    "continuous_improvement": "Regularly review and update security policies based on threats",
+    "compliance_mapping": "Map agent operations to applicable compliance requirements",
+    "security_testing": "Test security controls before agent deployment"
+  }
+}

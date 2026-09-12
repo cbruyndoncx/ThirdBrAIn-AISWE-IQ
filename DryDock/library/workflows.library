@@ -1,0 +1,572 @@
+{
+  "library_id": "workflow_patterns",
+  "version": "1.0.0",
+  "type": "component_library",
+  "title": "Workflow Patterns Library",
+  "description": "Reusable orchestration patterns for agent workflows. Defines how agents coordinate tasks, manage dependencies, handle errors, and execute complex multi-step operations.",
+
+  "orchestration_patterns": [
+    {
+      "id": "sequential_workflow",
+      "name": "Sequential Workflow",
+      "description": "Execute tasks in linear order, each depending on completion of the previous",
+      "suitable_for": ["project_manager", "business_analyst", "technical_writer", "qa_engineer"],
+      "use_cases": [
+        "Step-by-step process execution",
+        "Dependent task chains",
+        "Sequential data processing",
+        "Linear project phases"
+      ],
+
+      "characteristics": {
+        "execution_order": "strict_sequential",
+        "dependency_model": "each_step_depends_on_previous",
+        "parallelization": "none",
+        "error_handling": "stop_on_error_or_retry",
+        "state_management": "cumulative_context"
+      },
+
+      "implementation": {
+        "workflow_steps": [
+          "Initialize workflow with requirements",
+          "Execute step 1 and validate output",
+          "Pass output as input to step 2",
+          "Execute step 2 and validate output",
+          "Continue until all steps complete",
+          "Return final result"
+        ],
+        "error_handling": [
+          "On error, log failure details",
+          "Optionally retry failed step",
+          "If retry fails, halt workflow",
+          "Provide clear error context to user"
+        ],
+        "state_tracking": [
+          "Maintain current step position",
+          "Store outputs from completed steps",
+          "Track overall progress percentage",
+          "Preserve context for resume if interrupted"
+        ]
+      },
+
+      "example": {
+        "scenario": "Requirements gathering and documentation",
+        "steps": [
+          "1. Conduct stakeholder interviews",
+          "2. Analyze and consolidate requirements",
+          "3. Create requirements document",
+          "4. Review with stakeholders",
+          "5. Incorporate feedback",
+          "6. Finalize and publish"
+        ]
+      }
+    },
+
+    {
+      "id": "parallel_workflow",
+      "name": "Parallel Workflow",
+      "description": "Execute independent tasks concurrently to maximize efficiency",
+      "suitable_for": ["developer", "devops", "qa_engineer", "data_analyst"],
+      "use_cases": [
+        "Independent task execution",
+        "Batch processing",
+        "Multi-environment operations",
+        "Concurrent analysis"
+      ],
+
+      "characteristics": {
+        "execution_order": "concurrent",
+        "dependency_model": "tasks_are_independent",
+        "parallelization": "maximum",
+        "error_handling": "continue_others_on_single_failure",
+        "state_management": "aggregated_results"
+      },
+
+      "implementation": {
+        "workflow_steps": [
+          "Identify independent tasks",
+          "Validate no dependencies exist",
+          "Execute all tasks concurrently",
+          "Monitor progress of each task",
+          "Collect results as they complete",
+          "Aggregate final results"
+        ],
+        "error_handling": [
+          "Track success/failure per task",
+          "Continue other tasks if one fails",
+          "Aggregate partial results",
+          "Report all failures in summary"
+        ],
+        "result_aggregation": [
+          "Collect outputs from all tasks",
+          "Combine results meaningfully",
+          "Report completion status for each",
+          "Provide unified summary"
+        ]
+      },
+
+      "example": {
+        "scenario": "Multi-environment deployment",
+        "tasks": [
+          "Deploy to US-East region",
+          "Deploy to EU-West region",
+          "Deploy to Asia-Pacific region",
+          "Run smoke tests in each",
+          "Aggregate deployment status"
+        ]
+      }
+    },
+
+    {
+      "id": "iterative_workflow",
+      "name": "Iterative Workflow",
+      "description": "Repeat process with refinement based on feedback until criteria met",
+      "suitable_for": ["developer", "technical_writer", "business_analyst", "designer"],
+      "use_cases": [
+        "Refinement and improvement cycles",
+        "Draft-review-revise processes",
+        "Optimization iterations",
+        "Quality improvement loops"
+      ],
+
+      "characteristics": {
+        "execution_order": "cyclic_until_satisfied",
+        "dependency_model": "each_iteration_improves_previous",
+        "parallelization": "none_within_cycle",
+        "error_handling": "retry_with_adjustments",
+        "state_management": "versioned_iterations"
+      },
+
+      "implementation": {
+        "workflow_steps": [
+          "Create initial version",
+          "Evaluate against criteria",
+          "If criteria met, complete workflow",
+          "If not met, identify improvements",
+          "Incorporate improvements",
+          "Repeat evaluation (max iterations limit)"
+        ],
+        "iteration_management": [
+          "Track iteration count",
+          "Store each version",
+          "Compare successive versions",
+          "Define completion criteria",
+          "Set maximum iteration limit"
+        ],
+        "convergence_detection": [
+          "Define quality threshold",
+          "Measure improvement per iteration",
+          "Detect diminishing returns",
+          "Exit when threshold reached or improvement plateaus"
+        ]
+      },
+
+      "example": {
+        "scenario": "Technical documentation refinement",
+        "iterations": [
+          "1. Write initial draft",
+          "2. Review for clarity and completeness",
+          "3. Revise based on review",
+          "4. Test procedures with user",
+          "5. Incorporate user feedback",
+          "6. Final quality check → Complete or iterate"
+        ]
+      }
+    },
+
+    {
+      "id": "conditional_workflow",
+      "name": "Conditional Workflow",
+      "description": "Branch execution path based on conditions, data, or decisions",
+      "suitable_for": ["any_agent_role"],
+      "use_cases": [
+        "Decision-based routing",
+        "Context-dependent processing",
+        "Risk-based escalation",
+        "Adaptive workflows"
+      ],
+
+      "characteristics": {
+        "execution_order": "condition_dependent",
+        "dependency_model": "branching_based_on_evaluation",
+        "parallelization": "within_branches_possible",
+        "error_handling": "branch_specific",
+        "state_management": "path_tracking"
+      },
+
+      "implementation": {
+        "workflow_steps": [
+          "Evaluate condition or decision point",
+          "Select appropriate branch",
+          "Execute branch-specific workflow",
+          "Optionally merge results",
+          "Continue to next decision or complete"
+        ],
+        "condition_evaluation": [
+          "Define clear decision criteria",
+          "Gather necessary data for decision",
+          "Apply decision logic",
+          "Document decision rationale",
+          "Route to selected branch"
+        ],
+        "branch_management": [
+          "Define all possible branches",
+          "Implement logic for each path",
+          "Handle default/fallback case",
+          "Track which branch was taken"
+        ]
+      },
+
+      "example": {
+        "scenario": "Support ticket routing",
+        "branches": [
+          "IF severity = critical → Escalate immediately",
+          "ELSE IF category = technical → Route to engineering",
+          "ELSE IF category = billing → Route to finance",
+          "ELSE → Route to general support"
+        ]
+      }
+    },
+
+    {
+      "id": "event_driven_workflow",
+      "name": "Event-Driven Workflow",
+      "description": "Trigger actions in response to events, enabling reactive behavior",
+      "suitable_for": ["devops", "customer_success", "project_manager"],
+      "use_cases": [
+        "Monitoring and alerting",
+        "Automated incident response",
+        "Trigger-based notifications",
+        "Reactive automation"
+      ],
+
+      "characteristics": {
+        "execution_order": "event_triggered",
+        "dependency_model": "event_produces_response",
+        "parallelization": "multiple_events_concurrent",
+        "error_handling": "retry_on_transient_failure",
+        "state_management": "event_history_tracking"
+      },
+
+      "implementation": {
+        "workflow_steps": [
+          "Monitor for defined events",
+          "On event detection, validate event",
+          "Execute appropriate response workflow",
+          "Log event and response",
+          "Return to monitoring state"
+        ],
+        "event_handling": [
+          "Define event types and schemas",
+          "Implement event detection",
+          "Map events to response actions",
+          "Handle event queuing if needed",
+          "Track event-response history"
+        ],
+        "response_patterns": [
+          "Immediate acknowledgment",
+          "Asynchronous processing",
+          "Notification generation",
+          "Escalation if needed",
+          "Completion confirmation"
+        ]
+      },
+
+      "example": {
+        "scenario": "System monitoring and response",
+        "events_and_responses": [
+          "Event: CPU > 80% → Response: Scale up resources",
+          "Event: Error rate spike → Response: Alert on-call engineer",
+          "Event: Deployment complete → Response: Run health checks",
+          "Event: Health check fail → Response: Auto-rollback"
+        ]
+      }
+    },
+
+    {
+      "id": "pipeline_workflow",
+      "name": "Pipeline Workflow",
+      "description": "Transform data through series of processing stages, each adding value",
+      "suitable_for": ["developer", "data_analyst", "devops", "qa_engineer"],
+      "use_cases": [
+        "Data transformation pipelines",
+        "CI/CD build and deploy pipelines",
+        "Content processing workflows",
+        "Multi-stage validation"
+      ],
+
+      "characteristics": {
+        "execution_order": "sequential_stages_with_gates",
+        "dependency_model": "output_of_stage_is_input_to_next",
+        "parallelization": "within_stages_possible",
+        "error_handling": "fail_fast_with_rollback",
+        "state_management": "stage_outputs_preserved"
+      },
+
+      "implementation": {
+        "workflow_steps": [
+          "Receive input to pipeline",
+          "Execute stage 1: transform/process",
+          "Validate stage 1 output (quality gate)",
+          "Pass to stage 2 if validation passes",
+          "Continue through all stages",
+          "Deliver final output"
+        ],
+        "quality_gates": [
+          "Define acceptance criteria per stage",
+          "Validate output before next stage",
+          "Halt pipeline on gate failure",
+          "Provide clear failure reason",
+          "Enable retry from failed stage"
+        ],
+        "artifact_management": [
+          "Store output of each stage",
+          "Version pipeline artifacts",
+          "Enable stage-level rollback",
+          "Track artifact lineage"
+        ]
+      },
+
+      "example": {
+        "scenario": "CI/CD deployment pipeline",
+        "stages": [
+          "1. Source: Pull code from repository",
+          "2. Build: Compile and package",
+          "3. Test: Run unit and integration tests",
+          "4. Security: Scan for vulnerabilities",
+          "5. Stage Deploy: Deploy to staging",
+          "6. Validation: Run acceptance tests",
+          "7. Production Deploy: Deploy to production",
+          "8. Verification: Health checks and smoke tests"
+        ]
+      }
+    },
+
+    {
+      "id": "coordinator_workflow",
+      "name": "Coordinator Workflow",
+      "description": "Orchestrate multiple sub-workflows, managing their execution and results",
+      "suitable_for": ["project_manager", "business_analyst", "devops"],
+      "use_cases": [
+        "Complex multi-phase projects",
+        "Coordinated team workflows",
+        "Multi-system orchestration",
+        "Program management"
+      ],
+
+      "characteristics": {
+        "execution_order": "managed_coordination",
+        "dependency_model": "manages_sub_workflow_dependencies",
+        "parallelization": "orchestrates_parallel_and_sequential",
+        "error_handling": "compensating_actions",
+        "state_management": "hierarchical_with_sub_states"
+      },
+
+      "implementation": {
+        "workflow_steps": [
+          "Decompose high-level goal into sub-workflows",
+          "Determine dependencies between sub-workflows",
+          "Schedule and initiate sub-workflows",
+          "Monitor progress of all sub-workflows",
+          "Coordinate hand-offs and dependencies",
+          "Aggregate results and report status"
+        ],
+        "coordination_logic": [
+          "Track status of each sub-workflow",
+          "Manage data flow between workflows",
+          "Handle cross-workflow dependencies",
+          "Resolve conflicts or blocking issues",
+          "Provide unified status view"
+        ],
+        "failure_handling": [
+          "Detect sub-workflow failures",
+          "Determine impact on other workflows",
+          "Execute compensation if needed",
+          "Re-plan remaining work",
+          "Communicate status to stakeholders"
+        ]
+      },
+
+      "example": {
+        "scenario": "Product launch coordination",
+        "sub_workflows": [
+          "Development: Build features and fix bugs",
+          "QA: Test and validate release",
+          "Documentation: Create user guides",
+          "Marketing: Prepare launch campaign",
+          "Operations: Prepare infrastructure",
+          "Coordination: Ensure all ready for launch date"
+        ]
+      }
+    },
+
+    {
+      "id": "feedback_loop_workflow",
+      "name": "Feedback Loop Workflow",
+      "description": "Continuous improvement through feedback collection, analysis, and action",
+      "suitable_for": ["customer_success", "product_manager", "qa_engineer"],
+      "use_cases": [
+        "Customer feedback integration",
+        "Continuous quality improvement",
+        "Performance monitoring and tuning",
+        "Agile retrospectives"
+      ],
+
+      "characteristics": {
+        "execution_order": "cyclical_with_learning",
+        "dependency_model": "feedback_informs_next_cycle",
+        "parallelization": "feedback_collection_parallel",
+        "error_handling": "learn_from_failures",
+        "state_management": "historical_tracking"
+      },
+
+      "implementation": {
+        "workflow_steps": [
+          "Execute operation or process",
+          "Collect feedback and metrics",
+          "Analyze feedback for patterns",
+          "Identify improvement opportunities",
+          "Implement changes",
+          "Measure impact of changes",
+          "Repeat cycle"
+        ],
+        "feedback_mechanisms": [
+          "Define feedback sources",
+          "Implement collection methods",
+          "Aggregate and analyze feedback",
+          "Prioritize improvement actions",
+          "Track improvement effectiveness"
+        ],
+        "continuous_improvement": [
+          "Establish baseline metrics",
+          "Track trends over time",
+          "Celebrate improvements",
+          "Share learnings across team",
+          "Institutionalize successful changes"
+        ]
+      },
+
+      "example": {
+        "scenario": "Customer onboarding improvement",
+        "cycle": [
+          "1. Onboard customers using current process",
+          "2. Collect feedback and time-to-value metrics",
+          "3. Analyze pain points and bottlenecks",
+          "4. Implement process improvements",
+          "5. Measure impact on customer satisfaction",
+          "6. Iterate with new improvements"
+        ]
+      }
+    }
+  ],
+
+  "error_handling_patterns": {
+    "retry_with_backoff": {
+      "description": "Retry failed operations with increasing delays between attempts",
+      "use_when": "Transient failures, network issues, rate limiting",
+      "implementation": {
+        "max_retries": "3-5 attempts typically",
+        "backoff_strategy": "Exponential (1s, 2s, 4s, 8s) or linear",
+        "jitter": "Add randomness to prevent thundering herd",
+        "give_up_condition": "Max retries reached or permanent error detected"
+      }
+    },
+
+    "circuit_breaker": {
+      "description": "Stop attempting operations after consecutive failures to prevent cascading issues",
+      "use_when": "Downstream service failures, resource exhaustion",
+      "implementation": {
+        "states": "Closed (normal), Open (failing), Half-Open (testing recovery)",
+        "failure_threshold": "5 consecutive failures triggers open",
+        "timeout": "Wait 30-60s before attempting half-open",
+        "success_threshold": "2-3 successes in half-open closes circuit"
+      }
+    },
+
+    "graceful_degradation": {
+      "description": "Continue with reduced functionality when components fail",
+      "use_when": "Non-critical feature failures, partial system unavailability",
+      "implementation": {
+        "core_vs_optional": "Identify essential vs optional features",
+        "fallback_behavior": "Define reduced functionality behavior",
+        "user_notification": "Inform user of degraded mode",
+        "recovery_monitoring": "Attempt to restore full functionality"
+      }
+    },
+
+    "compensating_transaction": {
+      "description": "Undo or compensate for partially completed operations",
+      "use_when": "Multi-step transactions, distributed operations",
+      "implementation": {
+        "transaction_log": "Record each step of operation",
+        "compensation_logic": "Define reverse operation for each step",
+        "rollback_procedure": "Execute compensations in reverse order",
+        "idempotency": "Ensure compensations can be safely repeated"
+      }
+    }
+  },
+
+  "workflow_composition": {
+    "description": "Combining workflow patterns to create sophisticated behaviors",
+
+    "common_compositions": {
+      "sequential_with_conditional": {
+        "pattern": "Sequential workflow with conditional branches at decision points",
+        "example": "Deployment pipeline with conditional rollback on test failure"
+      },
+      "parallel_with_aggregation": {
+        "pattern": "Parallel execution followed by result aggregation and analysis",
+        "example": "Multi-region deployment with centralized status aggregation"
+      },
+      "iterative_with_feedback": {
+        "pattern": "Iterative refinement guided by continuous feedback",
+        "example": "Product development with user testing and iteration"
+      },
+      "coordinator_with_pipelines": {
+        "pattern": "Coordinator managing multiple pipeline workflows",
+        "example": "Release coordinator managing build, test, and deploy pipelines"
+      }
+    }
+  },
+
+  "workflow_best_practices": {
+    "design_principles": [
+      "Single Responsibility - Each workflow should have one clear purpose",
+      "Idempotency - Operations should be safely repeatable",
+      "Observability - Comprehensive logging and monitoring",
+      "Fail-Safe Design - Default to safe state on errors",
+      "Loose Coupling - Minimize dependencies between workflows",
+      "Clear Interfaces - Well-defined inputs and outputs"
+    ],
+
+    "implementation_guidelines": [
+      "Document workflow purpose and steps clearly",
+      "Define success criteria and completion conditions",
+      "Implement comprehensive error handling",
+      "Add timeout protection for all operations",
+      "Log workflow progress and state transitions",
+      "Make workflows testable in isolation",
+      "Version workflows for tracking changes",
+      "Monitor workflow execution metrics"
+    ],
+
+    "operational_considerations": [
+      "Set realistic timeouts for each step",
+      "Implement proper resource cleanup",
+      "Handle interruptions and resume gracefully",
+      "Provide clear status updates to users",
+      "Enable workflow cancellation where appropriate",
+      "Archive completed workflow history",
+      "Monitor and alert on workflow failures",
+      "Review and optimize workflow performance"
+    ]
+  },
+
+  "usage_guidelines": {
+    "selecting_pattern": "Choose workflow pattern based on task dependencies, parallelization needs, and error handling requirements",
+    "customizing_pattern": "Adapt patterns to specific agent needs while maintaining core pattern characteristics",
+    "combining_patterns": "Compose multiple patterns for complex workflows, ensuring clear boundaries",
+    "testing_workflows": "Test workflows with success, failure, and edge case scenarios",
+    "monitoring_execution": "Implement observability to track workflow health and performance"
+  }
+}

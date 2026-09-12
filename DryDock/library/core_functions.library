@@ -1,0 +1,308 @@
+{
+  "library_id": "core_functions",
+  "version": "1.0.0",
+  "type": "component_library",
+  "title": "Core Functions Library",
+  "description": "Reusable core functions that can be included in any agent. These provide essential capabilities for agent operation.",
+
+  "functions": [
+    {
+      "name": "context_manager",
+      "description": "Maintains conversational state, history, and working memory across interactions",
+      "permissions": ["read_write_memory", "maintain_context", "retrieve_history"],
+      "required_for": ["all_agents"],
+      "suitable_for": ["any"],
+      "category": "essential",
+      "complexity": "core",
+      "details": {
+        "capabilities": [
+          "Session state persistence",
+          "Conversation history tracking",
+          "Working memory management",
+          "Context retrieval and updates"
+        ],
+        "use_cases": [
+          "Remembering user preferences",
+          "Tracking project state",
+          "Maintaining workflow context",
+          "Cross-session continuity"
+        ]
+      }
+    },
+    {
+      "name": "input_validator",
+      "description": "Validates user inputs, requests clarification, and ensures data quality",
+      "permissions": ["validate_input", "request_clarification", "format_validation"],
+      "required_for": [],
+      "suitable_for": ["any"],
+      "category": "quality",
+      "complexity": "basic",
+      "details": {
+        "capabilities": [
+          "Data type validation",
+          "Format checking",
+          "Range validation",
+          "Clarification requests"
+        ],
+        "use_cases": [
+          "Validating configuration inputs",
+          "Ensuring data completeness",
+          "Catching invalid requests early",
+          "Improving user experience"
+        ]
+      }
+    },
+    {
+      "name": "output_formatter",
+      "description": "Formats outputs according to style guidelines and user preferences",
+      "permissions": ["format_output", "apply_styles", "structure_data"],
+      "required_for": [],
+      "suitable_for": ["any"],
+      "category": "presentation",
+      "complexity": "basic",
+      "details": {
+        "capabilities": [
+          "Structured formatting",
+          "Style application",
+          "Template processing",
+          "Multi-format output"
+        ],
+        "use_cases": [
+          "Creating consistent reports",
+          "Formatting code blocks",
+          "Structured data presentation",
+          "User-friendly outputs"
+        ]
+      }
+    },
+    {
+      "name": "file_analyzer",
+      "description": "Reads and analyzes file contents, structure, and metadata",
+      "permissions": ["read_files", "parse_content", "analyze_structure", "extract_metadata"],
+      "required_for": [],
+      "suitable_for": ["developer", "qa_engineer", "technical_writer", "analyst"],
+      "category": "analysis",
+      "complexity": "intermediate",
+      "details": {
+        "capabilities": [
+          "File content reading",
+          "Structure analysis",
+          "Metadata extraction",
+          "Pattern recognition"
+        ],
+        "use_cases": [
+          "Code analysis",
+          "Documentation review",
+          "Project assessment",
+          "Data extraction"
+        ]
+      }
+    },
+    {
+      "name": "code_analyzer",
+      "description": "Analyzes code structure, quality, patterns, and potential issues",
+      "permissions": ["read_code", "parse_syntax", "analyze_patterns", "assess_quality"],
+      "required_for": [],
+      "suitable_for": ["developer", "qa_engineer", "technical_writer"],
+      "category": "code",
+      "complexity": "advanced",
+      "details": {
+        "capabilities": [
+          "Syntax analysis",
+          "Pattern detection",
+          "Quality assessment",
+          "Complexity metrics",
+          "Security scanning"
+        ],
+        "use_cases": [
+          "Code review",
+          "Quality assessment",
+          "Security analysis",
+          "Refactoring planning"
+        ]
+      }
+    },
+    {
+      "name": "test_generator",
+      "description": "Generates test cases, test code, and test plans",
+      "permissions": ["analyze_requirements", "generate_tests", "create_test_data"],
+      "required_for": [],
+      "suitable_for": ["developer", "qa_engineer"],
+      "category": "testing",
+      "complexity": "advanced",
+      "details": {
+        "capabilities": [
+          "Test case generation",
+          "Test code writing",
+          "Test data creation",
+          "Coverage analysis"
+        ],
+        "use_cases": [
+          "Unit test generation",
+          "Integration test planning",
+          "Test automation",
+          "Coverage improvement"
+        ]
+      }
+    },
+    {
+      "name": "report_generator",
+      "description": "Creates formatted reports with data, visualizations, and insights",
+      "permissions": ["aggregate_data", "generate_visualizations", "format_reports", "calculate_metrics"],
+      "required_for": [],
+      "suitable_for": ["project_manager", "analyst", "qa_engineer"],
+      "category": "reporting",
+      "complexity": "intermediate",
+      "details": {
+        "capabilities": [
+          "Data aggregation",
+          "Metric calculation",
+          "Report formatting",
+          "Insight generation"
+        ],
+        "use_cases": [
+          "Status reporting",
+          "Analytics reports",
+          "Executive summaries",
+          "Performance dashboards"
+        ]
+      }
+    },
+    {
+      "name": "documentation_generator",
+      "description": "Creates comprehensive documentation from code, specs, and requirements",
+      "permissions": ["analyze_code", "extract_documentation", "generate_docs", "format_content"],
+      "required_for": [],
+      "suitable_for": ["developer", "technical_writer"],
+      "category": "documentation",
+      "complexity": "advanced",
+      "details": {
+        "capabilities": [
+          "API documentation",
+          "Code comments",
+          "User guides",
+          "Technical specs"
+        ],
+        "use_cases": [
+          "API documentation",
+          "User manuals",
+          "Technical guides",
+          "README generation"
+        ]
+      }
+    },
+    {
+      "name": "task_decomposer",
+      "description": "Breaks down complex tasks into manageable subtasks with dependencies",
+      "permissions": ["analyze_complexity", "identify_subtasks", "define_dependencies", "estimate_effort"],
+      "required_for": [],
+      "suitable_for": ["project_manager", "developer", "analyst"],
+      "category": "planning",
+      "complexity": "intermediate",
+      "details": {
+        "capabilities": [
+          "Task breakdown",
+          "Dependency mapping",
+          "Effort estimation",
+          "Priority assignment"
+        ],
+        "use_cases": [
+          "Project planning",
+          "Work breakdown structure",
+          "Sprint planning",
+          "Feature decomposition"
+        ]
+      }
+    },
+    {
+      "name": "risk_analyzer",
+      "description": "Identifies, assesses, and prioritizes risks with mitigation strategies",
+      "permissions": ["identify_risks", "assess_impact", "calculate_probability", "plan_mitigation"],
+      "required_for": [],
+      "suitable_for": ["project_manager", "analyst"],
+      "category": "analysis",
+      "complexity": "intermediate",
+      "details": {
+        "capabilities": [
+          "Risk identification",
+          "Impact assessment",
+          "Probability analysis",
+          "Mitigation planning"
+        ],
+        "use_cases": [
+          "Project risk management",
+          "Security risk assessment",
+          "Business continuity planning",
+          "Change impact analysis"
+        ]
+      }
+    },
+    {
+      "name": "data_analyzer",
+      "description": "Analyzes datasets, identifies patterns, and generates insights",
+      "permissions": ["read_data", "calculate_statistics", "identify_patterns", "generate_insights"],
+      "required_for": [],
+      "suitable_for": ["analyst", "data_analyst"],
+      "category": "analysis",
+      "complexity": "advanced",
+      "details": {
+        "capabilities": [
+          "Statistical analysis",
+          "Pattern recognition",
+          "Trend identification",
+          "Insight generation"
+        ],
+        "use_cases": [
+          "Business analytics",
+          "Performance analysis",
+          "Trend forecasting",
+          "Data exploration"
+        ]
+      }
+    },
+    {
+      "name": "workflow_orchestrator",
+      "description": "Manages multi-step workflows with dependencies and error handling",
+      "permissions": ["execute_workflows", "manage_dependencies", "handle_errors", "track_progress"],
+      "required_for": [],
+      "suitable_for": ["project_manager", "devops"],
+      "category": "orchestration",
+      "complexity": "advanced",
+      "details": {
+        "capabilities": [
+          "Workflow execution",
+          "Dependency resolution",
+          "Error handling",
+          "Progress tracking"
+        ],
+        "use_cases": [
+          "Complex process automation",
+          "Multi-stage operations",
+          "Pipeline management",
+          "Workflow coordination"
+        ]
+      }
+    }
+  ],
+
+  "categories": {
+    "essential": "Core functions required for basic agent operation",
+    "quality": "Functions that ensure input/output quality",
+    "presentation": "Functions for formatting and displaying information",
+    "analysis": "Functions for analyzing data, code, or situations",
+    "code": "Functions specific to code and software development",
+    "testing": "Functions related to test generation and execution",
+    "reporting": "Functions for creating reports and summaries",
+    "documentation": "Functions for generating documentation",
+    "planning": "Functions for planning and task management",
+    "orchestration": "Functions for coordinating complex workflows"
+  },
+
+  "usage_guidelines": {
+    "essential_functions": "Every agent should include context_manager as minimum",
+    "role_based_selection": "Choose functions that match the agent's primary role",
+    "capability_matching": "Ensure selected functions support defined capabilities",
+    "permission_alignment": "Function permissions must align with agent security constraints",
+    "complexity_consideration": "Balance functionality with maintainability"
+  }
+}

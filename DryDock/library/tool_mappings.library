@@ -1,0 +1,364 @@
+{
+  "library_id": "tool_mappings",
+  "version": "1.0.0",
+  "type": "component_library",
+  "title": "Tool Mappings Library",
+  "description": "Maps DryDock agent permissions to Claude Code tools for autonomous runtime execution. Used by drydock-runtime subagent to translate abstract capabilities into concrete tool usage.",
+
+  "permission_to_tool_mappings": {
+    "file_operations": {
+      "read_files": {
+        "tools": ["Read"],
+        "description": "Read file contents for analysis",
+        "use_cases": ["Analyze code", "Review configuration", "Extract data"]
+      },
+      "read_code": {
+        "tools": ["Read", "Grep", "Glob"],
+        "description": "Read and search code files",
+        "use_cases": ["Code review", "Pattern detection", "Dependency analysis"]
+      },
+      "write_files": {
+        "tools": ["Write"],
+        "description": "Create new files",
+        "use_cases": ["Generate code", "Create documentation", "Output reports"]
+      },
+      "write_code": {
+        "tools": ["Write", "Edit"],
+        "description": "Write or modify code files",
+        "use_cases": ["Code generation", "Refactoring", "Bug fixes"]
+      },
+      "create_files": {
+        "tools": ["Write"],
+        "description": "Create new files and directories",
+        "use_cases": ["Project scaffolding", "File generation", "Output creation"]
+      },
+      "modify_files": {
+        "tools": ["Edit"],
+        "description": "Modify existing file contents",
+        "use_cases": ["Code updates", "Configuration changes", "Content edits"]
+      }
+    },
+
+    "code_analysis": {
+      "analyze_code": {
+        "tools": ["Read", "Grep", "Glob"],
+        "description": "Analyze code structure and patterns",
+        "use_cases": ["Code review", "Architecture analysis", "Pattern detection"]
+      },
+      "parse_syntax": {
+        "tools": ["Read", "Grep"],
+        "description": "Parse and understand code syntax",
+        "use_cases": ["Syntax validation", "Structure analysis", "Token extraction"]
+      },
+      "analyze_patterns": {
+        "tools": ["Read", "Grep"],
+        "description": "Identify code patterns and anti-patterns",
+        "use_cases": ["Design pattern detection", "Code smell identification", "Best practice validation"]
+      },
+      "assess_quality": {
+        "tools": ["Read", "Grep", "Glob"],
+        "description": "Evaluate code quality metrics",
+        "use_cases": ["Quality review", "Complexity analysis", "Maintainability assessment"]
+      },
+      "analyze_security": {
+        "tools": ["Read", "Grep", "Bash"],
+        "description": "Security vulnerability analysis",
+        "use_cases": ["Security audit", "Vulnerability scanning", "Compliance checking"]
+      },
+      "scan_vulnerabilities": {
+        "tools": ["Read", "Grep", "Bash"],
+        "description": "Scan for security vulnerabilities",
+        "use_cases": ["CVE detection", "Dependency scanning", "Security assessment"]
+      }
+    },
+
+    "testing": {
+      "execute_tests": {
+        "tools": ["Bash"],
+        "description": "Run test suites and test commands",
+        "use_cases": ["Unit testing", "Integration testing", "Test automation"]
+      },
+      "run_commands": {
+        "tools": ["Bash"],
+        "description": "Execute shell commands",
+        "use_cases": ["Build commands", "Test execution", "Deployment scripts"]
+      },
+      "generate_tests": {
+        "tools": ["Write", "Read"],
+        "description": "Generate test code and test cases",
+        "use_cases": ["Test generation", "Test scaffolding", "Coverage improvement"]
+      },
+      "analyze_coverage": {
+        "tools": ["Bash", "Read"],
+        "description": "Analyze test coverage metrics",
+        "use_cases": ["Coverage analysis", "Gap identification", "Quality assessment"]
+      }
+    },
+
+    "documentation": {
+      "generate_docs": {
+        "tools": ["Write", "Read"],
+        "description": "Generate documentation from code",
+        "use_cases": ["API docs", "User guides", "Technical specs"]
+      },
+      "create_guides": {
+        "tools": ["Write"],
+        "description": "Create user guides and tutorials",
+        "use_cases": ["User documentation", "How-to guides", "Tutorials"]
+      },
+      "document_apis": {
+        "tools": ["Write", "Read"],
+        "description": "Generate API documentation",
+        "use_cases": ["API reference", "Endpoint docs", "SDK documentation"]
+      },
+      "write_comments": {
+        "tools": ["Edit", "Read"],
+        "description": "Add code comments and docstrings",
+        "use_cases": ["Code documentation", "Inline comments", "Function docs"]
+      }
+    },
+
+    "data_operations": {
+      "read_data": {
+        "tools": ["Read", "Bash"],
+        "description": "Read and parse data files",
+        "use_cases": ["Data analysis", "Configuration reading", "Log parsing"]
+      },
+      "analyze_data": {
+        "tools": ["Read", "Bash"],
+        "description": "Analyze datasets and extract insights",
+        "use_cases": ["Data analysis", "Pattern detection", "Trend identification"]
+      },
+      "calculate_statistics": {
+        "tools": ["Bash", "Read"],
+        "description": "Calculate statistical metrics",
+        "use_cases": ["Metrics calculation", "Statistical analysis", "Reporting"]
+      },
+      "generate_insights": {
+        "tools": ["Read", "WebSearch"],
+        "description": "Generate insights from data analysis",
+        "use_cases": ["Data insights", "Trend analysis", "Business intelligence"]
+      }
+    },
+
+    "research": {
+      "search_web": {
+        "tools": ["WebSearch"],
+        "description": "Search the web for information",
+        "use_cases": ["Research", "Documentation lookup", "Best practices discovery"]
+      },
+      "lookup_docs": {
+        "tools": ["WebSearch", "WebFetch"],
+        "description": "Look up technical documentation",
+        "use_cases": ["API reference", "Framework docs", "Library documentation"]
+      },
+      "research": {
+        "tools": ["WebSearch", "WebFetch"],
+        "description": "Conduct research on topics",
+        "use_cases": ["Technology research", "Best practices", "Solution discovery"]
+      }
+    },
+
+    "infrastructure": {
+      "build_deploy": {
+        "tools": ["Bash"],
+        "description": "Build and deploy applications",
+        "use_cases": ["CI/CD", "Deployment", "Build automation"]
+      },
+      "manage_infrastructure": {
+        "tools": ["Bash", "Read", "Write"],
+        "description": "Manage infrastructure configurations",
+        "use_cases": ["IaC management", "Configuration", "Provisioning"]
+      },
+      "monitor_systems": {
+        "tools": ["Bash", "Read"],
+        "description": "Monitor system health and metrics",
+        "use_cases": ["Monitoring", "Health checks", "Performance tracking"]
+      }
+    },
+
+    "project_management": {
+      "plan_projects": {
+        "tools": ["Write", "Read"],
+        "description": "Create project plans and timelines",
+        "use_cases": ["Project planning", "Timeline creation", "Resource allocation"]
+      },
+      "track_progress": {
+        "tools": ["Read", "Write"],
+        "description": "Track project progress and status",
+        "use_cases": ["Status tracking", "Progress monitoring", "Reporting"]
+      },
+      "manage_tasks": {
+        "tools": ["Write", "Read"],
+        "description": "Manage tasks and assignments",
+        "use_cases": ["Task management", "Assignment tracking", "Work breakdown"]
+      }
+    },
+
+    "analysis": {
+      "analyze_requirements": {
+        "tools": ["Read", "Write"],
+        "description": "Analyze and document requirements",
+        "use_cases": ["Requirements gathering", "Specification writing", "Analysis"]
+      },
+      "assess_risks": {
+        "tools": ["Read", "Write"],
+        "description": "Assess and document risks",
+        "use_cases": ["Risk analysis", "Impact assessment", "Mitigation planning"]
+      },
+      "evaluate_options": {
+        "tools": ["Read", "Write", "WebSearch"],
+        "description": "Evaluate and compare options",
+        "use_cases": ["Decision support", "Option analysis", "Comparison"]
+      }
+    },
+
+    "output_formatting": {
+      "format_output": {
+        "tools": [],
+        "description": "Format output according to specifications (LLM native)",
+        "use_cases": ["Report formatting", "Data presentation", "Structured output"]
+      },
+      "structure_data": {
+        "tools": [],
+        "description": "Structure data in specific formats (LLM native)",
+        "use_cases": ["JSON/YAML generation", "Structured formatting", "Data organization"]
+      },
+      "apply_styles": {
+        "tools": [],
+        "description": "Apply formatting styles (LLM native)",
+        "use_cases": ["Markdown formatting", "Code styling", "Document formatting"]
+      }
+    }
+  },
+
+  "tool_descriptions": {
+    "Read": {
+      "description": "Read file contents from the filesystem",
+      "typical_usage": "Analyzing code, reviewing files, extracting data",
+      "drydock_contexts": ["Code analysis", "File review", "Data extraction", "Configuration reading"]
+    },
+    "Write": {
+      "description": "Write new files to the filesystem",
+      "typical_usage": "Creating new files, generating output, writing reports",
+      "drydock_contexts": ["Code generation", "Documentation creation", "Report generation", "File output"]
+    },
+    "Edit": {
+      "description": "Modify existing file contents",
+      "typical_usage": "Updating code, fixing bugs, modifying configuration",
+      "drydock_contexts": ["Code modification", "Bug fixes", "Refactoring", "Content updates"]
+    },
+    "Bash": {
+      "description": "Execute shell commands",
+      "typical_usage": "Running tests, building projects, executing scripts",
+      "drydock_contexts": ["Test execution", "Build commands", "Script running", "CLI operations"]
+    },
+    "Grep": {
+      "description": "Search for patterns in files",
+      "typical_usage": "Finding code patterns, searching content, identifying issues",
+      "drydock_contexts": ["Pattern detection", "Code search", "Vulnerability scanning", "Content finding"]
+    },
+    "Glob": {
+      "description": "Find files matching patterns",
+      "typical_usage": "Locating files, discovering code, identifying resources",
+      "drydock_contexts": ["File discovery", "Code location", "Resource finding", "Project scanning"]
+    },
+    "WebSearch": {
+      "description": "Search the web for information",
+      "typical_usage": "Researching topics, finding documentation, discovering solutions",
+      "drydock_contexts": ["Research", "Best practices lookup", "Documentation finding", "Solution discovery"]
+    },
+    "WebFetch": {
+      "description": "Fetch and analyze web content",
+      "typical_usage": "Reading documentation, analyzing web pages, extracting information",
+      "drydock_contexts": ["Documentation reading", "API reference lookup", "Content extraction", "Web analysis"]
+    }
+  },
+
+  "capability_to_tools_recommendations": {
+    "code_generation": {
+      "essential": ["Write"],
+      "recommended": ["Read", "Edit"],
+      "optional": ["Grep", "Glob", "WebSearch"],
+      "rationale": "Write for creating files, Read for context, Edit for modifications, Search for best practices"
+    },
+    "code_review": {
+      "essential": ["Read", "Grep"],
+      "recommended": ["Glob"],
+      "optional": ["Bash", "WebSearch"],
+      "rationale": "Read to analyze code, Grep for patterns, Glob for file discovery, Bash for testing, Search for standards"
+    },
+    "testing": {
+      "essential": ["Bash"],
+      "recommended": ["Write", "Read"],
+      "optional": ["Grep"],
+      "rationale": "Bash to run tests, Write to create test files, Read to analyze results"
+    },
+    "debugging": {
+      "essential": ["Read", "Grep"],
+      "recommended": ["Bash", "Edit"],
+      "optional": ["Glob"],
+      "rationale": "Read for code analysis, Grep for error patterns, Bash for reproduction, Edit for fixes"
+    },
+    "documentation": {
+      "essential": ["Write", "Read"],
+      "recommended": ["Grep", "Glob"],
+      "optional": ["WebSearch"],
+      "rationale": "Write for docs creation, Read for code understanding, Search for examples"
+    },
+    "refactoring": {
+      "essential": ["Read", "Edit"],
+      "recommended": ["Grep", "Glob"],
+      "optional": ["Bash"],
+      "rationale": "Read for analysis, Edit for changes, Grep for pattern finding, Bash for testing"
+    },
+    "security_analysis": {
+      "essential": ["Read", "Grep"],
+      "recommended": ["Bash", "Glob"],
+      "optional": ["WebSearch"],
+      "rationale": "Read for code review, Grep for vulnerability patterns, Bash for security tools, Search for CVEs"
+    },
+    "performance_optimization": {
+      "essential": ["Read", "Bash"],
+      "recommended": ["Grep", "Edit"],
+      "optional": ["WebSearch"],
+      "rationale": "Read for code analysis, Bash for profiling, Grep for bottlenecks, Edit for optimization"
+    },
+    "project_planning": {
+      "essential": ["Write"],
+      "recommended": ["Read"],
+      "optional": ["WebSearch"],
+      "rationale": "Write for plan creation, Read for context, Search for methodologies"
+    },
+    "data_analysis": {
+      "essential": ["Read", "Bash"],
+      "recommended": ["Write"],
+      "optional": ["WebSearch"],
+      "rationale": "Read for data input, Bash for processing, Write for reports, Search for techniques"
+    }
+  },
+
+  "usage_guidelines": {
+    "tool_selection": "Match DryDock permissions to Claude Code tools using the mappings above",
+    "essential_tools": "Always include tools marked as 'essential' for the capability",
+    "optional_tools": "Add optional tools when they enhance capability execution",
+    "tool_combinations": "Combine tools effectively - e.g., Glob to find files, Read to analyze, Edit to modify",
+    "fallback_behavior": "If a tool is unavailable, adapt workflow to use available tools or inform user of limitations"
+  },
+
+  "runtime_integration": {
+    "how_runtime_uses_this": {
+      "step_1": "Runtime identifies capability being executed (e.g., 'code_review')",
+      "step_2": "Looks up capability's permissions in agent config (e.g., ['read_code', 'analyze_patterns'])",
+      "step_3": "Maps each permission to tools using permission_to_tool_mappings",
+      "step_4": "Verifies required tools are available in runtime's tool set",
+      "step_5": "Uses mapped tools during workflow execution"
+    },
+    "example": {
+      "capability": "code_review",
+      "permissions": ["read_code", "analyze_patterns", "assess_quality"],
+      "mapped_tools": ["Read", "Grep", "Glob"],
+      "execution": "Runtime uses Read to examine code, Grep to find patterns, Glob to discover files during review workflow"
+    }
+  }
+}

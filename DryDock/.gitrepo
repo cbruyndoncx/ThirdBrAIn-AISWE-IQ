@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/savannah-i-g/DryDock.git
+	branch = main
+	commit = 6e29cfdbaf8ef299adf87a75f562fc2d57bb7b7e
+	parent = b86c09a149fca269a3b799f760bad5e39cbf65d6
+	method = merge
+	cmdver = 0.4.9
