@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/SuperClaude-Org/SuperClaude_Framework.git
+	branch = master
+	commit = 1b81e51db955126ec8983769b96dec575d730c05
+	parent = aefe51585554ea225dec84e84e8db1f380d30177
+	method = merge
+	cmdver = 0.4.9
