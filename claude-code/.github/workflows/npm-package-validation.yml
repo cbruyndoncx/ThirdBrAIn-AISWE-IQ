@@ -1,0 +1,159 @@
+name: NPM Package Validation
+
+on:
+  push:
+    paths:
+      - 'claude-dev-toolkit/**'
+      - '.github/workflows/npm-package-validation.yml'
+  pull_request:
+    paths:
+      - 'claude-dev-toolkit/**'
+      - '.github/workflows/npm-package-validation.yml'
+
+jobs:
+  validate-npm-package:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+    
+    defaults:
+      run:
+        working-directory: claude-dev-toolkit
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+    - name: Setup Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+        cache-dependency-path: claude-dev-toolkit/package-lock.json
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Run NPM Package Completeness Tests
+      run: npm run test:npm-completeness
+
+    - name: Validate all directories are included in npm pack
+      run: |
+        echo "📋 Checking npm pack includes all required directories..."
+        npm pack --dry-run 2>&1 | tee pack-output.log
+        
+        # Check for required directories
+        if grep -q "commands/active/" pack-output.log; then
+          echo "✅ commands/active/ found in package"
+        else
+          echo "❌ commands/active/ missing from package"
+          exit 1
+        fi
+        
+        if grep -q "commands/experiments/" pack-output.log; then
+          echo "✅ commands/experiments/ found in package"
+        else
+          echo "❌ commands/experiments/ missing from package"
+          exit 1
+        fi
+        
+        if grep -q "templates/" pack-output.log; then
+          echo "✅ templates/ found in package"
+        else
+          echo "❌ templates/ missing from package"
+          exit 1
+        fi
+        
+        if grep -q "hooks/" pack-output.log; then
+          echo "✅ hooks/ found in package"
+        else
+          echo "❌ hooks/ missing from package"
+          exit 1
+        fi
+        
+        if grep -q "subagents/" pack-output.log; then
+          echo "✅ subagents/ found in package"
+        else
+          echo "❌ subagents/ missing from package"
+          exit 1
+        fi
+
+    - name: Test package installation functionality
+      run: |
+        echo "📦 Testing package functionality..."
+        
+        # Build the package
+        npm pack
+        
+        # Install it globally in test environment
+        PACKAGE_FILE=$(ls -1 paulduvall-claude-dev-toolkit-*.tgz | head -1)
+        npm install -g "$PACKAGE_FILE"
+        
+        # Test basic functionality
+        claude-commands --version
+        
+        # Test commands installation
+        claude-commands install --active
+        
+        # Verify commands were installed
+        claude-commands list | grep -q "xarchitecture" || (echo "❌ Active commands not installed properly" && exit 1)
+        
+        echo "✅ Package installation test completed successfully"
+
+    - name: Check for symlinks (should be none)
+      run: |
+        echo "🔗 Checking for symlinks in package directories..."
+        
+        if [ -L commands ]; then
+          echo "❌ commands is a symlink - this will break npm packaging"
+          exit 1
+        fi
+        
+        if [ -L templates ]; then
+          echo "❌ templates is a symlink - this will break npm packaging"
+          exit 1
+        fi
+        
+        if [ -L hooks ]; then
+          echo "❌ hooks is a symlink - this will break npm packaging"
+          exit 1
+        fi
+        
+        echo "✅ No problematic symlinks found"
+
+    - name: Verify file counts
+      run: |
+        echo "Verifying file counts..."
+
+        ACTIVE_COUNT=$(find commands/active -name "*.md" | wc -l | tr -d ' ')
+        EXPERIMENTAL_COUNT=$(find commands/experiments -name "*.md" | wc -l | tr -d ' ')
+        SUBAGENTS_COUNT=$(find subagents -name "*.md" | wc -l | tr -d ' ')
+
+        echo "Found $ACTIVE_COUNT active, $EXPERIMENTAL_COUNT experimental, $SUBAGENTS_COUNT subagents"
+
+        if [ "$ACTIVE_COUNT" -lt 1 ]; then
+          echo "No active commands found"
+          exit 1
+        fi
+
+        if [ "$EXPERIMENTAL_COUNT" -lt 1 ]; then
+          echo "No experimental commands found"
+          exit 1
+        fi
+
+        if [ "$SUBAGENTS_COUNT" -lt 1 ]; then
+          echo "No subagents found"
+          exit 1
+        fi
+
+        echo "All file categories populated"
+
+    - name: Upload package artifact
+      if: matrix.node-version == '20'  # Only upload once
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: claude-dev-toolkit-package
+        path: claude-dev-toolkit/paulduvall-claude-dev-toolkit-*.tgz
+        retention-days: 7

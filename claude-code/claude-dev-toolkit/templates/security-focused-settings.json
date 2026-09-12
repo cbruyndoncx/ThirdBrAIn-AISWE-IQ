@@ -1,0 +1,62 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(*)",
+      "Edit(*.md)",
+      "Edit(*.txt)",
+      "Edit(*.json)",
+      "Edit(*.yml)",
+      "Edit(*.yaml)",
+      "Bash(git *)",
+      "Bash(npm run *)",
+      "Bash(python -m *)",
+      "Bash(node *)",
+      "Glob(*)",
+      "Grep(*)"
+    ],
+    "deny": [
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(ssh *)",
+      "Bash(sudo *)",
+      "Bash(rm -rf *)",
+      "Bash(*production*)",
+      "Bash(*admin*)",
+      "Edit(/etc/*)",
+      "Edit(/root/*)",
+      "Edit(~/.ssh/*)",
+      "Read(/etc/passwd)",
+      "Read(/etc/shadow)",
+      "Read(~/.aws/*)",
+      "Read(~/.ssh/id_*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/prevent-credential-exposure.sh",
+            "blocking": true,
+            "timeout": 10000
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/verify-before-edit.sh",
+            "blocking": false,
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "DISABLE_TELEMETRY": "1",
+    "ANTHROPIC_LOG": "error"
+  },
+  "includeCoAuthoredBy": false,
+  "cleanupPeriodDays": 7,
+  "enableAllProjectMcpServers": false
+}

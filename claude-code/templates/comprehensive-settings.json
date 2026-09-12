@@ -1,0 +1,61 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Edit(*)",
+      "Write(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "WebFetch(*)",
+      "WebSearch(*)",
+      "NotebookEdit(*)"
+    ],
+    "ask": [
+      "Bash(sudo *)",
+      "Bash(rm -rf *)",
+      "Edit(/etc/*)",
+      "Read(~/.ssh/*)"
+    ],
+    "deny": [
+      "Bash(*production*)",
+      "Bash(*admin*)",
+      "Read(/etc/shadow)",
+      "Edit(/etc/passwd)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/prevent-credential-exposure.sh",
+            "blocking": true,
+            "timeout": 10000
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/verify-before-edit.sh",
+            "blocking": false,
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "PostToolUse": []
+  },
+  "env": {
+    "DISABLE_TELEMETRY": "1",
+    "ANTHROPIC_LOG": "info"
+  },
+  "includeCoAuthoredBy": true,
+  "cleanupPeriodDays": 30,
+  "model": "claude-sonnet-4-6",
+  "enableAllProjectMcpServers": false,
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/hooks/statusline.sh"
+  }
+}

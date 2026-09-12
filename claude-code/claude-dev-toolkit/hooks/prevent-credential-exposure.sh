@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Claude Code Hook: Prevent Credential Exposure
+# 
+# Purpose: Scan for exposed credentials before any file write/edit operations
+# Trigger: PreToolUse for Edit, Write, MultiEdit tools
+# Blocking: Yes - prevents credential exposure
+#
+# This hook implements enterprise-grade security by detecting and preventing
+# accidental credential exposure in AI-generated or AI-modified code.
+
+##################################
+# Configuration
+##################################
+HOOK_NAME="prevent-credential-exposure"
+LOG_FILE="$HOME/.claude/logs/security-hooks.log"
+VIOLATION_LOG="$HOME/.claude/logs/credential-violations.log"
+NOTIFICATION_WEBHOOK="${SECURITY_WEBHOOK_URL:-}"
+source "$(dirname "$0")/lib/hook-helpers.sh"
+ensure_log_setup "$LOG_FILE"
+ensure_log_setup "$VIOLATION_LOG"
+setup_hook_traps
+
+##################################
+# Logging Functions
+##################################
+log_violation() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] VIOLATION: $*" | tee -a "$VIOLATION_LOG"
+}
+
+##################################
+# Notification Functions
+##################################
+notify_security_team() {
+    local violation_type="$1"
+    local file_path="$2"
+    local pattern="$3"
+
+    if [[ -n "$NOTIFICATION_WEBHOOK" ]]; then
+        local safe_type safe_path safe_pattern safe_user safe_ts
+        safe_type=$(json_escape "$violation_type")
+        safe_path=$(json_escape "$file_path")
+        safe_pattern=$(json_escape "$pattern")
+        safe_user=$(json_escape "$USER")
+        safe_ts=$(json_escape "$(date)")
+
+        curl -s -X POST "$NOTIFICATION_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "{
+                \"text\": \"SECURITY ALERT: Credential exposure prevented\",
+                \"attachments\": [{
+                    \"color\": \"danger\",
+                    \"fields\": [
+                        {\"title\": \"Violation Type\", \"value\": \"$safe_type\", \"short\": true},
+                        {\"title\": \"File\", \"value\": \"$safe_path\", \"short\": true},
+                        {\"title\": \"Pattern\", \"value\": \"$safe_pattern\", \"short\": false},
+                        {\"title\": \"User\", \"value\": \"$safe_user\", \"short\": true},
+                        {\"title\": \"Timestamp\", \"value\": \"$safe_ts\", \"short\": true}
+                    ]
+                }]
+            }" 2>/dev/null || log "Failed to send security notification"
+    fi
+}
+
+##################################
+# Credential Detection Patterns
+##################################
+# Loaded from shared credential-patterns.conf (single source of truth)
+# Uses parallel arrays for bash 3.2 compatibility (no declare -A)
+PATTERN_NAMES=()
+PATTERN_REGEXES=()
+
+load_shared_patterns() {
+    local patterns_file
+    patterns_file="$(dirname "$0")/lib/credential-patterns.conf"
+    if [[ ! -f "$patterns_file" ]]; then
+        log "WARNING: Shared patterns file not found: $patterns_file"
+        return 1
+    fi
+
+    while IFS='|' read -r name confidence regex description; do
+        [[ -z "$name" || "$name" =~ ^[[:space:]]*# ]] && continue
+        PATTERN_NAMES+=("$name")
+        PATTERN_REGEXES+=("$regex")
+    done < "$patterns_file"
+}
+
+load_shared_patterns
+
+##################################
+# Content Analysis Functions
+##################################
+scan_file_content() {
+    local file_path="$1"
+    local content="$2"
+    local violation_count=0
+
+    if [[ ! -f "$file_path" ]]; then
+        return 0
+    fi
+
+    if file "$file_path" 2>/dev/null | grep -q "binary"; then
+        return 0
+    fi
+
+    log "Scanning file: $file_path" >&2
+
+    local i=0
+    while [[ $i -lt ${#PATTERN_NAMES[@]} ]]; do
+        local pattern_name="${PATTERN_NAMES[$i]}"
+        local pattern="${PATTERN_REGEXES[$i]}"
+
+        if echo "$content" | grep -qiP -e "$pattern"; then
+            log_violation "$pattern_name detected in $file_path" >&2
+            ((violation_count++))
+
+            local matched_line
+            matched_line=$(echo "$content" | grep -iP -e "$pattern" | head -1)
+            local redacted_line
+            redacted_line=$(echo "$matched_line" | sed 's/[a-zA-Z0-9+/=]\{10,\}/[REDACTED]/g')
+
+            log_violation "Pattern: $pattern_name, Line: $redacted_line" >&2
+            notify_security_team "$pattern_name" "$file_path" "$redacted_line"
+        fi
+        ((i++))
+    done
+
+    echo "$violation_count"
+}
+
+check_environment_leakage() {
+    local content="$1"
+    local violations=0
+    
+    # Check for environment variable exposure patterns
+    if echo "$content" | grep -qiP 'process\.env\.[A-Z_]*(?:KEY|SECRET|PASSWORD|TOKEN)'; then
+        log_violation "Environment variable credential exposure detected" >&2
+        ((violations++))
+    fi
+
+    # Check for hardcoded production URLs with credentials
+    if echo "$content" | grep -qiP 'https?://[^:]+:[^@]+@[^/]+'; then
+        log_violation "URL with embedded credentials detected" >&2
+        ((violations++))
+    fi
+    
+    echo "$violations"
+}
+
+##################################
+# Dependency Validation
+##################################
+validate_hook_dependencies() {
+    local deps=("grep" "file" "sed" "head")
+    local missing=()
+    
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            missing+=("$dep")
+        fi
+    done
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log "ERROR: Missing required dependencies: ${missing[*]}"
+        echo "Install missing tools and retry"
+        exit 1
+    fi
+}
+
+##################################
+# Main Hook Logic
+##################################
+main() {
+    # Validate dependencies first
+    validate_hook_dependencies
+    local tool_name="${CLAUDE_TOOL:-unknown}"
+    local file_path="${CLAUDE_FILE:-}"
+    local content=""
+    
+    log "Hook triggered for tool: $tool_name"
+    
+    # Only process file modification tools
+    case "$tool_name" in
+        "Edit"|"Write"|"MultiEdit")
+            ;;
+        *)
+            log "Skipping non-file tool: $tool_name"
+            exit 0
+            ;;
+    esac
+    
+    # Get file content to analyze
+    if [[ -n "$file_path" ]] && [[ -f "$file_path" ]]; then
+        content=$(cat "$file_path" 2>/dev/null || echo "")
+    elif [[ -n "$CLAUDE_CONTENT" ]]; then
+        content="$CLAUDE_CONTENT"
+        file_path="${file_path:-stdin}"
+    else
+        log "No content to analyze"
+        exit 0
+    fi
+    
+    # Perform security scans
+    local credential_violations
+    local env_violations
+    
+    credential_violations=$(scan_file_content "$file_path" "$content")
+    env_violations=$(check_environment_leakage "$content")
+    
+    local total_violations=$((credential_violations + env_violations))
+    
+    # Block if violations found
+    if [[ $total_violations -gt 0 ]]; then
+        echo "🚨 SECURITY VIOLATION: Credential exposure detected!"
+        echo "File: $file_path"
+        echo "Violations: $total_violations"
+        echo ""
+        echo "The operation has been BLOCKED to prevent credential exposure."
+        echo "Please review the file and remove any exposed credentials before proceeding."
+        echo ""
+        echo "Common fixes:"
+        echo "- Move credentials to environment variables"
+        echo "- Use a secrets management system"
+        echo "- Add files to .gitignore if they contain test data"
+        echo "- Use placeholder values in examples"
+        echo ""
+        log_violation "BLOCKED: $total_violations violations in $file_path"
+
+        exit 1
+    fi
+    
+    log "Security scan passed for $file_path"
+    exit 0
+}
+
+##################################
+# Execute Main Function
+##################################
+main "$@"
