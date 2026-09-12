@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/jduncan-rva/skill-porter.git
+	branch = main
+	commit = 7ad93ecdabc1934195df664b8e70be9a92013955
+	parent = 60fd149d448d0be3701ff81b7a1c1bed67e27a48
+	method = merge
+	cmdver = 0.4.9
