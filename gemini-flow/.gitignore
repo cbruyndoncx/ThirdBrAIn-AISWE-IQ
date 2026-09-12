@@ -1,0 +1,104 @@
+# Gemini-Flow
+.gemini-flow/cache/
+.gemini-flow/logs/
+.gemini-flow/temp/
+*.log
+
+# Database files (may contain secrets)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Swarm and coordination files
+.gemini-flow/
+.swarm/
+.hive-mind/
+.benchmarks/
+
+# CI/CD and Quality Assurance artifacts
+reports/
+coverage/
+.nyc_output/
+*.tgz
+*.sarif
+audit-*.json
+security-*.md
+license-*.json
+load-test-*.json
+load-test-*.html
+axe-results.json
+lighthouse-*.json
+benchmark-*.js
+security-scorecard.md
+quality-reports/
+
+# Performance and monitoring
+benchmark-temp/
+perf-results/
+load-test-results/
+artillery-results/
+
+# Dependencies
+node_modules/
+.pnpm-debug.log*
+
+# Environment and Secrets
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+
+# API Keys and Authentication
+*.key
+*.pem
+auth_token.json
+service-account-key.json
+google-credentials.json
+oauth-credentials.json
+
+# MCP Settings with potential secrets
+temp_mcp_settings.json
+.mcp-config-local.json
+
+# Package artifacts
+*.tgz
+
+# Temporary directories and test artifacts
+temp-test/
+deployment-test/
+*-test/
+test-temp/
+
+# Security and audit logs
+security-audit.log
+audit-*.log
+
+# Coverage and reports
+coverage/
+reports/temp/
+*.coverage
+
+# Temporary reports and completion documents (should be archived)
+*_SUMMARY.md
+*_REPORT.md
+*_COMPLETION_*.md
+GOOGLE_SERVICES_BENCHMARKS.md
+V*.*.0-RELEASE-READINESS-REPORT.md
+
+# Root directory cleanup - prevent clutter in project root
+*.backup
+*-backup.*
+MIGRATION_PLAN.md
+DUAL-MODE-IMPLEMENTATION-PLAN.md
+NPM_PUBLICATION_REPORT.md
+INTEGRATION_SUMMARY.md
+PRODUCTION-SECURITY-HARDENING-SUMMARY.md
+SWARM_COMPLETION_REPORT.md
+*_IMPLEMENTATION_PLAN.md
+test-*.sh
+coordination/
+*.md.bak

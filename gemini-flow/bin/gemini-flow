@@ -1,0 +1,40 @@
+#!/usr/bin/env node
+
+/**
+ * Gemini-Flow CLI Executable
+ * 
+ * Production-ready entry point with Gemini CLI parity as primary interface
+ */
+
+// Enable source map support for better debugging (optional, skip if not available)
+try {
+  const sourceMapSupport = await import('source-map-support/register.js');
+} catch (e) {
+  // Source map support not available, continue without it
+}
+
+// Check if we should run in simplified Gemini CLI mode (primary interface)
+const args = process.argv.slice(2);
+const isGeminiCommand = args.length === 0 || 
+                        ['chat', 'c', 'generate', 'g', 'list-models', 'models', 'auth'].includes(args[0]) ||
+                        args.includes('--gemini-mode');
+
+if (isGeminiCommand) {
+  // Use simplified Gemini CLI interface
+  try {
+    const { GeminiCLI } = await import('../dist/cli/gemini-cli.js');
+    const geminiCLI = new GeminiCLI();
+    await geminiCLI.run();
+  } catch (error) {
+    console.error('Gemini CLI error:', error.message);
+    process.exit(1);
+  }
+} else {
+  // Use full orchestration platform
+  import('../dist/cli/index.js').catch(error => {
+    console.error('Failed to load CLI:', error.message);
+    console.error('Working directory:', process.cwd());
+    console.error('__dirname equivalent:', import.meta.url);
+    process.exit(1);
+  });
+}

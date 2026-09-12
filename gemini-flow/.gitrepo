@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/clduab11/gemini-flow.git
+	branch = main
+	commit = 8e5b003487b3200f24b7c78adfb034cd532e0dd5
+	parent = 7b6b228e9e3178730a23e2c6009c42aac37601b1
+	method = merge
+	cmdver = 0.4.9
