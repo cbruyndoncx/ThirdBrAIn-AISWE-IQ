@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/coleam00/remote-agentic-coding-system.git
+	branch = main
+	commit = ad60e90631bd73296d22ffbf730cc38096cf2f05
+	parent = 25c9cf0e1a7681a7532351d832c5a69f2c54052a
+	method = merge
+	cmdver = 0.4.9
