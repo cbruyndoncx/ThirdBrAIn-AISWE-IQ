@@ -1,0 +1,670 @@
+import * as fsPromises from 'fs/promises';
+import * as path from 'path';
+import * as os from 'os';
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+import { ExtensionFetcher } from '../extension-fetcher';
+
+vi.mock('typescript', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('typescript')>();
+  return {
+    ...actual,
+    createProgram: vi.fn(),
+  };
+});
+
+// Mock the shell utility
+vi.mock('@/utils/shell', () => ({
+  execWithShellPath: vi.fn(),
+}));
+
+// Mock logger
+vi.mock('@/logger', () => ({
+  default: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
+describe('ExtensionFetcher', () => {
+  let fetcher: ExtensionFetcher;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fetcher = new ExtensionFetcher();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe('Capabilities Metadata Extraction', () => {
+    // Helper to create temp test file and test metadata extraction
+    const createAndTestMetadata = async (fileContent: string): Promise<unknown> => {
+      const realTempDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ext-test-'));
+      const extDir = path.join(realTempDir, 'test-extension');
+      await fsPromises.mkdir(extDir);
+      const extFile = path.join(extDir, 'index.ts');
+      await fsPromises.writeFile(extFile, fileContent);
+
+      try {
+        const testFetcher = new ExtensionFetcher();
+        // Access private method via type assertion
+        const getStaticMetadata = (testFetcher as unknown as { getStaticMetadata: (filePath: string) => Promise<unknown> }).getStaticMetadata.bind(testFetcher);
+        return await getStaticMetadata(extFile);
+      } finally {
+        await fsPromises.rm(realTempDir, { recursive: true, force: true });
+      }
+    };
+
+    it('should extract capabilities from extension metadata', async () => {
+      const mockFileContent = `
+        export class MyExtension implements Extension {
+          static metadata: ExtensionMetadata = {
+            name: 'My Extension',
+            version: '1.0.0',
+            description: 'A test extension',
+            author: 'Test Author',
+            capabilities: ['tools', 'commands', 'ui-elements'],
+          };
+        }
+      `;
+
+      const metadata = await createAndTestMetadata(mockFileContent);
+
+      expect(metadata).toEqual({
+        name: 'My Extension',
+        version: '1.0.0',
+        description: 'A test extension',
+        author: 'Test Author',
+        capabilities: ['tools', 'commands', 'ui-elements'],
+      });
+    });
+
+    it('should handle extensions without capabilities', async () => {
+      const mockFileContent = `
+        export class MyExtension implements Extension {
+          static metadata: ExtensionMetadata = {
+            name: 'Simple Extension',
+            version: '2.0.0',
+            description: 'A simple extension without capabilities',
+          };
+        }
+      `;
+
+      const metadata = await createAndTestMetadata(mockFileContent);
+
+      expect(metadata).toEqual({
+        name: 'Simple Extension',
+        version: '2.0.0',
+        description: 'A simple extension without capabilities',
+      });
+      expect(metadata).not.toHaveProperty('capabilities');
+    });
+
+    it('should handle empty capabilities array', async () => {
+      const mockFileContent = `
+        export class MyExtension implements Extension {
+          static metadata: ExtensionMetadata = {
+            name: 'Empty Caps Extension',
+            version: '1.0.0',
+            capabilities: [],
+          };
+        }
+      `;
+
+      const metadata = await createAndTestMetadata(mockFileContent);
+
+      expect(metadata).toEqual({
+        name: 'Empty Caps Extension',
+        version: '1.0.0',
+        capabilities: [],
+      });
+    });
+
+    it('should handle metadata with variable reference', async () => {
+      const mockFileContent = `
+        const metadata: ExtensionMetadata = {
+          name: 'Variable Extension',
+          version: '1.0.0',
+          capabilities: ['tools'],
+        };
+
+        export class VariableExtension implements Extension {
+          static metadata = metadata;
+        }
+      `;
+
+      const metadata = await createAndTestMetadata(mockFileContent);
+
+      expect(metadata).toEqual({
+        name: 'Variable Extension',
+        version: '1.0.0',
+        capabilities: ['tools'],
+      });
+    });
+
+    it('should return null for files without metadata', async () => {
+      const mockFileContent = `
+        export class NoMetadataExtension implements Extension {
+          // No static metadata property
+        }
+      `;
+
+      const metadata = await createAndTestMetadata(mockFileContent);
+
+      expect(metadata).toBeNull();
+    });
+
+    it('should handle single capability', async () => {
+      const mockFileContent = `
+        export class MyExtension implements Extension {
+          static metadata: ExtensionMetadata = {
+            name: 'Single Cap Extension',
+            version: '1.0.0',
+            capabilities: ['tools'],
+          };
+        }
+      `;
+
+      const metadata = await createAndTestMetadata(mockFileContent);
+
+      expect(metadata).toEqual({
+        name: 'Single Cap Extension',
+        version: '1.0.0',
+        capabilities: ['tools'],
+      });
+    });
+
+    it('should resolve framework OS enum members in supportedOS', async () => {
+      const mockFileContent = `
+        import { OS } from '@aiderdesk/extensions';
+
+        export class FffExtension implements Extension {
+          static metadata = {
+            name: 'FFF',
+            version: '1.0.0',
+            supportedOS: [OS.Linux, OS.MacOS],
+          };
+        }
+      `;
+
+      const metadata = await createAndTestMetadata(mockFileContent);
+
+      expect(metadata).toEqual({
+        name: 'FFF',
+        version: '1.0.0',
+        supportedOS: ['linux', 'macos'],
+      });
+    });
+
+    it('should resolve locally-declared enum members in metadata', async () => {
+      const mockFileContent = `
+        enum Color { Red = 'red', Blue = 'blue' }
+
+        export class MyExtension implements Extension {
+          static metadata = {
+            name: 'Color Extension',
+            version: '1.0.0',
+            description: 'Uses a local enum',
+            author: 'Tester',
+            capabilities: [Color.Red, Color.Blue],
+          };
+        }
+      `;
+
+      const metadata = await createAndTestMetadata(mockFileContent);
+
+      expect(metadata).toEqual({
+        name: 'Color Extension',
+        version: '1.0.0',
+        description: 'Uses a local enum',
+        author: 'Tester',
+        capabilities: ['red', 'blue'],
+      });
+    });
+
+    it('should resolve framework OS enum members in variable-referenced metadata', async () => {
+      const mockFileContent = `
+        import { OS } from '@aiderdesk/extensions';
+
+        const metadata = {
+          name: 'Variable Extension',
+          version: '1.0.0',
+          supportedOS: [OS.Linux, OS.MacOS],
+        };
+
+        export class VariableExtension implements Extension {
+          static metadata = metadata;
+        }
+      `;
+
+      const metadataResult = await createAndTestMetadata(mockFileContent);
+
+      expect(metadataResult).toEqual({
+        name: 'Variable Extension',
+        version: '1.0.0',
+        supportedOS: ['linux', 'macos'],
+      });
+    });
+
+    it('should skip unknown enum references gracefully', async () => {
+      const mockFileContent = `
+        import { OS } from '@aiderdesk/extensions';
+
+        export class MyExtension implements Extension {
+          static metadata = {
+            name: 'Unknown Enum Extension',
+            version: '1.0.0',
+            supportedOS: [OS.Linux, OS.MacOS, SomeOtherEnum.Foo],
+          };
+        }
+      `;
+
+      const metadata = await createAndTestMetadata(mockFileContent);
+
+      expect(metadata).toEqual({
+        name: 'Unknown Enum Extension',
+        version: '1.0.0',
+        supportedOS: ['linux', 'macos', undefined],
+      });
+    });
+
+    it('should handle JavaScript files (.js)', async () => {
+      const realTempDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ext-test-'));
+      const extDir = path.join(realTempDir, 'js-extension');
+      await fsPromises.mkdir(extDir);
+      const extFile = path.join(extDir, 'index.js');
+      const mockFileContent = `
+        export class JsExtension {
+          static metadata = {
+            name: 'JS Extension',
+            version: '1.0.0',
+            capabilities: ['tools', 'commands'],
+          };
+        }
+      `;
+      await fsPromises.writeFile(extFile, mockFileContent);
+
+      try {
+        const testFetcher = new ExtensionFetcher();
+        const getStaticMetadata = (testFetcher as unknown as { getStaticMetadata: (filePath: string) => Promise<unknown> }).getStaticMetadata.bind(testFetcher);
+        const metadata = await getStaticMetadata(extFile);
+
+        expect(metadata).toEqual({
+          name: 'JS Extension',
+          version: '1.0.0',
+          capabilities: ['tools', 'commands'],
+        });
+      } finally {
+        await fsPromises.rm(realTempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should parse with createSourceFile instead of createProgram', async () => {
+      const { createProgram } = (await import('typescript')) as unknown as { createProgram: ReturnType<typeof vi.fn> };
+
+      const mockFileContent = `
+        export class ParseModeExtension implements Extension {
+          static metadata = {
+            name: 'Parse Mode Extension',
+            version: '1.0.0',
+            capabilities: ['tools'],
+          };
+        }
+      `;
+
+      const metadata = await createAndTestMetadata(mockFileContent);
+
+      expect(metadata).toEqual({
+        name: 'Parse Mode Extension',
+        version: '1.0.0',
+        capabilities: ['tools'],
+      });
+      expect(createProgram).not.toHaveBeenCalled();
+    });
+
+    it('should extract metadata from a standalone file without TypeScript program resolution', async () => {
+      const mockFileContent = `
+        export class IndependentExtension implements Extension {
+          static metadata = {
+            name: 'Independent Extension',
+            version: '1.0.0',
+            capabilities: ['commands'],
+          };
+        }
+      `;
+
+      const metadata = await createAndTestMetadata(mockFileContent);
+
+      expect(metadata).toEqual({
+        name: 'Independent Extension',
+        version: '1.0.0',
+        capabilities: ['commands'],
+      });
+    });
+  });
+
+  describe('getAvailableExtensions - Promise Caching', () => {
+    it('should cache the promise and return it on subsequent calls', async () => {
+      const repositories = ['https://github.com/owner/repo'];
+      const mockExtensions = [{ id: 'ext1', name: 'Extension 1', version: '1.0.0', type: 'single' as const, repositoryUrl: repositories[0] }];
+
+      // Mock the internal method to track calls
+      const internalSpy = vi
+        .spyOn(fetcher as unknown as { getAvailableExtensionsInternal: () => Promise<unknown[]> }, 'getAvailableExtensionsInternal')
+        .mockResolvedValue(mockExtensions);
+
+      // First call
+      const result1 = await fetcher.getAvailableExtensions(repositories);
+
+      // Second call without forceRefresh
+      const result2 = await fetcher.getAvailableExtensions(repositories);
+
+      // Verify the internal method was only called once
+      expect(internalSpy).toHaveBeenCalledTimes(1);
+
+      // Verify both calls return the same result
+      expect(result1).toEqual(mockExtensions);
+      expect(result2).toEqual(mockExtensions);
+    });
+
+    it('should use cached promise on subsequent calls', async () => {
+      const repositories = ['https://github.com/owner/repo'];
+      const mockExtensions = [{ id: 'ext1', name: 'Extension 1', version: '1.0.0', type: 'single' as const, repositoryUrl: repositories[0] }];
+
+      vi.spyOn(fetcher as unknown as { getAvailableExtensionsInternal: () => Promise<unknown[]> }, 'getAvailableExtensionsInternal').mockResolvedValue(
+        mockExtensions,
+      );
+
+      // First call
+      const result1 = await fetcher.getAvailableExtensions(repositories);
+
+      // Access the internal promise field to verify it's cached
+      const cachedPromise = (fetcher as unknown as { getAvailableExtensionsPromise: Promise<unknown[]> | null }).getAvailableExtensionsPromise;
+      expect(cachedPromise).not.toBeNull();
+
+      // Second call should use the same cached promise
+      const result2 = await fetcher.getAvailableExtensions(repositories);
+
+      // Verify the cached promise is still the same
+      const cachedPromise2 = (fetcher as unknown as { getAvailableExtensionsPromise: Promise<unknown[]> | null }).getAvailableExtensionsPromise;
+      expect(cachedPromise2).toBe(cachedPromise);
+
+      // Verify both results are the same
+      expect(result1).toEqual(mockExtensions);
+      expect(result2).toEqual(mockExtensions);
+    });
+
+    it('should create a new promise when forceRefresh is true', async () => {
+      const repositories = ['https://github.com/owner/repo'];
+      const mockExtensions1 = [{ id: 'ext1', name: 'Extension 1', version: '1.0.0', type: 'single' as const, repositoryUrl: repositories[0] }];
+      const mockExtensions2 = [{ id: 'ext2', name: 'Extension 2', version: '2.0.0', type: 'single' as const, repositoryUrl: repositories[0] }];
+
+      const internalSpy = vi
+        .spyOn(fetcher as unknown as { getAvailableExtensionsInternal: () => Promise<unknown[]> }, 'getAvailableExtensionsInternal')
+        .mockResolvedValueOnce(mockExtensions1)
+        .mockResolvedValueOnce(mockExtensions2);
+
+      // First call without forceRefresh
+      const result1 = await fetcher.getAvailableExtensions(repositories, false);
+
+      // Second call with forceRefresh = true
+      const result2 = await fetcher.getAvailableExtensions(repositories, true);
+
+      // Verify the internal method was called twice
+      expect(internalSpy).toHaveBeenCalledTimes(2);
+
+      // Verify both calls return their respective results
+      expect(result1).toEqual(mockExtensions1);
+      expect(result2).toEqual(mockExtensions2);
+
+      // Verify forceRefresh was passed correctly
+      expect(internalSpy).toHaveBeenNthCalledWith(1, repositories, false);
+      expect(internalSpy).toHaveBeenNthCalledWith(2, repositories, true);
+    });
+
+    it('should clear cached promise when an error occurs', async () => {
+      const repositories = ['https://github.com/owner/repo'];
+      const mockError = new Error('Fetch failed');
+
+      const internalSpy = vi
+        .spyOn(fetcher as unknown as { getAvailableExtensionsInternal: () => Promise<unknown[]> }, 'getAvailableExtensionsInternal')
+        .mockRejectedValue(mockError);
+
+      // First call should throw
+      await expect(fetcher.getAvailableExtensions(repositories)).rejects.toThrow('Fetch failed');
+
+      // Verify the cached promise is cleared
+      const cachedPromise = (fetcher as unknown as { getAvailableExtensionsPromise: Promise<unknown[]> | null }).getAvailableExtensionsPromise;
+      expect(cachedPromise).toBeNull();
+
+      // Second call should also throw and call the internal method again (not use cache)
+      await expect(fetcher.getAvailableExtensions(repositories)).rejects.toThrow('Fetch failed');
+
+      // Verify internal method was called twice (once for each call since cache was cleared)
+      expect(internalSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('should cache new promise after error is cleared', async () => {
+      const repositories = ['https://github.com/owner/repo'];
+      const mockError = new Error('Fetch failed');
+      const mockExtensions = [{ id: 'ext1', name: 'Extension 1', version: '1.0.0', type: 'single' as const, repositoryUrl: repositories[0] }];
+
+      const internalSpy = vi
+        .spyOn(fetcher as unknown as { getAvailableExtensionsInternal: () => Promise<unknown[]> }, 'getAvailableExtensionsInternal')
+        .mockRejectedValueOnce(mockError)
+        .mockResolvedValueOnce(mockExtensions);
+
+      // First call should throw and clear the cache
+      await expect(fetcher.getAvailableExtensions(repositories)).rejects.toThrow('Fetch failed');
+
+      // Second call should succeed and cache the new promise
+      const result1 = await fetcher.getAvailableExtensions(repositories);
+
+      // Third call should return the cached promise
+      const result2 = await fetcher.getAvailableExtensions(repositories);
+
+      // Verify internal method was called twice (once for error, once for success)
+      expect(internalSpy).toHaveBeenCalledTimes(2);
+
+      // Verify both successful calls return the same result
+      expect(result1).toEqual(mockExtensions);
+      expect(result2).toEqual(mockExtensions);
+    });
+
+    it('should handle concurrent calls without forceRefresh', async () => {
+      const repositories = ['https://github.com/owner/repo'];
+      const mockExtensions = [{ id: 'ext1', name: 'Extension 1', version: '1.0.0', type: 'single' as const, repositoryUrl: repositories[0] }];
+
+      let resolvePromise: (value: unknown[]) => void;
+      const pendingPromise = new Promise<unknown[]>((resolve) => {
+        resolvePromise = resolve;
+      });
+
+      const internalSpy = vi
+        .spyOn(fetcher as unknown as { getAvailableExtensionsInternal: () => Promise<unknown[]> }, 'getAvailableExtensionsInternal')
+        .mockReturnValue(pendingPromise);
+
+      // Start multiple concurrent calls before the promise resolves
+      const promise1 = fetcher.getAvailableExtensions(repositories);
+      const promise2 = fetcher.getAvailableExtensions(repositories);
+      const promise3 = fetcher.getAvailableExtensions(repositories);
+
+      // Verify the internal promise field is set
+      const cachedPromise = (fetcher as unknown as { getAvailableExtensionsPromise: Promise<unknown[]> | null }).getAvailableExtensionsPromise;
+      expect(cachedPromise).not.toBeNull();
+
+      // Resolve the promise
+      resolvePromise!(mockExtensions);
+
+      // Await all promises
+      const results = await Promise.all([promise1, promise2, promise3]);
+
+      // Verify internal method was only called once (all concurrent calls use the same cached promise)
+      expect(internalSpy).toHaveBeenCalledTimes(1);
+
+      // Verify all results are the same
+      expect(results[0]).toEqual(mockExtensions);
+      expect(results[1]).toEqual(mockExtensions);
+      expect(results[2]).toEqual(mockExtensions);
+    });
+
+    it('should cache new promise when forceRefresh is true and subsequent calls use cache', async () => {
+      const repositories = ['https://github.com/owner/repo'];
+      const mockExtensions = [{ id: 'ext1', name: 'Extension 1', version: '1.0.0', type: 'single' as const, repositoryUrl: repositories[0] }];
+
+      const internalSpy = vi
+        .spyOn(fetcher as unknown as { getAvailableExtensionsInternal: () => Promise<unknown[]> }, 'getAvailableExtensionsInternal')
+        .mockResolvedValue(mockExtensions);
+
+      // First call with forceRefresh = true should create and cache a new promise
+      const result1 = await fetcher.getAvailableExtensions(repositories, true);
+
+      // Verify the promise is cached
+      const cachedPromise1 = (fetcher as unknown as { getAvailableExtensionsPromise: Promise<unknown[]> | null }).getAvailableExtensionsPromise;
+      expect(cachedPromise1).not.toBeNull();
+
+      // Second call without forceRefresh should use the cached promise
+      const result2 = await fetcher.getAvailableExtensions(repositories, false);
+
+      // Verify the cached promise is still the same
+      const cachedPromise2 = (fetcher as unknown as { getAvailableExtensionsPromise: Promise<unknown[]> | null }).getAvailableExtensionsPromise;
+      expect(cachedPromise2).toBe(cachedPromise1);
+
+      // Third call without forceRefresh should also use the cached promise
+      const result3 = await fetcher.getAvailableExtensions(repositories, false);
+
+      // Verify internal method was only called once (for the forceRefresh call)
+      expect(internalSpy).toHaveBeenCalledTimes(1);
+
+      // Verify all results are the same
+      expect(result1).toEqual(mockExtensions);
+      expect(result2).toEqual(mockExtensions);
+      expect(result3).toEqual(mockExtensions);
+    });
+  });
+
+  describe('getRawUrl', () => {
+    it('should convert GitHub URL with tree path to raw URL', () => {
+      const webUrl = 'https://github.com/owner/repo/tree/main/extensions';
+      const rawUrl = fetcher.getRawUrl(webUrl);
+
+      expect(rawUrl).toBe('https://raw.githubusercontent.com/owner/repo/main/extensions');
+    });
+
+    it('should convert GitHub root URL to raw URL', () => {
+      const webUrl = 'https://github.com/owner/repo';
+      const rawUrl = fetcher.getRawUrl(webUrl);
+
+      expect(rawUrl).toBe('https://raw.githubusercontent.com/owner/repo/main');
+    });
+
+    it('should handle URL with trailing slash', () => {
+      const webUrl = 'https://github.com/owner/repo/';
+      const rawUrl = fetcher.getRawUrl(webUrl);
+
+      expect(rawUrl).toBe('https://raw.githubusercontent.com/owner/repo/main');
+    });
+
+    it('should return null for invalid URLs', () => {
+      const invalidUrl = 'not-a-valid-url';
+      const rawUrl = fetcher.getRawUrl(invalidUrl);
+
+      expect(rawUrl).toBeNull();
+    });
+
+    it('should return null for non-GitHub URLs', () => {
+      const nonGithubUrl = 'https://gitlab.com/owner/repo';
+      const rawUrl = fetcher.getRawUrl(nonGithubUrl);
+
+      expect(rawUrl).toBeNull();
+    });
+  });
+
+  describe('mergeInstallCounts', () => {
+    const getMergeInstallCounts = () =>
+      (fetcher as unknown as { mergeInstallCounts: (extensions: unknown[], extensionsPath: string, repoDir: string) => Promise<void> }).mergeInstallCounts.bind(
+        fetcher,
+      );
+
+    const createRegistryFile = async (registryContent: string, location: 'sibling' | 'inside') => {
+      const repoDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ext-registry-'));
+      const extensionsPath = path.join(repoDir, 'extensions');
+      await fsPromises.mkdir(extensionsPath, { recursive: true });
+
+      const registryPath = location === 'sibling' ? path.join(repoDir, 'extensions.json') : path.join(extensionsPath, 'extensions.json');
+      await fsPromises.writeFile(registryPath, registryContent);
+      return { repoDir, extensionsPath };
+    };
+
+    it('should merge install counts from sibling extensions.json by id', async () => {
+      const registry = JSON.stringify({
+        extensions: [
+          { id: 'my-ext', name: 'My Ext', installCount: 42 },
+          { id: 'other-ext', name: 'Other Ext', installCount: 7 },
+        ],
+      });
+      const { repoDir, extensionsPath } = await createRegistryFile(registry, 'sibling');
+
+      try {
+        const extensions: { id: string; name: string; version: string; installCount?: number }[] = [{ id: 'my-ext', name: 'My Ext', version: '1.0.0' }];
+        await getMergeInstallCounts()(extensions, extensionsPath, repoDir);
+
+        expect(extensions[0].installCount).toBe(42);
+      } finally {
+        await fsPromises.rm(repoDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should merge install counts from extensions.json inside the scanned folder', async () => {
+      const registry = JSON.stringify({
+        extensions: [{ id: 'my-ext', name: 'My Ext', installCount: 42 }],
+      });
+      const { repoDir, extensionsPath } = await createRegistryFile(registry, 'inside');
+
+      try {
+        const extensions: { id: string; name: string; version: string; installCount?: number }[] = [{ id: 'my-ext', name: 'My Ext', version: '1.0.0' }];
+        await getMergeInstallCounts()(extensions, extensionsPath, repoDir);
+
+        expect(extensions[0].installCount).toBe(42);
+      } finally {
+        await fsPromises.rm(repoDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should not modify extensions without matching registry entries', async () => {
+      const registry = JSON.stringify({
+        extensions: [{ id: 'other-ext', name: 'Other Ext', installCount: 7 }],
+      });
+      const { repoDir, extensionsPath } = await createRegistryFile(registry, 'sibling');
+
+      try {
+        const extensions: { id: string; name: string; version: string; installCount?: number }[] = [{ id: 'my-ext', name: 'My Ext', version: '1.0.0' }];
+        await getMergeInstallCounts()(extensions, extensionsPath, repoDir);
+
+        expect(extensions[0]).not.toHaveProperty('installCount');
+      } finally {
+        await fsPromises.rm(repoDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should leave extensions unchanged when registry file is missing', async () => {
+      const repoDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ext-no-registry-'));
+      const extensionsPath = path.join(repoDir, 'extensions');
+      await fsPromises.mkdir(extensionsPath, { recursive: true });
+
+      try {
+        const extensions: { id: string; name: string; version: string; installCount?: number }[] = [{ id: 'my-ext', name: 'My Ext', version: '1.0.0' }];
+        await getMergeInstallCounts()(extensions, extensionsPath, repoDir);
+
+        expect(extensions[0]).not.toHaveProperty('installCount');
+      } finally {
+        await fsPromises.rm(repoDir, { recursive: true, force: true });
+      }
+    });
+  });
+}, 10000);

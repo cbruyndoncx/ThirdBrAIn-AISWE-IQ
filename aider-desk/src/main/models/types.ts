@@ -1,0 +1,122 @@
+import { Model, ModelInfo, ProviderProfile, Reasoning, SettingsData, TlsPolicyRegistrar, UsageReportData, VoiceSession } from '@common/types';
+import { LlmProvider } from '@common/agent';
+
+import type { SharedV4ProviderOptions } from '@ai-sdk/provider';
+import type { LanguageModel, LanguageModelUsage, ModelMessage, ToolSet } from 'ai';
+
+import { Task } from '@/task';
+
+export interface CacheControl {
+  providerOptions: SharedV4ProviderOptions;
+  placement?: 'message' | 'message-part';
+}
+
+export interface AiderModelMapping {
+  modelName: string;
+  environmentVariables: Record<string, string>;
+}
+
+/**
+ * Complete strategy interface for LLM providers
+ * Encapsulates all provider-specific functionality including:
+ * - LLM creation and usage tracking
+ * - Model discovery and configuration
+ * - Cost calculation and usage reporting
+ * - Environment variable detection
+ * - Aider integration
+ */
+export interface LoadModelsResponse {
+  models: Model[];
+  success: boolean;
+  error?: string;
+}
+
+export interface LlmProviderStrategy {
+  // === LLM Creation and Usage Functions ===
+  /**
+   * Creates a LanguageModel instance for the given provider and model
+   * Each provider is responsible for loading its own credentials using getEffectiveEnvironmentVariable
+   */
+  createLlm: (
+    profile: ProviderProfile,
+    model: Model,
+    settings: SettingsData,
+    projectDir: string,
+    toolSet?: ToolSet,
+    systemPrompt?: string,
+    providerMetadata?: unknown,
+    tlsRegistrar?: TlsPolicyRegistrar,
+    sessionId?: string,
+  ) => LanguageModel | Promise<LanguageModel>;
+
+  /**
+   * Generates usage reports with provider-specific metadata and calculates cost internally
+   */
+  getUsageReport: (task: Task, provider: ProviderProfile, model: Model, usage: LanguageModelUsage, providerMetadata?: unknown) => UsageReportData;
+
+  // === Model Discovery and Configuration Functions ===
+  /**
+   * Loads available models from the provider's API
+   */
+  loadModels: (profile: ProviderProfile, settings: SettingsData, tlsRegistrar?: TlsPolicyRegistrar) => Promise<LoadModelsResponse>;
+
+  /**
+   * Checks if required environment variables are available
+   */
+  hasEnvVars: (settings: SettingsData) => boolean;
+
+  /**
+   * Generates Aider-compatible model mapping with environment variables
+   */
+  getAiderMapping: (provider: ProviderProfile, modelId: string, settings: SettingsData, projectDir: string) => AiderModelMapping;
+
+  // === Optional Configuration Helper Functions ===
+  /**
+   * Returns provider-specific cache control configuration
+   */
+  getCacheControl?: (provider: LlmProvider, model: Model) => CacheControl | undefined;
+
+  /**
+   * Returns provider-specific options for model instantiation.
+   * When `reasoning` is set (not undefined or 'provider-default'), the implementation
+   * should omit reasoning-effort/budget fields so the top-level AI SDK `reasoning`
+   * parameter takes effect. When `reasoning` is 'none', implementations should
+   * explicitly disable thinking where the provider supports an on/off toggle.
+   * See https://ai-sdk.dev/docs/ai-sdk-core/reasoning for precedence rules.
+   */
+  getProviderOptions?: (provider: LlmProvider, model: Model, reasoning?: Reasoning) => SharedV4ProviderOptions | undefined;
+
+  /**
+   * Returns provider-specific tools that should be available to the agent
+   */
+  getProviderTools?: (provider: LlmProvider, model: Model) => ToolSet | Promise<ToolSet>;
+
+  /**
+   * Returns provider-specific parameters for the given model and effective reasoning override
+   */
+  getProviderParameters?: (provider: LlmProvider, model: Model, reasoning?: Reasoning) => Record<string, unknown>;
+
+  /**
+   * Returns model info for a specific model ID
+   */
+  getModelInfo?: (provider: ProviderProfile, modelId: string, allModelInfos: Record<string, ModelInfo>) => ModelInfo | undefined;
+
+  /**
+   * Creates a voice session configuration if supported
+   */
+  createVoiceSession?: (profile: ProviderProfile, settings: SettingsData) => Promise<VoiceSession>;
+
+  /**
+   * Normalizes messages for provider-specific requirements
+   */
+  normalizeMessages?: (provider: LlmProvider, model: Model, messages: ModelMessage[]) => ModelMessage[];
+
+  /**
+   * Determines if an error is retryable for this provider
+   * Returns false for non-retryable errors (e.g., auth issues, invalid requests)
+   * Returns true for transient errors that may succeed on retry
+   */
+  isRetryable?: (error: unknown) => boolean;
+}
+
+export type LlmProviderRegistry = Record<string, LlmProviderStrategy>;

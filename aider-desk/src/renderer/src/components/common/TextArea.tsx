@@ -1,0 +1,31 @@
+import { forwardRef, ReactNode, TextareaHTMLAttributes } from 'react';
+import { twMerge } from 'tailwind-merge';
+
+export type Props = TextareaHTMLAttributes<HTMLTextAreaElement> & {
+  label?: ReactNode;
+  wrapperClassName?: string;
+  error?: string | null;
+};
+
+export const TextArea = forwardRef<HTMLTextAreaElement, Props>(({ label, wrapperClassName, className = '', error, ...props }, ref) => {
+  return (
+    <div className={wrapperClassName}>
+      {label && <label className="block text-sm font-medium text-text-primary mb-1">{label}</label>}
+      <textarea
+        ref={ref}
+        spellCheck={false}
+        {...props}
+        className={twMerge(
+          `w-full p-2 bg-bg-secondary-light border-2 ${error ? 'border-error-emphasis' : 'border-border-default'} rounded focus:outline-none ${error ? 'focus:border-error-emphasis' : 'focus:border-border-light'} text-text-primary text-sm placeholder-text-muted
+          scrollbar-thin
+          scrollbar-track-bg-secondary-light
+          scrollbar-thumb-bg-fourth`,
+          className,
+        )}
+      />
+      {error && <p className="text-xs text-error mt-1">{error}</p>}
+    </div>
+  );
+});
+
+TextArea.displayName = 'TextArea';

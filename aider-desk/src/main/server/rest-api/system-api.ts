@@ -1,0 +1,106 @@
+import { Router } from 'express';
+import { z } from 'zod';
+import { SystemLogLevel } from '@common/types';
+
+import { BaseApi } from './base-api';
+
+import { EventsHandler } from '@/events-handler';
+import { PythonDependenciesInstaller } from '@/python-dependencies-installer';
+
+const GetEffectiveEnvironmentVariableSchema = z.object({
+  key: z.string().min(1, 'Key is required'),
+  baseDir: z.string().optional(),
+});
+
+const GetSystemLogsSchema = z.object({
+  fromId: z.coerce.number().optional(),
+  limit: z.coerce.number().optional(),
+  levels: z.array(z.string()).optional(),
+});
+
+const RespondInputPromptSchema = z.object({
+  id: z.string().min(1, 'ID is required'),
+  value: z.string().nullable(),
+  rememberSession: z.boolean().optional(),
+});
+
+export class SystemApi extends BaseApi {
+  constructor(
+    private readonly eventsHandler: EventsHandler,
+    private readonly pythonInstaller: PythonDependenciesInstaller,
+  ) {
+    super();
+  }
+
+  registerRoutes(router: Router): void {
+    // Health check
+    router.get(
+      '/health',
+      this.handleRequest(async (_req, res) => {
+        res.status(200).json({ status: 'ok' });
+      }),
+    );
+
+    router.get(
+      '/system/env-var',
+      this.handleRequest(async (req, res) => {
+        const parsed = this.validateRequest(GetEffectiveEnvironmentVariableSchema, req.query, res);
+        if (!parsed) {
+          return;
+        }
+
+        const { key, baseDir } = parsed;
+        const envVar = this.eventsHandler.getEffectiveEnvironmentVariable(key, baseDir);
+        res.status(200).json(envVar);
+      }),
+    );
+
+    // Get system logs
+    router.get(
+      '/system/logs',
+      this.handleRequest(async (req, res) => {
+        const parsed = this.validateRequest(GetSystemLogsSchema, req.query, res);
+        if (!parsed) {
+          return;
+        }
+
+        const { fromId, limit, levels } = parsed;
+        const logs = this.eventsHandler.getSystemLogs(fromId, limit, levels as SystemLogLevel[] | undefined);
+        res.status(200).json(logs);
+      }),
+    );
+
+    // Clear system logs
+    router.delete(
+      '/system/logs',
+      this.handleRequest(async (_req, res) => {
+        this.eventsHandler.clearSystemLogs();
+        res.status(200).json({ success: true });
+      }),
+    );
+
+    // Get aider connector status
+    router.get(
+      '/system/aider-connector-status',
+      this.handleRequest(async (_req, res) => {
+        const status = this.pythonInstaller.getStatus();
+        res.status(200).json(status);
+      }),
+    );
+
+    // Respond to input prompt
+    router.post(
+      '/input-prompt/respond',
+      this.handleRequest(async (req, res) => {
+        const parsed = this.validateRequest(RespondInputPromptSchema, req.body, res);
+        if (!parsed) {
+          return;
+        }
+
+        const { id, value, rememberSession } = parsed;
+        this.eventsHandler.respondInputPrompt(id, value, rememberSession);
+        res.status(200).json({ success: true });
+      }),
+    );
+  }
+}

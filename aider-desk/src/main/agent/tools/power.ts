@@ -1,0 +1,1179 @@
+import fs from 'fs/promises';
+import path from 'path';
+import { spawn } from 'child_process';
+import { ChildProcess } from 'node:child_process';
+
+import treeKill from 'tree-kill';
+import { tool, type ToolSet } from 'ai';
+import { z } from 'zod';
+import { globIterate } from 'glob';
+import { AgentProfile, BashToolSettings, FileWriteMode, PromptContext, ToolApprovalState } from '@common/types';
+import {
+  POWER_TOOL_BASH as TOOL_BASH,
+  POWER_TOOL_DESCRIPTIONS,
+  POWER_TOOL_FETCH as TOOL_FETCH,
+  POWER_TOOL_FILE_EDIT as TOOL_FILE_EDIT,
+  POWER_TOOL_FILE_READ as TOOL_FILE_READ,
+  POWER_TOOL_FILE_WRITE as TOOL_FILE_WRITE,
+  POWER_TOOL_GLOB as TOOL_GLOB,
+  POWER_TOOL_GREP as TOOL_GREP,
+  POWER_TOOL_GROUP_NAME as TOOL_GROUP_NAME,
+  POWER_TOOL_SEMANTIC_SEARCH as TOOL_SEMANTIC_SEARCH,
+  TOOL_GROUP_NAME_SEPARATOR,
+} from '@common/tools';
+import { isURL } from '@common/utils';
+
+import { ApprovalManager } from './approval-manager';
+
+import { search } from '@/utils/probe';
+import { Task } from '@/task';
+import logger from '@/logger';
+import { ensureRipgrepBinary, filterIgnoredFiles, scrapeWeb } from '@/utils';
+import { isAbortError, isFileNotFoundError } from '@/utils/errors';
+import { getShellCommandArgs, getShellInitCommand, getShellPath } from '@/utils/shell';
+import { BoundedOutputAccumulator, expandTilde, readFileContent, truncateToolResult, coerceBoolean } from '@/agent/utils';
+import { RIPGREP_BINARY_PATH } from '@/constants';
+
+/**
+ * File lock map to prevent race conditions when multiple edits target the same file.
+ * Each file path maps to a promise representing the ongoing operation.
+ * New operations on the same file must wait for the previous one to complete.
+ */
+const fileLocks = new Map<string, Promise<unknown>>();
+
+const BASH_STREAMING_PREVIEW_CHARS = 8 * 1024;
+const BASH_STREAMING_UPDATE_INTERVAL_MS = 150;
+
+/**
+ * Acquires a lock for a file and executes the operation.
+ * If another operation is in progress for the same file, it waits for it to complete.
+ */
+const withFileLock = <T>(filePath: string, operation: () => Promise<T>): Promise<T> => {
+  logger.debug('Acquiring file lock:', { filePath });
+  const currentLock = fileLocks.get(filePath) || Promise.resolve();
+  const newLock = currentLock.then(operation, operation);
+  fileLocks.set(filePath, newLock);
+  newLock.finally(() => {
+    if (fileLocks.get(filePath) === newLock) {
+      logger.debug('Releasing file lock:', { filePath });
+      fileLocks.delete(filePath);
+    }
+  });
+  return newLock;
+};
+
+export const createPowerToolset = (task: Task, profile: AgentProfile, promptContext?: PromptContext, abortSignal?: AbortSignal): ToolSet => {
+  const approvalManager = new ApprovalManager(task, profile);
+
+  const fileEditTool = tool({
+    description: POWER_TOOL_DESCRIPTIONS[TOOL_FILE_EDIT],
+    inputSchema: z.object({
+      filePath: z.string().describe('The path to the file to be edited (relative to the <WorkingDirectory>).'),
+      searchTerm: z.string().describe(
+        `The string or regular expression to find in the file.
+*EXACTLY MATCH* the existing file content, character for character, including all comments, docstrings, etc.
+Include enough lines in each to uniquely match each set of lines that need to change.
+Do not use escape characters \\ in the string like \\n or \\" and others. Do not start the search term with a \\ character.`,
+      ),
+      replacementText: z
+        .string()
+        .describe('The string to replace the searchTerm with. Do not use escape characters \\ in the string like \\n or \\" and others'),
+      isRegex: coerceBoolean
+        .optional()
+        .default(false)
+        .describe('Whether the searchTerm should be treated as a regular expression. Use regex only when it is really needed. Default: false.'),
+      replaceAll: coerceBoolean.optional().default(false).describe('Whether to replace all occurrences or just the first one. Default: false.'),
+    }),
+    execute: async (input, { toolCallId }) => {
+      const { filePath, searchTerm, replacementText, isRegex, replaceAll } = input;
+      const expandedPath = expandTilde(filePath);
+      task.addToolMessage(toolCallId, TOOL_GROUP_NAME, TOOL_FILE_EDIT, input, undefined, undefined, promptContext);
+
+      if (searchTerm === replacementText) {
+        return 'Already updated - no changes were needed.';
+      }
+
+      // Sanitize escape characters from searchTerm and replacementText
+      const sanitize = (str: string) => {
+        // Check if string contains single escaped backslashes (like \n, \t, etc.)
+        const hasSingleEscaped = /\\[nrt"'](?!\\)/.test(str);
+
+        // Only sanitize if no single escaped backslashes are found
+        if (hasSingleEscaped) {
+          return str;
+        }
+
+        // Remove leading backslash
+        let updated = str.replace(/^\\+/, '');
+        // Remove escaped newlines, quotes, tabs, etc. only when they have double backslashes
+        updated = updated.replace(/\\[nrt"']/g, (match) => {
+          switch (match) {
+            case '\\n':
+              return '\n';
+            case '\\r':
+              return '\r';
+            case '\\t':
+              return '\t';
+            case '\\"':
+              return '"';
+            case "\\'":
+              return "'";
+            default:
+              return '';
+          }
+        });
+        return updated;
+      };
+
+      const toolName = `${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_FILE_EDIT}`;
+      const questionKey = toolName;
+      const questionText = `Approve editing file '${filePath}'?`;
+
+      const [isApproved, userInput] = await approvalManager.handleToolApproval(toolName, input, questionKey, questionText);
+
+      if (!isApproved) {
+        return `File edit to '${filePath}' denied by user. Reason: ${userInput}`;
+      }
+
+      const absolutePath = path.resolve(task.getTaskDir(), expandedPath);
+
+      return withFileLock(absolutePath, async () => {
+        try {
+          logger.debug('Reading file content:', { absolutePath });
+          let fileContent = await fs.readFile(absolutePath, {
+            encoding: 'utf8',
+            signal: abortSignal,
+          });
+          // Normalize Windows line endings to Unix for consistent matching
+          fileContent = fileContent.replace(/\r\n/g, '\n');
+          let modifiedContent: string;
+
+          if (isRegex) {
+            const regex = new RegExp(searchTerm, replaceAll ? 'g' : '');
+            modifiedContent = fileContent.replace(regex, replacementText);
+          } else {
+            const sanitizedSearchTerm = sanitize(searchTerm).replace(/\r\n/g, '\n');
+            const sanitizedReplacementText = sanitize(replacementText);
+
+            logger.debug('Sanitized search term:', { sanitizedSearchTerm });
+            logger.debug('Sanitized replacement text:', { sanitizedReplacementText });
+
+            if (replaceAll) {
+              // Use replacer function to avoid special replacement patterns ($&, $`, '$', $$)
+              modifiedContent = fileContent.replaceAll(sanitizedSearchTerm, () => sanitizedReplacementText);
+            } else {
+              modifiedContent = fileContent.replace(sanitizedSearchTerm, () => sanitizedReplacementText);
+            }
+          }
+
+          if (fileContent === modifiedContent) {
+            const improveInfo = searchTerm.startsWith('\\\n')
+              ? 'Do not start the search term with a \\ character. No escape characters are needed.'
+              : searchTerm.includes('\\"')
+                ? 'Try not using the \\ in the string like \\" and others, but use only ".'
+                : 'When you try again make sure to exactly match content, character for character, including all comments, docstrings, etc.';
+
+            return `Warning: Given 'searchTerm' was not found in the file. Content remains the same. ${improveInfo}`;
+          }
+
+          await fs.writeFile(absolutePath, modifiedContent, {
+            encoding: 'utf8',
+            signal: abortSignal,
+          });
+          return `Successfully edited '${filePath}'.`;
+        } catch (error) {
+          if (isAbortError(error)) {
+            return 'Operation was cancelled by user.';
+          }
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          if (isFileNotFoundError(error)) {
+            return `Error: File '${filePath}' not found.`;
+          }
+          return `Error editing file '${filePath}': ${errorMessage}`;
+        }
+      });
+    },
+  });
+
+  const fileReadTool = tool({
+    description: POWER_TOOL_DESCRIPTIONS[TOOL_FILE_READ],
+    inputSchema: z.object({
+      filePath: z.string().describe('The path to the file to be read (relative to the <WorkingDirectory> or absolute if outside of the directory).'),
+      withLines: coerceBoolean
+        .optional()
+        .default(false)
+        .describe('Whether to return the file content with line numbers in format "lineNumber|content". Default: false.'),
+      lineOffset: z.coerce.number().int().min(0).optional().default(0).describe('The starting line number (0-based) to begin reading from. Default: 0.'),
+      lineLimit: z.coerce.number().int().min(1).optional().default(1000).describe('The maximum number of lines to read. Default: 1000.'),
+    }),
+    execute: async (input, { toolCallId }) => {
+      const { filePath, withLines, lineOffset, lineLimit } = input;
+      const expandedPath = expandTilde(filePath);
+      task.addToolMessage(
+        toolCallId,
+        TOOL_GROUP_NAME,
+        TOOL_FILE_READ,
+        {
+          filePath,
+          withLines,
+          lineOffset,
+          lineLimit,
+        },
+        undefined,
+        undefined,
+        promptContext,
+      );
+
+      const toolName = `${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_FILE_READ}`;
+      const questionKey = toolName;
+      const questionText = `Approve reading file '${filePath}'?`;
+
+      const [isApproved, userInput] = await approvalManager.handleToolApproval(toolName, input, questionKey, questionText);
+
+      if (!isApproved) {
+        return `File read of '${filePath}' denied by user. Reason: ${userInput}`;
+      }
+
+      const absolutePath = path.resolve(task.getTaskDir(), expandedPath);
+      try {
+        return await readFileContent(absolutePath, withLines, lineOffset, lineLimit);
+      } catch (error) {
+        if (isAbortError(error)) {
+          return 'Operation was cancelled by user.';
+        }
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (errorMessage === 'Binary files cannot be read.' || isFileNotFoundError(error)) {
+          return `Error: ${errorMessage}`;
+        }
+        return `Error: Could not read file '${filePath}'. ${errorMessage}`;
+      }
+    },
+  });
+
+  const fileWriteTool = tool({
+    description: POWER_TOOL_DESCRIPTIONS[TOOL_FILE_WRITE],
+    inputSchema: z.object({
+      filePath: z.string().describe('The path to the file to be written (relative to the <WorkingDirectory>).'),
+      content: z.string().describe('The content to write to the file. Do not use escape characters \\ in the string like \\n or \\" and others.'),
+      mode: z
+        .enum(FileWriteMode)
+        .optional()
+        .default(FileWriteMode.CreateOnly)
+        .describe(
+          "Mode of writing: 'create_only' (creates if not exists, fails if exists), 'overwrite' (overwrites or creates), 'append' (appends or creates). Default: 'create_only'.",
+        ),
+    }),
+    execute: async (input, { toolCallId }) => {
+      const { filePath, content, mode } = input;
+      const expandedPath = expandTilde(filePath);
+      task.addToolMessage(
+        toolCallId,
+        TOOL_GROUP_NAME,
+        TOOL_FILE_WRITE,
+        {
+          filePath,
+          content,
+          mode,
+        },
+        undefined,
+        undefined,
+        promptContext,
+      );
+
+      const toolName = `${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_FILE_WRITE}`;
+      const questionKey = toolName;
+      const questionText =
+        mode === FileWriteMode.Overwrite
+          ? `Approve overwriting file '${filePath}'?`
+          : mode === FileWriteMode.Append
+            ? `Approve appending to file '${filePath}'?`
+            : `Approve creating file '${filePath}'?`;
+
+      const [isApproved, userInput] = await approvalManager.handleToolApproval(toolName, input, questionKey, questionText);
+
+      if (!isApproved) {
+        return `File write to '${filePath}' denied by user. Reason: ${userInput}`;
+      }
+
+      const absolutePath = path.resolve(task.getTaskDir(), expandedPath);
+
+      try {
+        await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+
+        if (mode === FileWriteMode.CreateOnly) {
+          try {
+            await fs.writeFile(absolutePath, content, {
+              encoding: 'utf8',
+              flag: 'wx',
+              signal: abortSignal,
+            });
+            await task.addToGit(absolutePath);
+
+            return `Successfully created '${filePath}'.`;
+          } catch (e) {
+            if ((e as NodeJS.ErrnoException)?.code === 'EEXIST') {
+              return `Error: File '${filePath}' already exists (mode: create_only).`;
+            }
+            throw e;
+          }
+        } else if (mode === FileWriteMode.Append) {
+          await fs.appendFile(absolutePath, content, 'utf8');
+          return `Successfully appended to '${filePath}'.`;
+        } else {
+          await fs.writeFile(absolutePath, content, {
+            encoding: 'utf8',
+            signal: abortSignal,
+          });
+          await task.addToGit(absolutePath);
+          return `Successfully written to '${filePath}' (overwritten).`;
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return `Error: Cannot write to file '${filePath}': ${errorMessage}`;
+      }
+    },
+  });
+
+  const globTool = tool({
+    description: POWER_TOOL_DESCRIPTIONS[TOOL_GLOB],
+    inputSchema: z.object({
+      pattern: z.string().describe('The glob pattern to search for (e.g., src/**/*.ts, *.md).'),
+      cwd: z
+        .string()
+        .optional()
+        .describe('The current working directory from which to apply the glob pattern (relative to <WorkingDirectory>). Default: <WorkingDirectory>.'),
+      ignore: z.array(z.string()).optional().describe('An array of glob patterns to ignore.'),
+    }),
+    execute: async (input, { toolCallId }) => {
+      const { pattern, cwd, ignore } = input;
+      const expandedCwd = cwd ? expandTilde(cwd) : cwd;
+      task.addToolMessage(
+        toolCallId,
+        TOOL_GROUP_NAME,
+        TOOL_GLOB,
+        {
+          pattern,
+          cwd,
+          ignore,
+        },
+        undefined,
+        undefined,
+        promptContext,
+      );
+
+      const toolName = `${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_GLOB}`;
+      const questionKey = toolName;
+      const questionText = `Approve glob search with pattern '${pattern}'?`;
+
+      const [isApproved, userInput] = await approvalManager.handleToolApproval(toolName, input, questionKey, questionText);
+
+      if (!isApproved) {
+        return `Glob search with pattern '${pattern}' denied by user. Reason: ${userInput}`;
+      }
+
+      const GLOB_WALK_LIMIT = 5000;
+      const GLOB_MAX_RESULTS = 1000;
+
+      const absoluteCwd = expandedCwd ? path.resolve(task.getTaskDir(), expandedCwd) : task.getTaskDir();
+      try {
+        const files: string[] = [];
+        let walkTruncated = false;
+
+        for await (const file of globIterate(pattern, {
+          cwd: absoluteCwd,
+          ignore: ignore,
+          nodir: false,
+          absolute: false, // Keep paths relative to cwd for easier processing
+          signal: abortSignal,
+        })) {
+          files.push(file);
+          if (files.length >= GLOB_WALK_LIMIT) {
+            walkTruncated = true;
+            break;
+          }
+        }
+
+        // Convert to absolute paths for filtering, then back to relative
+        const absoluteFiles = files.map((file) => path.resolve(absoluteCwd, file));
+        const filteredFiles = await filterIgnoredFiles(task.getTaskDir(), absoluteFiles);
+
+        // Ensure paths are relative to task.getTaskDir()
+        const result = filteredFiles.map((file) => path.relative(task.getTaskDir(), file));
+
+        const truncated = result.length > GLOB_MAX_RESULTS || walkTruncated;
+        if (truncated) {
+          const trimmed = result.length > GLOB_MAX_RESULTS ? result.slice(0, GLOB_MAX_RESULTS) : result;
+          const reason = walkTruncated
+            ? `walk limit of ${GLOB_WALK_LIMIT} entries reached (results may be incomplete)`
+            : `results truncated at ${GLOB_MAX_RESULTS} entries`;
+          return [...trimmed, `[Glob ${reason}. Refine your pattern for more specific results.]`];
+        }
+
+        return result;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return `Error executing glob pattern '${pattern}': ${errorMessage}`;
+      }
+    },
+  });
+
+  const grepTool = tool({
+    description: POWER_TOOL_DESCRIPTIONS[TOOL_GREP],
+    inputSchema: z.object({
+      filePattern: z.string().describe('A glob pattern specifying the files to search within (e.g., src/**/*.tsx, *.py).'),
+      searchTerm: z.string().describe('The regular expression to search for within the files.'),
+      contextLines: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .default(0)
+        .describe('The number of lines of context to show before and after each matching line. Default: 0.'),
+      caseSensitive: coerceBoolean.optional().default(false).describe('Whether the search should be case sensitive. Default: false.'),
+      maxResults: z.coerce.number().int().min(1).optional().default(50).describe('Maximum number of results to return. Default: 50.'),
+      ignoreGitignore: coerceBoolean
+        .optional()
+        .default(false)
+        .describe('Whether to include files ignored by .gitignore, .ignore or .rgignore files. Default: false.'),
+    }),
+    execute: async (input, { toolCallId }) => {
+      const { filePattern, searchTerm, contextLines, caseSensitive, maxResults, ignoreGitignore } = input;
+      task.addToolMessage(
+        toolCallId,
+        TOOL_GROUP_NAME,
+        TOOL_GREP,
+        {
+          filePattern,
+          searchTerm,
+          contextLines,
+          caseSensitive,
+          maxResults,
+          ignoreGitignore,
+        },
+        undefined,
+        undefined,
+        promptContext,
+      );
+
+      const toolName = `${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_GREP}`;
+      const questionKey = toolName;
+      const questionText = `Approve grep search for '${searchTerm}' in files matching '${filePattern}'?`;
+
+      const [isApproved, userInput] = await approvalManager.handleToolApproval(toolName, input, questionKey, questionText);
+
+      if (!isApproved) {
+        return `Grep search for '${searchTerm}' in files matching '${filePattern}' denied by user. Reason: ${userInput}`;
+      }
+
+      const rgAvailable = await ensureRipgrepBinary();
+      if (!rgAvailable) {
+        return 'Error: ripgrep binary is not available. Please try again or check the logs for details.';
+      }
+
+      try {
+        const rgArgs: string[] = ['--no-heading', '--line-number', '--color', 'never', '--max-columns', '2000', '--max-columns-preview'];
+
+        if (ignoreGitignore) {
+          rgArgs.push('--no-ignore');
+        }
+
+        if (!caseSensitive) {
+          rgArgs.push('-i');
+        }
+
+        if (contextLines > 0) {
+          rgArgs.push('-C', String(contextLines));
+        }
+
+        rgArgs.push('-g', filePattern);
+        rgArgs.push('--', searchTerm, '.');
+
+        const taskDir = task.getTaskDir();
+        logger.debug('Executing ripgrep:', {
+          binary: RIPGREP_BINARY_PATH,
+          args: rgArgs,
+          cwd: taskDir,
+        });
+
+        const results: Array<{
+          filePath: string;
+          lineNumber: number;
+          lineContent: string;
+          context?: string[];
+        }> = [];
+
+        // rg --no-heading -n output format:
+        //   "path:linenum:content" for match lines
+        //   "path-linenum-content" for context lines (before/after)
+        //   "--" on its own line as a context break separator
+        // Context lines before a match are "before-context", after a match are "after-context".
+        // When matches are far apart in the same file, rg inserts "--" between non-overlapping groups.
+        const outputLineRegex = /^(.+?)([:-])(\d+)\2(.*)$/;
+
+        let pendingBeforeContext: string[] = [];
+        let afterContextBreak = false;
+        let stderrData = '';
+        let lineBuffer = '';
+
+        const processLine = (rawLine: string): boolean => {
+          if (rawLine.endsWith('\r')) {
+            rawLine = rawLine.slice(0, -1);
+          }
+
+          if (rawLine === '--') {
+            pendingBeforeContext = [];
+            afterContextBreak = true;
+            return false;
+          }
+
+          const match = outputLineRegex.exec(rawLine);
+          if (!match) {
+            return false;
+          }
+
+          const [, rawFilePath, separator, lineNumStr, content] = match;
+          const lineNum = parseInt(lineNumStr, 10);
+          if (isNaN(lineNum)) {
+            return false;
+          }
+
+          const filePath = rawFilePath.startsWith('./') ? rawFilePath.slice(2) : rawFilePath;
+          const isMatch = separator === ':';
+
+          if (isMatch) {
+            const context: string[] | undefined = pendingBeforeContext.length > 0 ? [...pendingBeforeContext, content] : undefined;
+            results.push({
+              filePath,
+              lineNumber: lineNum,
+              lineContent: content,
+              context,
+            });
+            pendingBeforeContext = [];
+            afterContextBreak = false;
+          } else {
+            if (afterContextBreak) {
+              pendingBeforeContext.push(content);
+            } else {
+              const lastResult = results[results.length - 1];
+              if (lastResult) {
+                if (!lastResult.context) {
+                  lastResult.context = [];
+                }
+                lastResult.context.push(content);
+              } else {
+                pendingBeforeContext.push(content);
+              }
+            }
+          }
+
+          return results.length >= maxResults;
+        };
+
+        let wasAborted = false;
+
+        await new Promise<void>((resolveStream) => {
+          let streamResolved = false;
+          let childProcess: ChildProcess | null = null;
+          let abortListener: (() => void) | null = null;
+
+          const cleanup = () => {
+            if (abortListener && abortSignal) {
+              abortSignal.removeEventListener('abort', abortListener);
+            }
+          };
+
+          const finish = () => {
+            if (streamResolved) {
+              return;
+            }
+            streamResolved = true;
+            cleanup();
+            resolveStream();
+          };
+
+          abortListener = () => {
+            if (streamResolved) {
+              return;
+            }
+            wasAborted = true;
+            if (childProcess?.pid) {
+              try {
+                childProcess.kill('SIGKILL');
+              } catch {
+                // Process may have already exited
+              }
+            }
+          };
+
+          abortSignal?.addEventListener('abort', abortListener);
+
+          try {
+            childProcess = spawn(RIPGREP_BINARY_PATH, rgArgs, {
+              cwd: taskDir,
+              env: { ...process.env, TERM: 'dumb', PATH: getShellPath() },
+              windowsHide: true,
+            });
+          } catch (spawnError) {
+            stderrData = spawnError instanceof Error ? spawnError.message : String(spawnError);
+            finish();
+            return;
+          }
+
+          childProcess.stdout?.on('data', (data: Buffer) => {
+            if (streamResolved) {
+              return;
+            }
+
+            lineBuffer += data.toString('utf-8');
+            const lines = lineBuffer.split('\n');
+            lineBuffer = lines.pop() || '';
+
+            for (const rawLine of lines) {
+              if (!rawLine) {
+                continue;
+              }
+              const reachedLimit = processLine(rawLine);
+              if (reachedLimit) {
+                try {
+                  childProcess?.kill('SIGKILL');
+                } catch {
+                  // Process may have already exited
+                }
+                finish();
+                return;
+              }
+            }
+          });
+
+          childProcess.stderr?.on('data', (data: Buffer) => {
+            stderrData += data.toString('utf-8');
+          });
+
+          childProcess.on('error', (error: Error) => {
+            if (!streamResolved) {
+              stderrData = error.message;
+              finish();
+            }
+          });
+
+          childProcess.on('close', () => {
+            if (!streamResolved && lineBuffer) {
+              processLine(lineBuffer);
+              lineBuffer = '';
+            }
+            finish();
+          });
+        });
+
+        if (wasAborted || abortSignal?.aborted) {
+          return 'Operation was cancelled by user.';
+        }
+
+        logger.debug('ripgrep results count:', { count: results.length, stderr: stderrData.substring(0, 500) });
+
+        if (results.length === 0) {
+          if (stderrData.trim()) {
+            return `Error during grep: ${stderrData.trim()}`;
+          }
+          return `No matches found for pattern '${searchTerm}' in files matching '${filePattern}'.`;
+        }
+
+        // Group results by file path
+        const grouped: Record<string, typeof results> = {};
+        for (const r of results) {
+          if (!grouped[r.filePath]) {
+            grouped[r.filePath] = [];
+          }
+          grouped[r.filePath].push(r);
+        }
+
+        const markdownLines: string[] = [];
+        markdownLines.push(`## Grep Results: \`${searchTerm}\` in \`${filePattern}\` (${results.length} matches)`);
+        markdownLines.push('');
+
+        for (const [filePath, matches] of Object.entries(grouped)) {
+          markdownLines.push(`### ${filePath} (${matches.length} ${matches.length === 1 ? 'match' : 'matches'})`);
+          for (const match of matches) {
+            const escapedContent = match.lineContent.replace(/`/g, '\\`');
+            markdownLines.push(`- **L${match.lineNumber}:** \`${escapedContent}\``);
+            if (match.context && match.context.length > 0) {
+              markdownLines.push('  ```');
+              for (const ctxLine of match.context) {
+                markdownLines.push(`  ${ctxLine}`);
+              }
+              markdownLines.push('  ```');
+            }
+          }
+          markdownLines.push('');
+        }
+
+        const notices: string[] = [];
+        if (results.length >= maxResults) {
+          notices.push(`${maxResults} matches limit reached. Use maxResults=${maxResults * 2} for more, or refine pattern`);
+        }
+        if (notices.length > 0) {
+          markdownLines.push('---');
+          markdownLines.push(`[${notices.join('. ')}]`);
+        }
+
+        return await truncateToolResult(markdownLines.join('\n'), 1000, 50, 10000);
+      } catch (error) {
+        if (isAbortError(error)) {
+          return 'Operation was cancelled by user.';
+        }
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return `Error during grep: ${errorMessage}`;
+      }
+    },
+  });
+
+  const bashTool = tool({
+    description: POWER_TOOL_DESCRIPTIONS[TOOL_BASH],
+    inputSchema: z.object({
+      command: z.string().min(1).describe('The shell command to execute (e.g., ls -la, npm install).'),
+      description: z.string().optional().describe('Optional short description of the command intent (e.g., "Install dependencies").'),
+      cwd: z.string().optional().describe('The working directory for the command (relative to <WorkingDirectory>). Default: <WorkingDirectory>.'),
+      timeout: z.coerce.number().int().min(0).optional().default(120000).describe('Timeout for the command execution in milliseconds. Default: 120000 ms.'),
+    }),
+    execute: async (input, { toolCallId }) => {
+      const { command, cwd, timeout, description } = input;
+      const expandedCwd = cwd ? expandTilde(cwd) : cwd;
+      task.addToolMessage(
+        toolCallId,
+        TOOL_GROUP_NAME,
+        TOOL_BASH,
+        {
+          command,
+          description,
+          cwd,
+          timeout,
+        },
+        undefined,
+        undefined,
+        promptContext,
+        false, // not finished yet
+      );
+
+      const toolName = `${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_BASH}`;
+      const toolId = toolName;
+      const questionText = 'Approve executing bash command?';
+      const questionSubject = `Command: ${command}\nWorking Directory: ${cwd || '.'}\nTimeout: ${timeout}ms`;
+
+      // Pattern validation
+      const bashSettings = profile.toolSettings?.[toolId] as BashToolSettings;
+
+      logger.debug('Bash tool settings:', { bashSettings });
+      // Check denied patterns first
+      const deniedPatterns = bashSettings?.deniedPattern?.split(';').filter(Boolean) || [];
+      if (deniedPatterns.some((pattern) => new RegExp(pattern).test(command))) {
+        return `Bash command execution denied by settings. Command matches denied pattern: \`${bashSettings?.deniedPattern}\`. If the command is destructive, you must not try to workaround it, inform the user instead.`;
+      }
+
+      let approvedBySettings = false;
+      // Check allowed patterns - if matches, skip approval and execute directly
+      const allowedPatterns = bashSettings?.allowedPattern?.split(';').filter(Boolean) || [];
+      if (allowedPatterns.length > 0 && allowedPatterns.some((pattern) => new RegExp(pattern).test(command))) {
+        approvedBySettings = true;
+      }
+
+      const [isApproved, userInput] = approvedBySettings
+        ? [true, undefined]
+        : await approvalManager.handleToolApproval(toolName, input, toolId, questionText, questionSubject);
+
+      if (!isApproved) {
+        return `Bash command execution denied by user. Reason: ${userInput}`;
+      }
+
+      const absoluteCwd = expandedCwd ? path.resolve(task.getTaskDir(), expandedCwd) : task.getTaskDir();
+
+      const isPosix = process.platform !== 'win32';
+
+      const killProcess = (pid: number) => {
+        if (isPosix) {
+          try {
+            process.kill(-pid, 'SIGKILL');
+          } catch {
+            treeKill(pid, 'SIGKILL');
+          }
+        } else {
+          treeKill(pid, 'SIGKILL');
+        }
+      };
+
+      return await new Promise((resolve) => {
+        const stdoutAccumulator = new BoundedOutputAccumulator();
+        const stderrAccumulator = new BoundedOutputAccumulator();
+        let exitCode = 0;
+        let stderrOverride: string | null = null;
+        let timeoutHandle: NodeJS.Timeout | null = null;
+        let isResolved = false;
+        let childProcess: ChildProcess | null = null;
+        let abortListener: (() => void) | null = null;
+        let lastStreamingUpdateAt = 0;
+        let streamingUpdateQueued = false;
+
+        const cleanup = () => {
+          if (timeoutHandle) {
+            clearTimeout(timeoutHandle);
+            timeoutHandle = null;
+          }
+          // Remove abort listener to prevent memory leaks
+          if (abortListener) {
+            abortSignal?.removeEventListener('abort', abortListener);
+          }
+        };
+
+        const finishOutput = async (accumulator: BoundedOutputAccumulator): Promise<string> => {
+          const content = await accumulator.finish();
+          const didSpill = accumulator.didSpill();
+          return truncateToolResult(content, 1000, 50, 10000, !didSpill, didSpill ? `Full output saved to ${accumulator.getSpillFilePath()}.` : undefined);
+        };
+
+        const resolveWithResult = async () => {
+          if (isResolved) {
+            return;
+          }
+          isResolved = true;
+          cleanup();
+
+          const truncatedStdout = await finishOutput(stdoutAccumulator);
+          const truncatedStderr = stderrOverride ?? (await finishOutput(stderrAccumulator));
+
+          resolve({ stdout: truncatedStdout, stderr: truncatedStderr, exitCode });
+        };
+
+        const sendStreamingUpdate = () => {
+          const now = Date.now();
+          if (now - lastStreamingUpdateAt < BASH_STREAMING_UPDATE_INTERVAL_MS) {
+            streamingUpdateQueued = true;
+            return;
+          }
+          lastStreamingUpdateAt = now;
+          streamingUpdateQueued = false;
+          task.addToolMessage(
+            toolCallId,
+            TOOL_GROUP_NAME,
+            TOOL_BASH,
+            { command, description, cwd, timeout },
+            JSON.stringify({
+              stdout: stdoutAccumulator.getPreview(BASH_STREAMING_PREVIEW_CHARS),
+              stderr: stderrAccumulator.getPreview(BASH_STREAMING_PREVIEW_CHARS),
+              exitCode: null,
+            }),
+            undefined,
+            promptContext,
+            false,
+            false, // not finished yet
+          );
+        };
+
+        abortListener = () => {
+          if (isResolved) {
+            return;
+          }
+
+          if (childProcess?.pid) {
+            killProcess(childProcess.pid);
+          }
+
+          // Use the standard resolution method with proper type
+          stderrOverride = 'Operation was cancelled by user.';
+          exitCode = 130; // Standard cancel exit code (128 + SIGINT=2)
+          void resolveWithResult();
+        };
+
+        // Listen for abort signal
+        abortSignal?.addEventListener('abort', abortListener);
+
+        try {
+          const shellInitCommand = getShellInitCommand();
+          const fullCommand = shellInitCommand ? `${shellInitCommand} ${command}` : command;
+          const { shell: shellExec, args: shellArgs } = getShellCommandArgs(fullCommand);
+          childProcess = spawn(shellExec, shellArgs, {
+            cwd: absoluteCwd,
+            env: { ...process.env, TERM: 'dumb', DEBIAN_FRONTEND: 'noninteractive', PATH: getShellPath() },
+            stdio: ['ignore', 'pipe', 'pipe'], // Explicitly pipe stdout and stderr to capture output from piped commands
+            detached: isPosix,
+            signal: abortSignal,
+          });
+
+          // Set timeout
+          timeoutHandle = setTimeout(() => {
+            if (isResolved) {
+              return;
+            }
+
+            if (childProcess?.pid) {
+              killProcess(childProcess.pid);
+            }
+            stderrOverride = `Error: Command timed out after ${timeout}ms. Consider increasing the timeout parameter.`;
+            exitCode = 124;
+            void resolveWithResult();
+          }, timeout);
+
+          childProcess.stdout?.on('data', (data: Buffer) => {
+            if (isResolved) {
+              return;
+            }
+
+            stdoutAccumulator.append(data);
+
+            // Send throttled bounded streaming update
+            if (streamingUpdateQueued || Date.now() - lastStreamingUpdateAt >= BASH_STREAMING_UPDATE_INTERVAL_MS) {
+              sendStreamingUpdate();
+            }
+          });
+
+          childProcess.stderr?.on('data', (data: Buffer) => {
+            if (isResolved) {
+              return;
+            }
+
+            stderrAccumulator.append(data);
+
+            // Send throttled bounded streaming update
+            if (streamingUpdateQueued || Date.now() - lastStreamingUpdateAt >= BASH_STREAMING_UPDATE_INTERVAL_MS) {
+              sendStreamingUpdate();
+            }
+          });
+
+          childProcess.on('error', (error: Error) => {
+            if (!isResolved) {
+              stderrOverride = error.message;
+              exitCode = 1;
+              void resolveWithResult();
+            }
+          });
+
+          childProcess.on('exit', (code: number | null, signal: string | null) => {
+            if (!isResolved) {
+              if (code !== null) {
+                exitCode = code;
+              } else if (signal === 'SIGTERM') {
+                exitCode = 124; // Timeout exit code
+              } else {
+                exitCode = 1;
+              }
+              void resolveWithResult();
+            }
+          });
+        } catch (error: unknown) {
+          if (!isResolved) {
+            stderrOverride = error instanceof Error ? error.message : String(error);
+            exitCode = 1;
+            void resolveWithResult();
+          }
+        }
+      });
+    },
+  });
+
+  const fetchTool = tool({
+    description: POWER_TOOL_DESCRIPTIONS[TOOL_FETCH],
+    inputSchema: z.object({
+      url: z.string().describe('The URL to fetch.'),
+      timeout: z.coerce.number().int().min(0).optional().default(60000).describe('Timeout for the fetch operation in milliseconds. Default: 60000 ms.'),
+      format: z
+        .enum(['markdown', 'html', 'raw'])
+        .optional()
+        .default('markdown')
+        .describe(
+          'Format of the response: "markdown" (default, converts HTML to markdown), "html" (returns raw HTML), "raw" (fetches raw content via HTTP, ideal for API responses or raw files).',
+        ),
+    }),
+    execute: async (input, { toolCallId }) => {
+      const { url, timeout, format } = input;
+      task.addToolMessage(
+        toolCallId,
+        TOOL_GROUP_NAME,
+        TOOL_FETCH,
+        {
+          url,
+          timeout,
+          format,
+        },
+        undefined,
+        undefined,
+        promptContext,
+      );
+
+      const toolName = `${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_FETCH}`;
+      const questionKey = toolName;
+      const questionText = `Approve fetching content from URL '${url}'?`;
+      const questionSubject = `URL: ${url}\nTimeout: ${timeout}ms\nFormat: ${format}`;
+
+      const [isApproved, userInput] = await approvalManager.handleToolApproval(toolName, input, questionKey, questionText, questionSubject);
+
+      if (!isApproved) {
+        return `URL fetch from '${url}' denied by user. Reason: ${userInput}`;
+      }
+
+      if (!isURL(url)) {
+        return `Error: Invalid URL provided: ${url}. Please provide a valid URL.`;
+      }
+
+      try {
+        const content = await scrapeWeb(url, timeout, abortSignal, format);
+        return await truncateToolResult(content, 1000, 50, 10000);
+      } catch (error) {
+        if (isAbortError(error)) {
+          return 'Operation was cancelled by user.';
+        }
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return `Error: ${errorMessage}`;
+      }
+    },
+  });
+
+  const searchTool = tool({
+    description: POWER_TOOL_DESCRIPTIONS[TOOL_SEMANTIC_SEARCH],
+    inputSchema: z.object({
+      query: z.string().describe('Search query with Elasticsearch syntax. Use + for important terms.'),
+      path: z
+        .string()
+        .optional()
+        .default(task.getTaskDir())
+        .describe('Absolute path to search in. For dependencies use "go:github.com/owner/repo", "js:package_name", or "rust:cargo_name" etc.'),
+      allowTests: coerceBoolean.optional().default(false).describe('Allow test files in search results'),
+      exact: coerceBoolean.optional().default(false).describe('Perform exact search without tokenization (case-insensitive)'),
+      maxResults: z.coerce.number().optional().describe('Maximum number of results to return'),
+      maxTokens: z.coerce.number().optional().default(5000).describe('Maximum number of tokens to return'),
+      language: z.string().optional().describe('Limit search to files of a specific programming language'),
+    }),
+    execute: async (input, { toolCallId }) => {
+      const { query: searchQuery, path: inputPath, allowTests, exact, maxResults: paramMaxResults, maxTokens: paramMaxTokens, language } = input;
+      task.addToolMessage(
+        toolCallId,
+        TOOL_GROUP_NAME,
+        TOOL_SEMANTIC_SEARCH,
+        {
+          query: searchQuery,
+          path: inputPath,
+          allowTests,
+          exact,
+          maxResults: paramMaxResults,
+          maxTokens: paramMaxTokens,
+          language,
+        },
+        undefined,
+        undefined,
+        promptContext,
+      );
+
+      const toolName = `${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_SEMANTIC_SEARCH}`;
+      const questionKey = toolName;
+      const questionText = 'Approve running codebase search?';
+      const questionSubject = `Query: ${searchQuery}\nPath: ${inputPath || '.'}\nAllow Tests: ${allowTests}\nExact: ${exact}\nMax Results: ${paramMaxResults ?? 'default'}\nMax Tokens: ${paramMaxTokens}\nLanguage: ${language || 'all'}`;
+
+      const [isApproved, userInput] = await approvalManager.handleToolApproval(toolName, input, questionKey, questionText, questionSubject);
+
+      if (!isApproved) {
+        return `Search execution denied by user. Reason: ${userInput}`;
+      }
+
+      // Use parameter maxTokens if provided, otherwise use the default
+      const effectiveMaxTokens = paramMaxTokens || 5000;
+
+      let searchPath = inputPath || task.getTaskDir();
+
+      // Check if it's a dependency path (format: language:rest)
+      const isDependencyPath = /^[a-zA-Z]+:/.test(searchPath);
+
+      if (!isDependencyPath && !path.isAbsolute(searchPath)) {
+        // If path is relative (including "." and "./"), resolve it relative to task.getTaskDir()
+        searchPath = path.resolve(task.getTaskDir(), searchPath);
+      }
+
+      // List of supported languages by the probe binary
+      const supportedLanguages = [
+        'rust',
+        'rs',
+        'javascript',
+        'js',
+        'jsx',
+        'typescript',
+        'ts',
+        'tsx',
+        'python',
+        'py',
+        'go',
+        'c',
+        'h',
+        'cpp',
+        'cc',
+        'cxx',
+        'hpp',
+        'hxx',
+        'java',
+        'ruby',
+        'rb',
+        'php',
+        'swift',
+        'solidity',
+        'sol',
+        'crystal',
+        'cr',
+        'haskell',
+        'hs',
+        'lhs',
+        'csharp',
+        'cs',
+        'yaml',
+        'yml',
+      ];
+
+      // Only include language parameter if it's supported
+      const effectiveLanguage = language && supportedLanguages.includes(language) ? language : undefined;
+
+      try {
+        const results = await search({
+          query: searchQuery,
+          path: searchPath,
+          allowTests,
+          exact,
+          timeout: 5 * 60, // 5 minutes
+          json: false,
+          maxTokens: effectiveMaxTokens,
+          maxResults: paramMaxResults,
+          language: effectiveLanguage,
+        });
+
+        logger.debug(`Search results: ${JSON.stringify(results)}`);
+
+        return results;
+      } catch (error: unknown) {
+        if (isAbortError(error)) {
+          return 'Operation was cancelled by user.';
+        }
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.error('Error executing search command:', error);
+        task.addLogMessage(
+          'error',
+          `Semantic search failed with error:\n\n${errorMessage}\n\nPlease, consider reporting an issue at https://github.com/hotovo/aider-desk/issues. Thank you.`,
+        );
+        return errorMessage;
+      }
+    },
+  });
+
+  const allTools = {
+    [`${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_FILE_EDIT}`]: fileEditTool,
+    [`${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_FILE_READ}`]: fileReadTool,
+    [`${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_FILE_WRITE}`]: fileWriteTool,
+    [`${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_GLOB}`]: globTool,
+    [`${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_GREP}`]: grepTool,
+    [`${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_SEMANTIC_SEARCH}`]: searchTool,
+    [`${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_BASH}`]: bashTool,
+    [`${TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TOOL_FETCH}`]: fetchTool,
+  };
+
+  // Filter out tools that are set to Never in toolApprovals
+  const filteredTools: ToolSet = {};
+  for (const [toolId, tool] of Object.entries(allTools)) {
+    if (profile.toolApprovals[toolId] !== ToolApprovalState.Never) {
+      filteredTools[toolId] = tool;
+    }
+  }
+
+  return filteredTools;
+};

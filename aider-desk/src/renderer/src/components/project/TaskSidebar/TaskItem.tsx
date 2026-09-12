@@ -1,0 +1,449 @@
+import { TaskData, DefaultTaskState } from '@common/types';
+import { useTranslation } from 'react-i18next';
+import { MouseEvent, DragEvent, memo, useRef, useState } from 'react';
+import { HiPlus, HiCheck, HiSparkles } from 'react-icons/hi';
+import { IoGitBranch } from 'react-icons/io5';
+import { MdPushPin, MdChevronRight } from 'react-icons/md';
+import { RiFolderAddLine } from 'react-icons/ri';
+import { clsx } from 'clsx';
+import { useLongPress } from '@reactuses/core';
+import { BiArchiveIn } from 'react-icons/bi';
+
+import { TaskStatusIcon } from './TaskStatusIcon';
+import { TaskMenuButton } from './TaskMenuButton';
+
+import { InlineEditPanel } from '@/components/common/InlineEditPanel';
+import { Button } from '@/components/common/Button';
+import { LoadingText } from '@/components/common/LoadingText';
+import { TaskStateChip } from '@/components/common/TaskStateChip';
+import { ExtensionComponentWrapper } from '@/components/extensions/ExtensionComponentWrapper';
+import { Tooltip } from '@/components/ui/Tooltip';
+import { countAllSubtasks } from '@/utils/task-utils';
+
+type Props = {
+  task: TaskData;
+  tasks: TaskData[];
+  readonly?: boolean;
+  level: number;
+  selectedTasks: Set<string>;
+  deleteConfirmTaskId: string | null;
+  isMultiselectMode: boolean;
+  setIsMultiselectMode: (value: boolean) => void;
+  activeTaskId: string | null;
+  onTaskClick: (e: MouseEvent, taskId: string) => void;
+  createNewTask?: (parentId?: string) => void;
+  editingTaskId: string | null;
+  onEditClick: (taskId: string) => void;
+  onEditConfirm: (taskId: string, newName: string) => Promise<void>;
+  onEditCancel: () => void;
+  onDeleteClick: (taskId: string) => void;
+  onArchiveTask: (taskId: string) => Promise<void>;
+  onUnarchiveTask: (taskId: string) => Promise<void>;
+  onTogglePin: (taskId: string) => Promise<void>;
+  onChangeState: (taskId: string, newState: string) => Promise<void>;
+  onMoveToTop?: (taskId: string) => Promise<void>;
+  onCopyAsMarkdown?: (taskId: string) => void;
+  onExportToMarkdown?: (taskId: string) => void;
+  onExportToImage?: (taskId: string) => void;
+  onDuplicateTask?: (taskId: string) => void;
+  handleConfirmDelete: (taskId: string) => Promise<void>;
+  handleCancelDelete: () => void;
+  isExpanded: boolean;
+  onToggleExpand: (taskId: string) => void;
+  hasChildren: boolean;
+  draggedTaskIds: Set<string>;
+  dragOverTaskId: string | null;
+  onDragStart: (taskId: string) => void;
+  onDragEnd: () => void;
+  onDropOnTask: (targetId: string) => void;
+  setDragOverTaskId: (taskId: string | null) => void;
+};
+
+const arePropsEqual = (prevProps: Props, nextProps: Props): boolean => {
+  const { task: prevTask } = prevProps;
+  const { task: nextTask } = nextProps;
+
+  // Compare task object - only properties used in rendering
+  if (
+    prevTask.name !== nextTask.name ||
+    prevTask.id !== nextTask.id ||
+    prevTask.parentId !== nextTask.parentId ||
+    prevTask.archived !== nextTask.archived ||
+    prevTask.state !== nextTask.state ||
+    prevTask.pinned !== nextTask.pinned ||
+    prevTask.workingMode !== nextTask.workingMode ||
+    prevTask.createdAt !== nextTask.createdAt
+  ) {
+    return false;
+  }
+
+  // Compare tasks array reference (used for subtasks computation)
+  if (prevProps.tasks !== nextProps.tasks) {
+    return false;
+  }
+
+  // Compare primitive props
+  if (
+    prevProps.readonly !== nextProps.readonly ||
+    prevProps.level !== nextProps.level ||
+    prevProps.isMultiselectMode !== nextProps.isMultiselectMode ||
+    prevProps.activeTaskId !== nextProps.activeTaskId ||
+    prevProps.isExpanded !== nextProps.isExpanded ||
+    prevProps.hasChildren !== nextProps.hasChildren
+  ) {
+    return false;
+  }
+
+  // Compare task-id-specific props - only re-render if our task is affected
+  if ((prevProps.deleteConfirmTaskId === prevTask.id) !== (nextProps.deleteConfirmTaskId === nextTask.id)) {
+    return false;
+  }
+
+  if ((prevProps.editingTaskId === prevTask.id) !== (nextProps.editingTaskId === nextTask.id)) {
+    return false;
+  }
+
+  // Compare selectedTasks - only care about our task's membership
+  if (prevProps.selectedTasks.has(prevTask.id) !== nextProps.selectedTasks.has(nextTask.id)) {
+    return false;
+  }
+
+  // Compare function props by reference
+  if (
+    prevProps.setIsMultiselectMode !== nextProps.setIsMultiselectMode ||
+    prevProps.onTaskClick !== nextProps.onTaskClick ||
+    prevProps.createNewTask !== nextProps.createNewTask ||
+    prevProps.onEditClick !== nextProps.onEditClick ||
+    prevProps.onEditConfirm !== nextProps.onEditConfirm ||
+    prevProps.onEditCancel !== nextProps.onEditCancel ||
+    prevProps.onDeleteClick !== nextProps.onDeleteClick ||
+    prevProps.onArchiveTask !== nextProps.onArchiveTask ||
+    prevProps.onUnarchiveTask !== nextProps.onUnarchiveTask ||
+    prevProps.onTogglePin !== nextProps.onTogglePin ||
+    prevProps.onChangeState !== nextProps.onChangeState ||
+    prevProps.onMoveToTop !== nextProps.onMoveToTop ||
+    prevProps.onCopyAsMarkdown !== nextProps.onCopyAsMarkdown ||
+    prevProps.onExportToMarkdown !== nextProps.onExportToMarkdown ||
+    prevProps.onExportToImage !== nextProps.onExportToImage ||
+    prevProps.onDuplicateTask !== nextProps.onDuplicateTask ||
+    prevProps.handleConfirmDelete !== nextProps.handleConfirmDelete ||
+    prevProps.handleCancelDelete !== nextProps.handleCancelDelete ||
+    prevProps.onToggleExpand !== nextProps.onToggleExpand ||
+    prevProps.onDragStart !== nextProps.onDragStart ||
+    prevProps.onDragEnd !== nextProps.onDragEnd ||
+    prevProps.onDropOnTask !== nextProps.onDropOnTask ||
+    prevProps.setDragOverTaskId !== nextProps.setDragOverTaskId
+  ) {
+    return false;
+  }
+
+  if (prevProps.dragOverTaskId !== nextProps.dragOverTaskId) {
+    return false;
+  }
+
+  if (prevProps.draggedTaskIds !== nextProps.draggedTaskIds) {
+    return false;
+  }
+
+  return true;
+};
+
+export const TaskItem = memo(
+  ({
+    task,
+    tasks,
+    readonly = false,
+    level,
+    selectedTasks,
+    deleteConfirmTaskId,
+    isMultiselectMode,
+    setIsMultiselectMode,
+    activeTaskId,
+    onTaskClick,
+    createNewTask,
+    editingTaskId,
+    onEditClick,
+    onEditConfirm,
+    onEditCancel,
+    onDeleteClick,
+    onArchiveTask,
+    onUnarchiveTask,
+    onTogglePin,
+    onChangeState,
+    onMoveToTop,
+    onCopyAsMarkdown,
+    onExportToMarkdown,
+    onExportToImage,
+    onDuplicateTask,
+    handleConfirmDelete,
+    handleCancelDelete,
+    isExpanded,
+    onToggleExpand,
+    hasChildren,
+    draggedTaskIds,
+    dragOverTaskId,
+    onDragStart,
+    onDragEnd,
+    onDropOnTask,
+    setDragOverTaskId,
+  }: Props) => {
+    const { t } = useTranslation();
+    const [editTaskName, setEditTaskName] = useState(task.name);
+    const isGeneratingName = task.name === '<<generating>>';
+    const isEditing = editingTaskId === task.id;
+    const isSubtask = level > 0;
+    const taskName = task.name || t('taskSidebar.untitled');
+    const showNameTooltip = !!task.name && task.name.length > 30;
+
+    const isDraggingRef = useRef(false);
+
+    const longPressProps = useLongPress(
+      () => {
+        if (readonly || isDraggingRef.current) {
+          return;
+        }
+        setIsMultiselectMode(true);
+      },
+      {
+        delay: 500,
+        isPreventDefault: false,
+      },
+    );
+
+    const toggleExpand = (e: MouseEvent) => {
+      e.stopPropagation();
+      onToggleExpand(task.id);
+    };
+
+    const handleCreateSubtask = (e: MouseEvent) => {
+      e.stopPropagation();
+      if (createNewTask) {
+        createNewTask(task.id);
+      }
+    };
+
+    const handleOnEdit = () => {
+      setEditTaskName(task.name);
+      onEditClick(task.id);
+    };
+
+    const isDragged = draggedTaskIds.has(task.id);
+    const isDropTarget = dragOverTaskId === task.id && !isDragged;
+    const allSubtasksCount = countAllSubtasks(task.id, tasks);
+
+    const handleDragStart = (e: DragEvent<HTMLDivElement>) => {
+      isDraggingRef.current = true;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', task.id);
+      onDragStart(task.id);
+    };
+
+    const handleDragEnd = () => {
+      isDraggingRef.current = false;
+      onDragEnd();
+    };
+
+    const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
+      if (isDragged || draggedTaskIds.size === 0) {
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = 'move';
+      setDragOverTaskId(task.id);
+    };
+
+    const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
+      e.stopPropagation();
+      if (dragOverTaskId === task.id) {
+        setDragOverTaskId(null);
+      }
+    };
+
+    const handleDrop = (e: DragEvent<HTMLDivElement>) => {
+      if (isDragged || draggedTaskIds.size === 0) {
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      onDropOnTask(task.id);
+    };
+
+    return (
+      <div className="relative">
+        <div
+          {...longPressProps}
+          draggable={!readonly && !isEditing && deleteConfirmTaskId !== task.id}
+          onDragStart={readonly ? undefined : handleDragStart}
+          onDragEnd={readonly ? undefined : handleDragEnd}
+          onDragOver={readonly ? undefined : handleDragOver}
+          onDragLeave={readonly ? undefined : handleDragLeave}
+          onDrop={readonly ? undefined : handleDrop}
+          className={clsx(
+            'group relative flex items-center justify-between py-1 pl-2 px-1 cursor-pointer transition-colors border select-none',
+            isDragged && 'opacity-40',
+            activeTaskId === task.id && !isMultiselectMode
+              ? 'bg-bg-secondary border-border-dark-light'
+              : selectedTasks.has(task.id) && isMultiselectMode
+                ? 'bg-bg-secondary border-border-dark-light'
+                : 'hover:bg-bg-secondary border-transparent',
+          )}
+          onClick={(e) => onTaskClick(e, task.id)}
+          data-task-id={task.id}
+          style={level > 0 ? { marginLeft: `${level * 8}px` } : undefined}
+        >
+          {isSubtask && <div className="absolute left-[-1px] top-[-1px] bottom-[-1px] w-px bg-bg-secondary" />}
+
+          <div className="flex items-center min-w-0 flex-1">
+            {isMultiselectMode && (
+              <div className="flex items-center mr-2">
+                <div
+                  className={clsx(
+                    'w-4 h-4 border rounded flex items-center justify-center transition-colors',
+                    selectedTasks.has(task.id)
+                      ? 'bg-bg-primary-light-strong border-border-light text-text-primary'
+                      : 'border-border-default bg-bg-primary-light',
+                  )}
+                >
+                  {selectedTasks.has(task.id) && <HiCheck className="w-3 h-3" />}
+                </div>
+              </div>
+            )}
+            <div className="flex-1 min-w-0 flex flex-col gap-1">
+              {isGeneratingName ? (
+                <LoadingText
+                  label={t('taskSidebar.generatingName')}
+                  className="text-xs font-medium truncate"
+                  icon={<HiSparkles className="w-3 h-3 text-accent-primary flex-shrink-0" />}
+                />
+              ) : (
+                <div className="flex items-center justify-between">
+                  <div
+                    className={clsx(
+                      'text-xs font-medium truncate transition-colors',
+                      task.archived && activeTaskId !== task.id ? 'text-text-muted group-hover:text-text-primary' : 'text-text-primary',
+                    )}
+                  >
+                    {showNameTooltip ? (
+                      <Tooltip content={taskName} delayDuration={1000}>
+                        <span>{taskName}</span>
+                      </Tooltip>
+                    ) : (
+                      taskName
+                    )}
+                  </div>
+                  {task.pinned && <MdPushPin className="w-3 h-3 text-text-muted shrink-0 ml-1 rotate-45 group-hover:hidden" />}
+                </div>
+              )}
+              <div className="flex items-center gap-0.5 text-3xs text-text-muted">
+                {hasChildren && (
+                  <div className="w-5 h-5 flex items-center justify-center shrink-0 -ml-0.5">
+                    <button
+                      onClick={toggleExpand}
+                      className="p-0.5 hover:bg-bg-tertiary rounded transition-transform duration-200"
+                      style={{ transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)' }}
+                      data-testid={`chevron-${task.id}`}
+                    >
+                      <MdChevronRight className="w-4 h-4 text-text-muted" />
+                    </button>
+                  </div>
+                )}
+                <TaskStateChip state={task.state || DefaultTaskState.Todo} className={hasChildren ? '' : '-ml-0.5'} />
+                <ExtensionComponentWrapper
+                  placement="task-sidebar-item-badges"
+                  renderNullOnEmpty
+                  taskId={task.id}
+                  actionTaskId={task.id}
+                  additionalProps={{ task }}
+                />
+                {task.workingMode === 'worktree' && (
+                  <span className="px-1 py-0.5 rounded border border-border-dark-light bg-bg-tertiary-emphasis text-text-tertiary">
+                    <IoGitBranch className="w-3 h-3" />
+                  </span>
+                )}
+                {task.archived && (
+                  <span className="px-1 py-0.5 rounded border border-border-dark-light bg-bg-tertiary-emphasis text-text-tertiary">
+                    <BiArchiveIn className="w-3 h-3" />
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center pl-2">
+            <TaskStatusIcon taskId={task.id} state={task.state} isCollapsed={false} />
+          </div>
+
+          {!isMultiselectMode && (
+            <div className="flex items-center">
+              {!readonly && (
+                <Tooltip content={t('taskSidebar.createSubtask')}>
+                  <button
+                    data-testid={`create-subtask-${task.id}`}
+                    className="p-1.5 rounded-md hover:bg-bg-tertiary text-text-muted hover:text-text-primary hidden group-hover:flex"
+                    onClick={handleCreateSubtask}
+                  >
+                    <HiPlus className="w-4 h-4" />
+                  </button>
+                </Tooltip>
+              )}
+              {!readonly && (
+                <TaskMenuButton
+                  task={task}
+                  onEdit={handleOnEdit}
+                  onDelete={task.createdAt ? () => onDeleteClick(task.id) : undefined}
+                  onCopyAsMarkdown={onCopyAsMarkdown && task.createdAt ? () => onCopyAsMarkdown(task.id) : undefined}
+                  onExportToMarkdown={onExportToMarkdown && task.createdAt ? () => onExportToMarkdown(task.id) : undefined}
+                  onExportToImage={onExportToImage && task.createdAt ? () => onExportToImage(task.id) : undefined}
+                  onDuplicateTask={onDuplicateTask && task.createdAt ? () => onDuplicateTask(task.id) : undefined}
+                  onArchiveTask={task.archived || !task.createdAt ? undefined : () => onArchiveTask(task.id)}
+                  onUnarchiveTask={task.archived ? () => onUnarchiveTask(task.id) : undefined}
+                  onTogglePin={() => onTogglePin(task.id)}
+                  onChangeState={(newState) => onChangeState(task.id, newState)}
+                  onMoveToTop={onMoveToTop && task.createdAt ? () => onMoveToTop(task.id) : undefined}
+                  isPinned={task.pinned || false}
+                />
+              )}
+            </div>
+          )}
+        </div>
+
+        {isDropTarget && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center gap-1.5 rounded border-2 bg-black/20 text-2xs font-medium text-accent-primary pointer-events-none">
+            <RiFolderAddLine className="w-3.5 h-3.5" />
+            <span>{t('taskSidebar.dropToSubtask')}</span>
+          </div>
+        )}
+
+        {isEditing && (
+          <InlineEditPanel
+            value={editTaskName}
+            onChange={setEditTaskName}
+            onConfirm={() => void onEditConfirm(task.id, editTaskName)}
+            onCancel={onEditCancel}
+            placeholder={t('taskSidebar.taskNamePlaceholder')}
+          />
+        )}
+
+        {deleteConfirmTaskId === task.id && (
+          <div className="m-2 p-2 bg-bg-primary border border-border-default rounded-md">
+            <div className="text-2xs text-text-primary mb-2">
+              {allSubtasksCount > 0 ? t('taskSidebar.deleteConfirmWithSubtasks', { count: allSubtasksCount }) : t('taskSidebar.deleteConfirm')}
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="text" size="xs" color="tertiary" onClick={handleCancelDelete}>
+                {t('common.cancel')}
+              </Button>
+              <Button variant="contained" color="danger" size="xs" onClick={() => void handleConfirmDelete(task.id)}>
+                {t('common.confirm')}
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  },
+  arePropsEqual,
+);
+
+TaskItem.displayName = 'TaskItem';

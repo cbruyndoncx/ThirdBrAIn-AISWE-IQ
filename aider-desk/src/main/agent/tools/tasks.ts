@@ -1,0 +1,724 @@
+import path from 'path';
+
+import { type Tool, tool, type ToolSet } from 'ai';
+import { z } from 'zod';
+import {
+  TASKS_TOOL_CREATE_TASK,
+  TASKS_TOOL_DELETE_TASK,
+  TASKS_TOOL_DESCRIPTIONS,
+  TASKS_TOOL_GET_TASK,
+  TASKS_TOOL_GET_TASK_MESSAGE,
+  TASKS_TOOL_GROUP_NAME,
+  TASKS_TOOL_LIST_TASKS,
+  TASKS_TOOL_RUN_PROMPT,
+  TASKS_TOOL_SEARCH_PARENT_TASK,
+  TASKS_TOOL_SEARCH_TASK,
+  TOOL_GROUP_NAME_SEPARATOR,
+} from '@common/tools';
+import { AgentProfile, AutonomyMode, DefaultTaskState, PromptContext, SettingsData, TaskData, TaskExecutionMode, ToolApprovalState } from '@common/types';
+import { fileExists, isUuid } from '@common/utils';
+
+import { ApprovalManager } from './approval-manager';
+
+import { AIDER_DESK_TASKS_DIR } from '@/constants';
+import { search } from '@/utils/probe';
+import logger from '@/logger';
+import { isAbortError } from '@/utils/errors';
+import { deriveDirName } from '@/utils';
+import { Task } from '@/task';
+
+const taskDateSchema = z.string().refine((value) => !Number.isNaN(Date.parse(value)), 'Must be a valid date or ISO 8601 timestamp');
+
+const listTasksInputSchema = z
+  .object({
+    offset: z.coerce.number().optional().describe('The number of tasks to skip (for pagination)'),
+    limit: z.coerce.number().optional().describe('The maximum number of tasks to return'),
+    state: z
+      .string()
+      .optional()
+      .describe(
+        'Filter tasks by state. Built-in states: TODO, READY_FOR_IMPLEMENTATION, IN_PROGRESS, INTERRUPTED, DELEGATED, MORE_INFO_NEEDED, READY_FOR_REVIEW, DONE.',
+      ),
+    createdAfter: taskDateSchema.optional().describe('Include tasks created at or after this date or ISO 8601 timestamp'),
+    createdBefore: taskDateSchema.optional().describe('Include tasks created at or before this date or ISO 8601 timestamp'),
+    updatedAfter: taskDateSchema.optional().describe('Include tasks updated at or after this date or ISO 8601 timestamp'),
+    updatedBefore: taskDateSchema.optional().describe('Include tasks updated at or before this date or ISO 8601 timestamp'),
+    workingMode: z.enum(['local', 'worktree']).optional().describe('Filter tasks by working mode'),
+    archived: z.boolean().optional().describe('Filter tasks by archived status'),
+    pinned: z.boolean().optional().describe('Filter tasks by pinned status'),
+    parentId: z.string().nullable().optional().describe('Filter by parent task ID; use null for top-level tasks'),
+    nameQuery: z.string().optional().describe('Case-insensitive substring to match in task names'),
+    agentProfileId: z.string().optional().describe('Filter tasks by agent profile ID'),
+    provider: z.string().optional().describe('Filter tasks by model provider'),
+    model: z.string().optional().describe('Filter tasks by model'),
+  })
+  .superRefine((input, context) => {
+    const dateRanges = [
+      ['createdAfter', input.createdAfter, 'createdBefore', input.createdBefore],
+      ['updatedAfter', input.updatedAfter, 'updatedBefore', input.updatedBefore],
+    ] as const;
+
+    for (const [lowerName, lowerValue, upperName, upperValue] of dateRanges) {
+      if (lowerValue && upperValue && Date.parse(lowerValue) > Date.parse(upperValue)) {
+        context.addIssue({
+          code: 'custom',
+          path: [upperName],
+          message: `${upperName} must be greater than or equal to ${lowerName}`,
+        });
+      }
+    }
+  });
+
+export const createTasksToolset = (settings: SettingsData, task: Task, profile: AgentProfile, promptContext?: PromptContext): ToolSet => {
+  const approvalManager = new ApprovalManager(task, profile);
+
+  const listTasksTool = tool({
+    description: TASKS_TOOL_DESCRIPTIONS[TASKS_TOOL_LIST_TASKS],
+    inputSchema: listTasksInputSchema,
+    execute: async (input, { toolCallId }) => {
+      const {
+        offset = 0,
+        limit,
+        state,
+        createdAfter,
+        createdBefore,
+        updatedAfter,
+        updatedBefore,
+        workingMode,
+        archived,
+        pinned,
+        parentId,
+        nameQuery,
+        agentProfileId,
+        provider,
+        model,
+      } = input;
+      const toolInput = { ...input, offset, limit, state };
+      task.addToolMessage(toolCallId, TASKS_TOOL_GROUP_NAME, TASKS_TOOL_LIST_TASKS, toolInput, undefined, undefined, promptContext);
+
+      const toolName = `${TASKS_TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TASKS_TOOL_LIST_TASKS}`;
+      const questionKey = toolName;
+      const questionText = 'Approve listing tasks?';
+      const questionSubject = [
+        `Offset: ${offset}`,
+        `Limit: ${limit ?? 'all'}`,
+        `State: ${state || 'all'}`,
+        `Created: ${createdAfter || '*'} to ${createdBefore || '*'}`,
+        `Updated: ${updatedAfter || '*'} to ${updatedBefore || '*'}`,
+        `Working mode: ${workingMode || 'all'}`,
+        `Archived: ${archived === undefined ? 'all' : archived}`,
+        `Pinned: ${pinned === undefined ? 'all' : pinned}`,
+        ...(parentId !== undefined ? [`Parent ID: ${parentId || 'none'}`] : []),
+        ...(nameQuery ? [`Name: ${nameQuery}`] : []),
+      ].join(', ');
+
+      const [isApproved, userInput] = await approvalManager.handleToolApproval(toolName, input, questionKey, questionText, questionSubject);
+
+      if (!isApproved) {
+        return `Listing tasks denied by user. Reason: ${userInput}`;
+      }
+
+      try {
+        let allTasks = await task.getProject().getTasks();
+        const createdAfterTime = createdAfter ? Date.parse(createdAfter) : undefined;
+        const createdBeforeTime = createdBefore ? Date.parse(createdBefore) : undefined;
+        const updatedAfterTime = updatedAfter ? Date.parse(updatedAfter) : undefined;
+        const updatedBeforeTime = updatedBefore ? Date.parse(updatedBefore) : undefined;
+        const normalizedNameQuery = nameQuery?.toLocaleLowerCase();
+
+        allTasks = allTasks.filter((taskData) => {
+          const createdAt = taskData.createdAt ? Date.parse(taskData.createdAt) : undefined;
+          const updatedAt = taskData.updatedAt ? Date.parse(taskData.updatedAt) : undefined;
+
+          return (
+            (!state || taskData.state === state) &&
+            (createdAfterTime === undefined || (createdAt !== undefined && createdAt >= createdAfterTime)) &&
+            (createdBeforeTime === undefined || (createdAt !== undefined && createdAt <= createdBeforeTime)) &&
+            (updatedAfterTime === undefined || (updatedAt !== undefined && updatedAt >= updatedAfterTime)) &&
+            (updatedBeforeTime === undefined || (updatedAt !== undefined && updatedAt <= updatedBeforeTime)) &&
+            (!workingMode || taskData.workingMode === workingMode) &&
+            (archived === undefined || Boolean(taskData.archived) === archived) &&
+            (pinned === undefined || Boolean(taskData.pinned) === pinned) &&
+            (parentId === undefined || (parentId === null ? taskData.parentId == null : taskData.parentId === parentId)) &&
+            (!normalizedNameQuery || taskData.name.toLocaleLowerCase().includes(normalizedNameQuery)) &&
+            (!agentProfileId || taskData.agentProfileId === agentProfileId) &&
+            (!provider || taskData.provider === provider) &&
+            (!model || taskData.model === model)
+          );
+        });
+
+        allTasks.sort((a, b) => {
+          const dateA = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+          const dateB = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+          return dateB - dateA;
+        });
+
+        const startIndex = Math.max(0, offset);
+        const endIndex = startIndex + (limit === undefined ? allTasks.length : Math.max(0, limit));
+        const paginatedTasks = allTasks.slice(startIndex, endIndex);
+
+        return paginatedTasks.map((t) => {
+          const subtaskIds = allTasks.filter((subtask) => subtask.parentId === t.id).map((s) => s.id);
+
+          return {
+            id: t.id,
+            name: t.name,
+            createdAt: t.createdAt,
+            updatedAt: t.updatedAt,
+            archived: t.archived,
+            pinned: t.pinned,
+            workingMode: t.workingMode,
+            state: t.state,
+            ...(t.parentId && { parentId: t.parentId }),
+            ...(subtaskIds.length > 0 && { subtaskIds }),
+          };
+        });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return `Error listing tasks: ${errorMessage}`;
+      }
+    },
+  });
+
+  const getTaskTool = tool({
+    description: TASKS_TOOL_DESCRIPTIONS[TASKS_TOOL_GET_TASK],
+    inputSchema: z.object({
+      taskId: z.string().describe('The ID of the task to get information for'),
+    }),
+    execute: async (input, { toolCallId }) => {
+      const { taskId } = input;
+      task.addToolMessage(toolCallId, TASKS_TOOL_GROUP_NAME, TASKS_TOOL_GET_TASK, { taskId }, undefined, undefined, promptContext);
+
+      const toolName = `${TASKS_TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TASKS_TOOL_GET_TASK}`;
+      const questionKey = toolName;
+      const questionText = `Approve getting information for task ${taskId}?`;
+
+      const [isApproved, userInput] = await approvalManager.handleToolApproval(toolName, input, questionKey, questionText);
+
+      if (!isApproved) {
+        return `Getting task information denied by user. Reason: ${userInput}`;
+      }
+
+      try {
+        const targetTask = task.getProject().getTask(taskId);
+
+        if (!targetTask) {
+          return `Task with ID ${taskId} not found`;
+        }
+
+        const contextMessages = await targetTask.getContextMessages();
+        const contextFiles = await targetTask.getContextFiles();
+
+        // Find subtasks of this task
+        const allTasks = await task.getProject().getTasks();
+        const subtaskIds = allTasks.filter((t) => t.parentId === taskId).map((t) => t.id);
+
+        return {
+          id: targetTask.task.id,
+          parentId: targetTask.task.parentId,
+          name: targetTask.task.name,
+          createdAt: targetTask.task.createdAt,
+          updatedAt: targetTask.task.updatedAt,
+          contextFiles: contextFiles.map((f) => ({
+            path: f.path,
+            readOnly: f.readOnly,
+          })),
+          contextMessagesCount: contextMessages.length,
+          agentProfileId: targetTask.task.agentProfileId,
+          provider: targetTask.task.provider,
+          model: targetTask.task.model,
+          mode: targetTask.task.currentMode,
+          archived: targetTask.task.archived,
+          state: targetTask.task.state,
+          ...(subtaskIds.length > 0 && { subtaskIds }),
+        };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return `Error getting task: ${errorMessage}`;
+      }
+    },
+  });
+
+  const getTaskMessageTool = tool({
+    description: TASKS_TOOL_DESCRIPTIONS[TASKS_TOOL_GET_TASK_MESSAGE],
+    inputSchema: z.object({
+      taskId: z.string().describe('The ID of the task'),
+      messageIndex: z
+        .number()
+        .describe(
+          'The index of the message to retrieve (0-based). Use negative numbers to count from the end: -1 for last message, -2 for second to last, etc.',
+        ),
+    }),
+    execute: async (input, { toolCallId }) => {
+      const { taskId, messageIndex } = input;
+      task.addToolMessage(toolCallId, TASKS_TOOL_GROUP_NAME, TASKS_TOOL_GET_TASK_MESSAGE, { taskId, messageIndex }, undefined, undefined, promptContext);
+
+      const toolName = `${TASKS_TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TASKS_TOOL_GET_TASK_MESSAGE}`;
+      const questionKey = toolName;
+      const questionText = `Approve retrieving message ${messageIndex} from task ${taskId}?`;
+
+      const [isApproved, userInput] = await approvalManager.handleToolApproval(toolName, input, questionKey, questionText);
+
+      if (!isApproved) {
+        return `Retrieving task message denied by user. Reason: ${userInput}`;
+      }
+
+      try {
+        const targetTask = task.getProject().getTask(taskId);
+
+        if (!targetTask) {
+          return `Task with ID ${taskId} not found`;
+        }
+
+        const contextMessages = await targetTask.getContextMessages();
+
+        // Handle negative indexing
+        let actualIndex = messageIndex;
+        if (messageIndex < 0) {
+          actualIndex = contextMessages.length + messageIndex; // e.g., -1 becomes length-1
+        }
+
+        if (actualIndex < 0 || actualIndex >= contextMessages.length) {
+          return `Message index ${messageIndex} out of range. Task has ${contextMessages.length} messages (0-${contextMessages.length - 1}, or -1 to -${contextMessages.length})`;
+        }
+
+        const message = contextMessages[actualIndex];
+
+        return {
+          index: actualIndex,
+          originalIndex: messageIndex,
+          role: message.role,
+          content: typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
+          usageReport: message.usageReport,
+        };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return `Error getting task message: ${errorMessage}`;
+      }
+    },
+  });
+
+  const autoGenerateTaskName = settings.taskSettings.autoGenerateTaskName;
+  const nameProperty = autoGenerateTaskName
+    ? z.string().optional().describe('Optional concise name for the new task. If not provided, the task name will be auto-generated from the prompt.')
+    : z.string().describe('Concise name for the new task.');
+
+  const availableAgents = task
+    .getProject()
+    .getAgentProfiles()
+    .map((p) => {
+      const slug = deriveDirName(p.name, new Set());
+      const shortId = isUuid(p.id) ? p.id.substring(0, 8) : p.id;
+      return `${slug}(${shortId})`;
+    })
+    .join(',');
+
+  const createTaskTool = tool({
+    description: TASKS_TOOL_DESCRIPTIONS[TASKS_TOOL_CREATE_TASK],
+    inputSchema: z.object({
+      prompt: z.string().describe('The initial prompt for the new task'),
+      name: nameProperty,
+      agentProfileId: z
+        .string()
+        .optional()
+        .describe(`Optional agent profile ID or name. Available agents: ${availableAgents}. Use only when explicitly requested by the user.`),
+      modelId: z
+        .string()
+        .optional()
+        .describe('Optional model ID in the format `provider/model` to use for the task. Use only when explicitly requested by the user.'),
+      mode: z.string().optional().default('agent').describe('Optional mode to use for the task. Use only when explicitly requested by the user.'),
+      asSubtask: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe('If true, the task will be created as a subtask of the current task. Use only when explicitly requested by the user.'),
+      parentTaskId: z
+        .string()
+        .nullable()
+        .optional()
+        .describe(
+          'Optional ID of the parent task. If provided, the new task will be created as a subtask of the specified parent. When asSubtask is specified as true, this is not needed as parent ID is resolved automatically.',
+        ),
+      autonomyMode: z
+        .enum(AutonomyMode)
+        .optional()
+        .describe(
+          'The autonomy mode for the new task. "manual" requires approval for every tool and plan, "guided" (default) auto-approves tools but waits for plan approval from user, "autonomous" runs without interruption.',
+        ),
+      worktree: z
+        .boolean()
+        .optional()
+        .describe(
+          "Controls the new task's working mode. Omit it to inherit the parent's working mode and worktree for subtasks, or use the project default for top-level tasks. If true, a subtask reuses its parent's worktree when available; otherwise a new worktree is created. If false, local mode is forced. Use only when explicitly requested by the user.",
+        ),
+      executionMode: z
+        .enum(TaskExecutionMode)
+        .optional()
+        .default(TaskExecutionMode.CreateOnly)
+        .describe(
+          'How to run the new task. create_only (default): only create the task and save the initial prompt without executing it. wait_for_finish: start the task immediately and wait for its prompt to complete before returning. run_in_background: start the task immediately and return right away.',
+        ),
+    }),
+    execute: async (input, { toolCallId }) => {
+      const { prompt, name, agentProfileId, modelId, mode = 'agent', asSubtask = false, autonomyMode, worktree, executionMode } = input;
+      const parentTaskId: string | null | undefined = asSubtask ? task.taskId : 'parentTaskId' in input ? (input.parentTaskId as string | null) : undefined;
+      const resolvedProfile = agentProfileId ? task.getProject().resolveAgentProfile(agentProfileId) : profile;
+
+      if (!resolvedProfile) {
+        const availableProfiles = task
+          .getProject()
+          .getAgentProfiles()
+          .map((p) => `"${p.name}"`)
+          .join(', ');
+        return `Agent profile '${agentProfileId}' not found. Available profiles: ${availableProfiles}`;
+      }
+
+      const effectiveModelId = modelId || `${profile.provider}/${profile.model}`;
+      const [provider, ...modelParts] = effectiveModelId.split('/');
+      const model = modelParts.join('/');
+
+      task.addToolMessage(toolCallId, TASKS_TOOL_GROUP_NAME, TASKS_TOOL_CREATE_TASK, input, undefined, undefined, promptContext);
+
+      const toolName = `${TASKS_TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TASKS_TOOL_CREATE_TASK}`;
+      const questionKey = toolName;
+      const questionText = 'Approve creating a new task?';
+      const questionSubject = `Prompt: ${prompt}\nAgent Profile: ${resolvedProfile.id}\nModel: ${effectiveModelId}\nExecution mode: ${executionMode}${
+        parentTaskId !== undefined ? `\nParent Task ID: ${parentTaskId || 'none (top-level task)'}` : ''
+      }`;
+
+      const [isApproved, userInput] = await approvalManager.handleToolApproval(toolName, input, questionKey, questionText, questionSubject);
+
+      if (!isApproved) {
+        return `Creating task denied by user. Reason: ${userInput}`;
+      }
+
+      try {
+        const updates: Partial<TaskData> = {
+          agentProfileId: resolvedProfile.id,
+          provider,
+          model,
+          mainModel: effectiveModelId,
+        };
+        const newTask = await task.getProject().createNewTask({
+          parentId: parentTaskId || null,
+          name: name || '',
+          autonomyMode,
+          ...(worktree !== undefined && { workingMode: worktree ? 'worktree' : 'local' }),
+          ...updates,
+        });
+
+        // createNewTask returns TaskData, not Task instance
+        // We need to get the actual Task instance to call methods on it
+        const taskInstance = task.getProject().getTask(newTask.id);
+        if (!taskInstance) {
+          throw new Error(`Failed to get task instance for newly created task ${newTask.id}`);
+        }
+
+        await taskInstance.init();
+        await taskInstance.saveTask(updates);
+
+        if (executionMode === TaskExecutionMode.CreateOnly) {
+          await taskInstance.savePromptOnly(prompt, false);
+        } else {
+          const run = taskInstance.runPrompt(prompt, mode, false);
+          if (executionMode === TaskExecutionMode.WaitForFinish) {
+            await run;
+          }
+        }
+
+        const contextMessages = await taskInstance.getContextMessages();
+
+        return {
+          id: newTask.id,
+          name: newTask.name,
+          result:
+            executionMode === TaskExecutionMode.WaitForFinish
+              ? 'Task has been created and executed successfully'
+              : executionMode === TaskExecutionMode.RunInBackground
+                ? 'Task created and started in the background'
+                : 'Task created successfully',
+          ...(executionMode === TaskExecutionMode.WaitForFinish &&
+            contextMessages.length > 0 && {
+              lastMessage: contextMessages[contextMessages.length - 1],
+            }),
+        };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return `Error creating task: ${errorMessage}`;
+      }
+    },
+  });
+
+  const deleteTaskTool = tool({
+    description: TASKS_TOOL_DESCRIPTIONS[TASKS_TOOL_DELETE_TASK],
+    inputSchema: z.object({
+      taskId: z.string().describe('The ID of the task to delete'),
+    }),
+    execute: async (input, { toolCallId }) => {
+      const { taskId } = input;
+      task.addToolMessage(toolCallId, TASKS_TOOL_GROUP_NAME, TASKS_TOOL_DELETE_TASK, { taskId }, undefined, undefined, promptContext);
+
+      const toolName = `${TASKS_TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TASKS_TOOL_DELETE_TASK}`;
+      const questionKey = toolName;
+      const questionText = `Approve deleting task ${taskId}? This action cannot be undone.`;
+
+      const [isApproved, userInput] = await approvalManager.handleToolApproval(toolName, input, questionKey, questionText);
+
+      if (!isApproved) {
+        return `Deleting task denied by user. Reason: ${userInput}`;
+      }
+
+      try {
+        // Prevent deleting the current task
+        if (taskId === task.taskId) {
+          return 'Cannot delete the current task';
+        }
+
+        await task.getProject().deleteTask(taskId);
+        return `Task ${taskId} deleted successfully`;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return `Error deleting task: ${errorMessage}`;
+      }
+    },
+  });
+
+  const runPromptTool = tool({
+    description: TASKS_TOOL_DESCRIPTIONS[TASKS_TOOL_RUN_PROMPT],
+    inputSchema: z.object({
+      taskId: z.string().describe('The ID of the existing task to run the prompt on'),
+      prompt: z.string().describe('The prompt to run on the task'),
+      mode: z.string().optional().describe('Optional mode to use for the prompt. Use only when explicitly requested by the user.'),
+      executeAndWait: z
+        .boolean()
+        .optional()
+        .default(true)
+        .describe('If true (default), the tool will wait for the prompt to complete before returning. If false, the prompt will run in the background.'),
+    }),
+    execute: async (input, { toolCallId }) => {
+      const { taskId, prompt, mode, executeAndWait = true } = input;
+      task.addToolMessage(
+        toolCallId,
+        TASKS_TOOL_GROUP_NAME,
+        TASKS_TOOL_RUN_PROMPT,
+        { taskId, prompt, mode, executeAndWait },
+        undefined,
+        undefined,
+        promptContext,
+      );
+
+      const toolName = `${TASKS_TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TASKS_TOOL_RUN_PROMPT}`;
+      const questionKey = toolName;
+      const questionText = `Approve running prompt on task ${taskId}?`;
+      const questionSubject = `Task ID: ${taskId}\nPrompt: ${prompt}${executeAndWait ? '\nWait for completion: true' : '\nRun in background: true'}`;
+
+      const [isApproved, userInput] = await approvalManager.handleToolApproval(toolName, input, questionKey, questionText, questionSubject);
+
+      if (!isApproved) {
+        return `Running prompt on task denied by user. Reason: ${userInput}`;
+      }
+
+      try {
+        const targetTask = task.getProject().getTask(taskId);
+
+        if (!targetTask) {
+          return `Task with ID ${taskId} not found`;
+        }
+
+        const effectiveMode = mode || targetTask.task.currentMode || 'agent';
+
+        const run = targetTask.runPrompt(prompt, effectiveMode, false);
+        if (executeAndWait) {
+          await run;
+        }
+
+        const taskState = targetTask.task.state;
+        const contextMessages = await targetTask.getContextMessages();
+
+        let resultMessage = executeAndWait ? 'Prompt has been executed successfully' : 'Prompt has been started in the background';
+
+        if (executeAndWait && taskState === DefaultTaskState.Interrupted) {
+          resultMessage = 'Task has been interrupted';
+        } else if (executeAndWait && taskState === DefaultTaskState.Delegated) {
+          resultMessage = 'Task has been delegated to a subagent';
+        }
+
+        return {
+          taskId,
+          result: resultMessage,
+          state: taskState,
+          ...(executeAndWait &&
+            contextMessages.length > 0 && {
+              lastMessage: contextMessages[contextMessages.length - 1],
+            }),
+        };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return `Error running prompt on task: ${errorMessage}`;
+      }
+    },
+  });
+
+  const searchTaskTool = tool({
+    description: TASKS_TOOL_DESCRIPTIONS[TASKS_TOOL_SEARCH_TASK],
+    inputSchema: z.object({
+      taskId: z.string().describe('The ID of the task to search within'),
+      query: z.string().describe('Search query with Elasticsearch syntax. Use + for important terms.'),
+      maxTokens: z.coerce.number().optional().default(10000).describe('Maximum number of tokens to return in the search results. Default: 10000'),
+    }),
+    execute: async (input, { toolCallId }) => {
+      const { taskId, query, maxTokens } = input;
+      task.addToolMessage(toolCallId, TASKS_TOOL_GROUP_NAME, TASKS_TOOL_SEARCH_TASK, { taskId, query, maxTokens }, undefined, undefined, promptContext);
+
+      const toolName = `${TASKS_TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TASKS_TOOL_SEARCH_TASK}`;
+      const questionKey = toolName;
+      const questionText = `Approve searching in task ${taskId}?`;
+      const questionSubject = `Query: ${query}\nTask ID: ${taskId}`;
+
+      const [isApproved, userInput] = await approvalManager.handleToolApproval(toolName, input, questionKey, questionText, questionSubject);
+
+      if (!isApproved) {
+        return `Task search denied by user. Reason: ${userInput}`;
+      }
+
+      try {
+        const targetTask = task.getProject().getTask(taskId);
+
+        if (!targetTask) {
+          return `Task with ID ${taskId} not found`;
+        }
+
+        const contextFilePath = path.join(targetTask.project.baseDir, AIDER_DESK_TASKS_DIR, taskId, 'context.json');
+
+        const exists = await fileExists(contextFilePath);
+        if (!exists) {
+          return `Task context file not found at ${contextFilePath}`;
+        }
+
+        logger.debug(`Searching in task context file: ${contextFilePath}`, {
+          query,
+          maxTokens,
+        });
+
+        const effectiveMaxTokens = maxTokens || 10000;
+
+        const results = await search({
+          query,
+          path: contextFilePath,
+          json: false,
+          maxTokens: effectiveMaxTokens,
+        });
+
+        logger.debug(`Task search results: ${JSON.stringify(results)}`);
+
+        return results;
+      } catch (error: unknown) {
+        if (isAbortError(error)) {
+          return 'Operation was cancelled by user.';
+        }
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.error('Error executing task search command:', error);
+        task.addLogMessage(
+          'error',
+          `Task search failed with error:\n\n${errorMessage}\n\nPlease, consider reporting an issue at https://github.com/hotovo/aider-desk/issues. Thank you.`,
+        );
+        return errorMessage;
+      }
+    },
+  });
+
+  const allTools = {
+    [`${TASKS_TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TASKS_TOOL_LIST_TASKS}`]: listTasksTool,
+    [`${TASKS_TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TASKS_TOOL_GET_TASK}`]: getTaskTool,
+    [`${TASKS_TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TASKS_TOOL_GET_TASK_MESSAGE}`]: getTaskMessageTool,
+    [`${TASKS_TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TASKS_TOOL_CREATE_TASK}`]: createTaskTool,
+    [`${TASKS_TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TASKS_TOOL_DELETE_TASK}`]: deleteTaskTool,
+    [`${TASKS_TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TASKS_TOOL_RUN_PROMPT}`]: runPromptTool,
+    [`${TASKS_TOOL_GROUP_NAME}${TOOL_GROUP_NAME_SEPARATOR}${TASKS_TOOL_SEARCH_TASK}`]: searchTaskTool,
+  };
+
+  const filteredTools: ToolSet = {};
+  for (const [toolId, tool] of Object.entries(allTools)) {
+    if (profile.toolApprovals[toolId] !== ToolApprovalState.Never) {
+      filteredTools[toolId] = tool;
+    }
+  }
+
+  return filteredTools;
+};
+
+/**
+ * Creates the search parent task tool for subtasks.
+ * This tool is not included in the default toolset and should be added
+ * directly in agent.ts's getAvailableTools method when task is a subtask.
+ */
+export const createSearchParentTaskTool = (task: Task, promptContext?: PromptContext): Tool => {
+  return tool({
+    description: TASKS_TOOL_DESCRIPTIONS[TASKS_TOOL_SEARCH_PARENT_TASK],
+    inputSchema: z.object({
+      query: z.string().describe('Search query with Elasticsearch syntax. Use + for important terms.'),
+      maxTokens: z.coerce.number().optional().default(10000).describe('Maximum number of tokens to return in the search results. Default: 10000'),
+    }),
+    execute: async ({ query, maxTokens }, { toolCallId }) => {
+      // Always use parent task ID
+      const parentTaskId = task.task.parentId;
+
+      if (!parentTaskId) {
+        return 'This tool is only available for subtasks. Current task has no parent.';
+      }
+
+      const effectiveMaxTokens = maxTokens || 10000;
+
+      task.addToolMessage(
+        toolCallId,
+        TASKS_TOOL_GROUP_NAME,
+        TASKS_TOOL_SEARCH_PARENT_TASK,
+        { query, maxTokens: effectiveMaxTokens, parentTaskId },
+        undefined,
+        undefined,
+        promptContext,
+      );
+
+      // No approval required for parent task search
+
+      try {
+        const parentTask = task.getProject().getTask(parentTaskId);
+
+        if (!parentTask) {
+          return `Parent task with ID ${parentTaskId} not found`;
+        }
+
+        const contextFilePath = path.join(parentTask.project.baseDir, AIDER_DESK_TASKS_DIR, parentTaskId, 'context.json');
+
+        const exists = await fileExists(contextFilePath);
+        if (!exists) {
+          return `Parent task context file not found at ${contextFilePath}`;
+        }
+
+        logger.debug(`Searching in parent task context file: ${contextFilePath}`, { query, maxTokens: effectiveMaxTokens, parentTaskId });
+
+        const results = await search({
+          query,
+          path: contextFilePath,
+          json: false,
+          maxTokens: effectiveMaxTokens,
+        });
+
+        logger.debug(`Parent task search results: ${JSON.stringify(results)}`);
+
+        return results;
+      } catch (error: unknown) {
+        if (isAbortError(error)) {
+          return 'Operation was cancelled by user.';
+        }
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.error('Error executing parent task search command:', error);
+        task.addLogMessage(
+          'error',
+          `Parent task search failed with error:\n\n${errorMessage}\n\nPlease, consider reporting an issue at https://github.com/hotovo/aider-desk/issues. Thank you.`,
+        );
+        return errorMessage;
+      }
+    },
+  });
+};

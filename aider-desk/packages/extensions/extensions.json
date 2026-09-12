@@ -1,0 +1,651 @@
+{
+  "extensions": [
+    {
+      "id": "binary-files",
+      "name": "Binary Files",
+      "description": "Attaches local binary files to multimodal model requests",
+      "folder": "binary-files",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "tools"
+      ],
+      "installCount": 16
+    },
+    {
+      "id": "wakatime",
+      "name": "WakaTime",
+      "description": "Tracks coding activity by sending heartbeats to WakaTime via wakatime-cli",
+      "file": "wakatime.ts",
+      "type": "single",
+      "capabilities": [
+        "tracking"
+      ],
+      "installCount": 5
+    },
+    {
+      "id": "pirate",
+      "name": "Pirate Agent",
+      "description": "Adds a Pirate agent that speaks like a swashbuckling sea dog",
+      "file": "pirate.ts",
+      "type": "single",
+      "capabilities": [
+        "agents",
+        "example"
+      ],
+      "installCount": 0
+    },
+    {
+      "id": "generate-tests",
+      "name": "Generate Tests",
+      "description": "Adds /generate-tests command to generate unit tests for files",
+      "file": "generate-tests.ts",
+      "type": "single",
+      "capabilities": [
+        "commands",
+        "example"
+      ],
+      "installCount": 8
+    },
+    {
+      "id": "questions",
+      "name": "Questions",
+      "description": "Extract questions from messages and display as interactive questionnaire",
+      "folder": "questions",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "commands",
+        "ui"
+      ],
+      "installCount": 17
+    },
+    {
+      "id": "theme",
+      "name": "Theme Switcher",
+      "description": "Adds /theme command to switch AiderDesk themes",
+      "file": "theme.ts",
+      "type": "single",
+      "capabilities": [
+        "commands"
+      ],
+      "installCount": 0
+    },
+    {
+      "id": "plan-mode",
+      "name": "Plan Mode",
+      "description": "Adds a Plan mode that enforces planning before coding",
+      "file": "plan-mode.ts",
+      "type": "single",
+      "capabilities": [
+        "modes"
+      ],
+      "installCount": 40
+    },
+    {
+      "id": "protected-paths",
+      "name": "Protected Paths",
+      "description": "Blocks file operations on sensitive files and protected directories (.env*, *.pem, .ssh/, .aws/, .git/, system dirs, etc.)",
+      "folder": "protected-paths",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "security"
+      ],
+      "installCount": 12
+    },
+    {
+      "id": "permission-gate",
+      "name": "Permission Gate",
+      "description": "Prompts for confirmation before running dangerous bash commands",
+      "file": "permission-gate.ts",
+      "type": "single",
+      "capabilities": [
+        "security"
+      ],
+      "installCount": 15
+    },
+    {
+      "id": "ultrathink",
+      "name": "Ultrathink",
+      "description": "Detects 'ultrathink' / 'think hard' and increases reasoning effort",
+      "file": "ultrathink.ts",
+      "type": "single",
+      "capabilities": [
+        "optimization"
+      ],
+      "installCount": 19
+    },
+    {
+      "id": "external-rules",
+      "name": "External Rules",
+      "description": "Includes rule files from Cursor, Claude Code, and Roo Code",
+      "folder": "external-rules",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "context"
+      ],
+      "installCount": 13
+    },
+    {
+      "id": "external-skills",
+      "name": "External Skills",
+      "description": "Includes skill files from Cursor, Claude Code, and other external AI coding assistants",
+      "folder": "external-skills",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "context"
+      ],
+      "installCount": 29
+    },
+    {
+      "id": "learn",
+      "name": "Learn",
+      "description": "Adds /learn command that creates reusable skills from any source — directories, URLs, conversation history, or pasted notes",
+      "folder": "learn",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "commands",
+        "tools"
+      ],
+      "installCount": 32
+    },
+    {
+      "id": "legacy-system-prompt",
+      "name": "Legacy System Prompt",
+      "description": "Restores the verbose pre-optimization system prompt and workflow — ideal for less capable models",
+      "folder": "legacy-system-prompt",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "context"
+      ],
+      "installCount": 5
+    },
+    {
+      "id": "sound-notification",
+      "name": "Sound Notification",
+      "description": "Plays sound notifications using packs from og-packs",
+      "folder": "sound-notification",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "notifications"
+      ],
+      "installCount": 11
+    },
+    {
+      "id": "sandbox",
+      "name": "Sandbox",
+      "description": "OS-level sandboxing for bash commands using @anthropic-ai/sandbox-runtime",
+      "folder": "sandbox",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "security"
+      ],
+      "supportedOS": [
+        "linux",
+        "macos"
+      ],
+      "installCount": 4
+    },
+    {
+      "id": "rtk",
+      "name": "RTK Auto-Rewrite",
+      "description": "Rewrites shell commands to RTK equivalents, reducing token usage by 60-90%",
+      "folder": "rtk",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "optimization",
+        "commands"
+      ],
+      "supportedOS": [
+        "linux",
+        "macos"
+      ],
+      "installCount": 9
+    },
+    {
+      "id": "redact-secrets",
+      "name": "Redact Secrets",
+      "description": "Redacts secrets from file read results using regex patterns and .env* file values",
+      "folder": "redact-secrets",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "security"
+      ],
+      "installCount": 8
+    },
+    {
+      "id": "chunkhound-search",
+      "name": "ChunkHound Search",
+      "description": "Provides chunkhound-search tool for semantic code search",
+      "folder": "chunkhound-search",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "search"
+      ],
+      "installCount": 5
+    },
+    {
+      "id": "chunkhound-on-semantic-search-tool",
+      "name": "ChunkHound Semantic Search Override",
+      "description": "Overrides power---semantic_search to use ChunkHound for better semantic understanding",
+      "folder": "chunkhound-on-semantic-search-tool",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "search"
+      ],
+      "installCount": 5
+    },
+    {
+      "id": "tree-sitter-repo-map",
+      "name": "Tree-Sitter Repo Map",
+      "description": "Enhanced repository map using tree-sitter parsing with PageRank-based symbol ranking",
+      "folder": "tree-sitter-repo-map",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "context",
+        "commands"
+      ],
+      "installCount": 24
+    },
+    {
+      "id": "context-autocompletion-words",
+      "name": "Context Autocompletion Words",
+      "description": "Automatically extracts symbols from context files and adds them to autocompletion",
+      "folder": "context-autocompletion-words",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "context"
+      ],
+      "installCount": 6
+    },
+    {
+      "id": "lsp",
+      "name": "LSP Integration",
+      "description": "Language Server Protocol integration for code intelligence and error detection",
+      "folder": "lsp",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "tools",
+        "code-intelligence"
+      ],
+      "installCount": 31
+    },
+    {
+      "id": "plannotator",
+      "name": "Plannotator",
+      "description": "Plan-based development workflow with visual review",
+      "folder": "plannotator",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "modes",
+        "tools",
+        "commands",
+        "workflows"
+      ],
+      "installCount": 8
+    },
+    {
+      "id": "programmatic-tool-calls",
+      "name": "Programmatic Tool Calls",
+      "description": "Execute JavaScript code in a sandbox with access to all tools as async functions",
+      "folder": "programmatic-tool-calls",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "tools"
+      ],
+      "installCount": 10
+    },
+    {
+      "id": "ui-placement-demo",
+      "name": "UI Placement Demo",
+      "description": "Demonstrates all available UI component placement locations in AiderDesk",
+      "file": "ui-placement-demo.ts",
+      "type": "single",
+      "capabilities": [
+        "ui",
+        "example"
+      ],
+      "installCount": 3
+    },
+    {
+      "id": "multi-model-run",
+      "name": "Multi-Model Run",
+      "description": "Run the same prompt across multiple models simultaneously",
+      "folder": "multi-model-run",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "ui",
+        "workflows"
+      ],
+      "installCount": 5
+    },
+    {
+      "id": "providers-quota-extension",
+      "name": "Providers Quota",
+      "description": "Displays API quota information for Synthetic and Z.AI providers in the task status bar",
+      "folder": "providers-quota-extension",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "ui"
+      ],
+      "installCount": 1
+    },
+    {
+      "id": "openai-codex",
+      "name": "OpenAI Codex Auth",
+      "description": "OpenAI Codex provider using ChatGPT Plus/Pro OAuth authentication",
+      "folder": "openai-codex",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "providers"
+      ],
+      "installCount": 17
+    },
+    {
+      "id": "fff",
+      "name": "FFF",
+      "description": "Fast file content search using FFF (Freakin Fast File Finder) — replaces the internal grep tool",
+      "folder": "fff",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "tools",
+        "search"
+      ],
+      "supportedOS": [
+        "linux",
+        "macos"
+      ],
+      "installCount": 16
+    },
+    {
+      "id": "searxng-search",
+      "name": "SearXNG Search",
+      "description": "Web search tool using SearXNG with auto-starting Docker container support",
+      "folder": "searxng-search",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "tools",
+        "search"
+      ],
+      "installCount": 7
+    },
+    {
+      "id": "seek",
+      "name": "Seek",
+      "description": "Fast ranked code search using seek (zoekt) — replaces the internal grep tool",
+      "folder": "seek",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "tools",
+        "search"
+      ],
+      "supportedOS": [
+        "linux",
+        "macos"
+      ],
+      "installCount": 2
+    },
+    {
+      "id": "tps-counter",
+      "name": "TPS Counter",
+      "description": "Displays tokens per second for agent responses with UI components in usage info and message bar",
+      "folder": "tps-counter",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "metrics"
+      ],
+      "installCount": 37
+    },
+    {
+      "id": "verifier",
+      "name": "Verifier",
+      "description": "Adds a 'Proceed & Verify' button that starts implementation with automatic review against the plan, with configurable max retries",
+      "folder": "verifier",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "workflows",
+        "ui"
+      ],
+      "installCount": 17
+    },
+    {
+      "id": "bmad",
+      "name": "BMAD Method",
+      "description": "Integrates a standard bmad-method installation into BMAD mode: discovers the method's own menu, starts original skills, tracks progress",
+      "folder": "bmad",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "modes",
+        "ui"
+      ],
+      "installCount": 6
+    },
+    {
+      "id": "claude-agent-sdk",
+      "name": "Claude Agent SDK",
+      "description": "Integrates the Claude Agent SDK as a provider, using Claude Code CLI for agent mode",
+      "folder": "claude-agent-sdk",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "providers",
+        "agent-loop"
+      ],
+      "installCount": 10
+    },
+    {
+      "id": "auggie-sdk",
+      "name": "Auggie SDK",
+      "description": "Integrates the Auggie SDK as a provider using the Augment platform",
+      "folder": "auggie-sdk",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "providers"
+      ],
+      "installCount": 0
+    },
+    {
+      "id": "cursor",
+      "name": "Cursor",
+      "description": "Integrates Cursor as a provider via a local OpenAI-compatible proxy with full tool approval control",
+      "folder": "cursor",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "providers"
+      ],
+      "installCount": 2
+    },
+    {
+      "id": "cursor-sdk",
+      "name": "Cursor SDK",
+      "description": "Integrates the Cursor SDK as a provider with cursor-sdk/ prefix, overriding the agent loop to run Cursor agents",
+      "folder": "cursor-sdk",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "providers",
+        "agent-loop"
+      ],
+      "installCount": 4
+    },
+    {
+      "id": "github-copilot",
+      "name": "GitHub Copilot",
+      "description": "Integrates GitHub Copilot as an LLM provider using the official Copilot SDK (Copilot CLI). Agent mode only",
+      "folder": "github-copilot",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "providers",
+        "agent-loop"
+      ],
+      "installCount": 4
+    },
+    {
+      "id": "checkpoints",
+      "name": "Checkpoints",
+      "description": "Git-based checkpoints for file edits — revert to the state before any edit",
+      "folder": "checkpoints",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "events",
+        "ui"
+      ],
+      "installCount": 15
+    },
+    {
+      "id": "codegraph",
+      "name": "CodeGraph",
+      "description": "Code intelligence using CodeGraph — symbol search, call graph tracing, impact analysis, and context building",
+      "folder": "codegraph",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "tools",
+        "search"
+      ],
+      "installCount": 25
+    },
+    {
+      "id": "kanban",
+      "name": "Kanban Board",
+      "description": "Kanban board for project tasks, grouped by state with auto-updating columns",
+      "folder": "kanban",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "ui"
+      ],
+      "installCount": 22
+    },
+    {
+      "id": "doom",
+      "name": "Doom",
+      "description": "Play DOOM in a floating panel",
+      "folder": "doom",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "ui"
+      ],
+      "installCount": 2
+    },
+    {
+      "id": "my-minions",
+      "name": "My Minions",
+      "description": "Adds Orchestrator and Minion agent profiles — a coordinator that delegates all work to a focused execution subagent",
+      "folder": "my-minions",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "agents",
+        "example"
+      ],
+      "installCount": 20
+    },
+    {
+      "id": "wigolo",
+      "name": "wigolo",
+      "description": "Local-first web search, fetch, crawl & research tools powered by wigolo — no API keys required",
+      "folder": "wigolo",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "tools",
+        "search"
+      ],
+      "installCount": 25
+    },
+    {
+      "id": "destructive-command-guard",
+      "name": "Destructive Command Guard",
+      "description": "Blocks dangerous git and shell commands from being executed by agents using dcg",
+      "folder": "destructive-command-guard",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "security",
+        "commands"
+      ],
+      "installCount": 15
+    },
+    {
+      "id": "git-log",
+      "name": "Git Log",
+      "description": "Browse the git history of open projects with an IntelliJ IDEA-style log viewer",
+      "folder": "git-log",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "ui"
+      ],
+      "installCount": 18
+    },
+    {
+      "id": "skill-gallery",
+      "name": "Skill Gallery",
+      "description": "Browse and install Claude Skills from popular skill repositories (Anthropic Official, Awesome Claude Skills)",
+      "folder": "skill-gallery",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "ui"
+      ],
+      "installCount": 53
+    },
+    {
+      "id": "task-scheduler",
+      "name": "Task Scheduler",
+      "description": "Schedule tasks to run automatically on a cron or periodic basis",
+      "folder": "task-scheduler",
+      "type": "folder",
+      "hasDependencies": true,
+      "capabilities": [
+        "ui",
+        "commands",
+        "events"
+      ],
+      "installCount": 14
+    },
+    {
+      "id": "reasoning-selector",
+      "name": "Reasoning Selector",
+      "description": "Adds a reasoning effort selector dropdown next to the model selector in agent mode",
+      "folder": "reasoning-selector",
+      "type": "folder",
+      "hasDependencies": false,
+      "capabilities": [
+        "ui"
+      ],
+      "installCount": 41
+    }
+  ]
+}

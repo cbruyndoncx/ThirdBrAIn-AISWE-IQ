@@ -1,0 +1,242 @@
+import { ProjectContextImpl } from './project-context';
+import { TaskContextImpl } from './task-context';
+
+import type { DisposableStore } from './disposable-store';
+import type { ElectronApp, ExtensionContext, MemoryContext, ProjectContext, TaskContext } from '@common/extensions';
+import type { McpServerConfig, Model, ProviderProfile, SettingsData } from '@common/types';
+import type { McpConfigManager } from '@/agent/mcp-config-manager';
+import type { EventManager } from '@/events';
+import type { MemoryManager } from '@/memory/memory-manager';
+import type { ModelManager } from '@/models';
+import type { Project } from '@/project';
+import type { Store } from '@/store';
+import type { Task } from '@/task';
+
+import logger from '@/logger';
+import { truncateToolResult } from '@/agent/utils';
+import { openUrl as openUrlUtil } from '@/utils/open-url';
+
+export class ExtensionContextImpl implements ExtensionContext {
+  private readonly taskContext: TaskContext | null;
+  private readonly projectContext: ProjectContext | null;
+  private readonly disposableStore: DisposableStore;
+
+  constructor(
+    private readonly extensionId: string,
+    private readonly extensionName: string,
+    disposableStore: DisposableStore,
+    private readonly store?: Store,
+    private readonly modelManager?: ModelManager,
+    private readonly eventManager?: EventManager,
+    private readonly memoryManager?: MemoryManager,
+    private readonly project?: Project,
+    private readonly task?: Task,
+    private readonly mcpConfigManager?: McpConfigManager,
+  ) {
+    this.disposableStore = disposableStore;
+    this.taskContext = this.task ? new TaskContextImpl(this.task) : null;
+    this.projectContext = this.project ? new ProjectContextImpl(this.project, disposableStore) : null;
+  }
+
+  addDisposable(setup: () => (() => void | Promise<void>) | void): void {
+    const cleanup = setup();
+    if (typeof cleanup !== 'function') {
+      return;
+    }
+    this.disposableStore.addExtensionDisposable(cleanup);
+  }
+
+  log(message: string, type: 'info' | 'error' | 'warn' | 'debug' = 'info'): void {
+    const logFn = logger[type];
+    logFn(`[Extension:${this.extensionName}] ${message}`);
+  }
+
+  getProjectDir(): string {
+    return this.project?.baseDir ?? '';
+  }
+
+  getOpenProjectDirs(): string[] {
+    if (!this.store) {
+      return [];
+    }
+    try {
+      return this.store.getOpenProjects().map((project) => project.baseDir);
+    } catch (error) {
+      this.log(`Failed to get open project dirs: ${error}`, 'error');
+      return [];
+    }
+  }
+
+  getTaskContext(): TaskContext | null {
+    return this.taskContext;
+  }
+
+  getProjectContext(): ProjectContext {
+    if (!this.projectContext) {
+      throw new Error('Project context not available');
+    }
+    return this.projectContext;
+  }
+
+  async getModelConfigs(): Promise<Model[]> {
+    if (!this.modelManager) {
+      this.log('ModelManager not available, returning empty model configs', 'warn');
+      return [];
+    }
+    try {
+      const providerModelsData = await this.modelManager.getProviderModels();
+      return providerModelsData.models || [];
+    } catch (error) {
+      this.log(`Failed to get model configs: ${error}`, 'error');
+      return [];
+    }
+  }
+
+  getProviders(): ProviderProfile[] {
+    if (!this.modelManager) {
+      this.log('ModelManager not available, returning empty providers', 'warn');
+      return [];
+    }
+    try {
+      return this.modelManager.getProviders();
+    } catch (error) {
+      this.log(`Failed to get providers: ${error}`, 'error');
+      return [];
+    }
+  }
+
+  async getMcpServers(projectDir?: string): Promise<Record<string, McpServerConfig>> {
+    if (!this.mcpConfigManager) {
+      this.log('McpConfigManager not available, returning empty MCP servers', 'warn');
+      return {};
+    }
+    try {
+      return this.mcpConfigManager.getMergedServers(projectDir ?? this.project?.baseDir);
+    } catch (error) {
+      this.log(`Failed to get MCP servers: ${error}`, 'error');
+      return {};
+    }
+  }
+
+  async getSetting(key: string): Promise<unknown> {
+    if (!this.store) {
+      throw new Error('Store not available');
+    }
+    try {
+      const settings = this.store.getSettings();
+      return key.split('.').reduce<unknown>((obj: unknown, k: string) => {
+        if (obj && typeof obj === 'object') {
+          return (obj as Record<string, unknown>)[k];
+        }
+        return undefined;
+      }, settings);
+    } catch (error) {
+      this.log(`Failed to get setting '${key}': ${error}`, 'error');
+      throw error;
+    }
+  }
+
+  async updateSettings(updates: Partial<SettingsData>): Promise<void> {
+    if (!this.store) {
+      throw new Error('Store not available');
+    }
+    try {
+      const currentSettings = this.store.getSettings();
+      const newSettings = { ...currentSettings, ...updates };
+      this.store.saveSettings(newSettings);
+      this.eventManager?.sendSettingsUpdated(newSettings);
+    } catch (error) {
+      this.log(`Failed to update settings: ${error}`, 'error');
+      throw error;
+    }
+  }
+
+  triggerUIDataRefresh(componentId?: string, taskId?: string): void {
+    if (!this.eventManager) {
+      this.log('EventManager not available, cannot trigger UI data refresh', 'warn');
+      return;
+    }
+    this.log(`Triggering UI data refresh for component: ${componentId}, task: ${taskId}`, 'debug');
+    this.eventManager.sendExtensionUIRefresh({
+      projectDir: this.project?.baseDir,
+      extensionId: this.extensionId,
+      componentId,
+      taskId,
+    });
+  }
+
+  triggerUIComponentsReload(): void {
+    if (!this.eventManager) {
+      this.log('EventManager not available, cannot trigger UI components reload', 'warn');
+      return;
+    }
+    this.log('Triggering UI components reload', 'debug');
+    this.eventManager.sendExtensionUIRefresh({
+      projectDir: this.project?.baseDir,
+      extensionId: this.extensionId,
+      reloadComponents: true,
+    });
+  }
+
+  async openUrl(url: string, target: 'external' | 'window' | 'modal-overlay' = 'window'): Promise<void> {
+    this.log(`Opening URL: ${url} (target: ${target})`);
+    try {
+      if (target === 'modal-overlay') {
+        if (!this.eventManager) {
+          this.log('EventManager not available, cannot open URL in modal overlay', 'warn');
+          return;
+        }
+        this.eventManager.sendModalOverlayUrl(url);
+      } else {
+        await openUrlUtil(url, target);
+      }
+    } catch (error) {
+      this.log(`Failed to open URL: ${error}`, 'error');
+      throw error;
+    }
+  }
+
+  async openPath(path: string): Promise<boolean> {
+    this.log(`Opening path: ${path}`);
+    try {
+      const { shell } = await import('electron');
+      await shell.openPath(path);
+      return true;
+    } catch (error) {
+      this.log(`Failed to open path: ${error}`, 'error');
+      return false;
+    }
+  }
+
+  async getElectronApp(): Promise<ElectronApp | null> {
+    try {
+      const electron = await import('electron');
+      const app = electron?.app ?? electron?.default?.app;
+      if (!app || typeof app.getAppMetrics !== 'function') {
+        return null;
+      }
+      return app as ElectronApp;
+    } catch (error) {
+      this.log(`Failed to get Electron app: ${error}`, 'debug');
+      return null;
+    }
+  }
+
+  getMemoryContext(): MemoryContext {
+    if (!this.memoryManager) {
+      throw new Error('MemoryManager not available');
+    }
+    return this.memoryManager;
+  }
+
+  async truncateToolResult(
+    content: string,
+    maxLines?: number,
+    maxSizeKB?: number,
+    maxTokens?: number,
+    saveToFile?: boolean,
+    truncationSuffix?: string,
+  ): Promise<string> {
+    return truncateToolResult(content, maxLines, maxSizeKB, maxTokens, saveToFile, truncationSuffix);
+  }
+}

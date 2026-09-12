@@ -1,0 +1,168 @@
+import { useCallback, useEffect } from 'react';
+import { v4 as uuidv4 } from 'uuid';
+import { isResponseMessage } from '@common/types';
+
+import type { ResponseChunkData, ResponseCompletedData, Message, ReflectedMessage, ResponseMessage } from '@common/types';
+
+import { useApi } from '@/contexts/ApiContext';
+import { setMessages, touchTaskActivity } from '@/stores/taskStore';
+
+const processingResponseMessageMap = new Map<string, ResponseMessage>();
+
+export const cleanupProcessingResponseMessage = (taskId: string) => {
+  processingResponseMessageMap.delete(taskId);
+};
+
+export const useTaskResponseHandlers = (baseDir: string, taskId: string) => {
+  const api = useApi();
+
+  const handleResponseChunk = useCallback(
+    ({ messageId, chunk, reasoning, reflectedMessage, promptContext }: ResponseChunkData) => {
+      touchTaskActivity(taskId);
+      const timestamp = Date.now();
+      let processingMessage = processingResponseMessageMap.get(taskId);
+      if (processingMessage?.id === messageId) {
+        processingMessage = {
+          ...processingMessage,
+          content: processingMessage.content + chunk,
+          reasoning: reasoning ? (processingMessage.reasoning || '') + reasoning : processingMessage.reasoning,
+          promptContext,
+        };
+        processingResponseMessageMap.set(taskId, processingMessage);
+        setMessages(taskId, (prevMessages) =>
+          prevMessages.map((message) => {
+            if (message.id === messageId && isResponseMessage(message)) {
+              return {
+                ...message,
+                content: message.content + chunk,
+                reasoning: reasoning ? (message.reasoning || '') + reasoning : message.reasoning,
+                promptContext,
+              };
+            }
+            return message;
+          }),
+        );
+      } else {
+        setMessages(taskId, (prevMessages) => {
+          const existingMessageIndex = prevMessages.findIndex((message) => message.id === messageId);
+          const newMessages: Message[] = [];
+
+          if (reflectedMessage) {
+            const reflected: ReflectedMessage = {
+              id: uuidv4(),
+              type: 'reflected-message',
+              content: reflectedMessage,
+              responseMessageId: messageId,
+              promptContext,
+            };
+
+            newMessages.push(reflected);
+          }
+
+          if (existingMessageIndex === -1) {
+            const newResponseMessage: ResponseMessage = {
+              id: messageId,
+              type: 'response',
+              content: chunk,
+              reasoning: reasoning || undefined,
+              promptContext,
+              timestamp,
+            };
+            processingResponseMessageMap.set(taskId, newResponseMessage);
+            newMessages.push(newResponseMessage);
+
+            return prevMessages.filter((message) => message.type !== 'loading').concat(...newMessages);
+          } else {
+            return prevMessages.map((message) => {
+              if (message.id === messageId && isResponseMessage(message)) {
+                return {
+                  ...message,
+                  content: message.content + chunk,
+                  reasoning: reasoning ? (message.reasoning || '') + reasoning : message.reasoning,
+                  promptContext,
+                };
+              }
+              return message;
+            });
+          }
+        });
+      }
+    },
+    [taskId],
+  );
+
+  const handleResponseCompleted = useCallback(
+    ({ messageId, usageReport, content, reasoning, reflectedMessage, promptContext, timestamp }: ResponseCompletedData) => {
+      touchTaskActivity(taskId);
+      const processingMessage = processingResponseMessageMap.get(taskId);
+
+      if (content) {
+        setMessages(taskId, (prevMessages) => {
+          const responseMessage = prevMessages.find((message) => message.id === messageId) as ResponseMessage | undefined;
+          if (responseMessage) {
+            return prevMessages.map((message) =>
+              message.id === messageId
+                ? {
+                    ...responseMessage,
+                    content,
+                    reasoning,
+                    finished: true,
+                    usageReport,
+                    promptContext,
+                    timestamp,
+                  }
+                : message,
+            );
+          } else {
+            const messages: Message[] = [];
+            if (reflectedMessage) {
+              const reflected: ReflectedMessage = {
+                id: uuidv4(),
+                type: 'reflected-message',
+                content: reflectedMessage,
+                responseMessageId: messageId,
+                promptContext,
+              };
+              messages.push(reflected);
+            }
+
+            const newResponseMessage: ResponseMessage = {
+              id: messageId,
+              type: 'response',
+              content,
+              reasoning,
+              usageReport,
+              promptContext,
+              finished: true,
+              timestamp,
+            };
+            messages.push(newResponseMessage);
+
+            return prevMessages.filter((message) => message.type !== 'loading').concat(...messages);
+          }
+        });
+      } else if (processingMessage && processingMessage.id === messageId) {
+        processingMessage.usageReport = usageReport;
+        processingMessage.promptContext = promptContext;
+        processingMessage.content = content || processingMessage.content;
+        processingMessage.reasoning = reasoning || processingMessage.reasoning;
+        setMessages(taskId, (prevMessages) => prevMessages.map((message) => (message.id === messageId ? processingMessage : message)));
+      } else {
+        setMessages(taskId, (prevMessages) => prevMessages.filter((message) => message.type !== 'loading'));
+      }
+
+      processingResponseMessageMap.delete(taskId);
+    },
+    [taskId],
+  );
+
+  useEffect(() => {
+    const removeChunk = api.addResponseChunkListener(baseDir, taskId, handleResponseChunk);
+    const removeCompleted = api.addResponseCompletedListener(baseDir, taskId, handleResponseCompleted);
+
+    return () => {
+      removeChunk();
+      removeCompleted();
+    };
+  }, [api, baseDir, taskId, handleResponseChunk, handleResponseCompleted]);
+};

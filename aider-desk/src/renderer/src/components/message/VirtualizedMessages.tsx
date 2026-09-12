@@ -1,0 +1,390 @@
+import { forwardRef, memo, RefObject, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { toPng } from 'html-to-image';
+import { MdKeyboardDoubleArrowDown } from 'react-icons/md';
+import { useTranslation } from 'react-i18next';
+import { LegendList, type LegendListRef } from '@legendapp/list/react';
+import { GroupMessage, isUserMessage, Message, MessageViewMode } from '@common/types';
+import { twMerge } from 'tailwind-merge';
+
+import { MessageBlockWrapper } from './MessageBlockWrapper';
+
+import { IconButton } from '@/components/common/IconButton';
+import { groupAssistantMessages, groupMessagesByPromptContext } from '@/components/message/utils';
+import { useUserMessageNavigation } from '@/hooks/useUserMessageNavigation';
+import { useSettingsStore } from '@/stores/settingsStore';
+
+export type VirtualizedMessagesRef = {
+  exportToImage: () => void;
+  container: HTMLDivElement | null;
+  scrollToBottom: () => void;
+};
+
+type Props = {
+  baseDir: string;
+  taskId: string;
+  inProgress: boolean;
+  messages: Message[];
+  allFiles?: string[];
+  renderMarkdown: boolean;
+  removeMessage?: (message: Message) => void;
+  removeGroup?: (group: GroupMessage) => void;
+  redoUserPrompt?: (messageId: string) => void;
+  editUserMessage?: (messageId: string, content: string, images?: string[]) => void;
+  onInterrupt?: () => void;
+  onForkFromMessage?: (message: Message) => void;
+  onRemoveUpToMessage?: (message: Message) => void;
+};
+
+const VirtualizedMessagesComponent = forwardRef<VirtualizedMessagesRef, Props>(
+  (
+    {
+      baseDir,
+      taskId,
+      inProgress,
+      messages,
+      allFiles = [],
+      renderMarkdown,
+      removeMessage,
+      removeGroup,
+      redoUserPrompt,
+      editUserMessage,
+      onInterrupt,
+      onForkFromMessage,
+      onRemoveUpToMessage,
+    },
+    ref,
+  ) => {
+    const { t } = useTranslation();
+    const messageViewMode = useSettingsStore((state) => state.settings?.messageViewMode);
+    const listRef = useRef<LegendListRef>(null);
+    const [scrollContainer, setScrollContainer] = useState<HTMLDivElement | null>(null);
+    const isCompactMode = messageViewMode === MessageViewMode.Compact;
+
+    const processedMessages = useMemo(() => {
+      const grouped = groupMessagesByPromptContext(messages);
+      return isCompactMode ? groupAssistantMessages(grouped) : grouped;
+    }, [messages, isCompactMode]);
+
+    const [messagesLength, setMessagesLength] = useState(processedMessages.length);
+    if (messagesLength !== processedMessages.length) {
+      setMessagesLength(processedMessages.length);
+    }
+
+    const [scrollingPaused, setScrollingPaused] = useState(false);
+    const scrollingPausedRef = useRef(false);
+    const isProgrammaticScrollRef = useRef(false);
+    const prevScrollTopRef = useRef(0);
+    const pointerDownRef = useRef(false);
+
+    const updateScrollingPaused = useCallback((paused: boolean) => {
+      scrollingPausedRef.current = paused;
+      setScrollingPaused(paused);
+    }, []);
+
+    const handleListRef = useCallback((node: LegendListRef | null) => {
+      listRef.current = node;
+      const element = node?.getScrollableNode();
+      prevScrollTopRef.current = element?.scrollTop ?? 0;
+      setScrollContainer(element ? (element as HTMLDivElement) : null);
+    }, []);
+
+    const scrollContainerRef = useMemo(() => ({ current: scrollContainer }) as RefObject<HTMLDivElement | null>, [scrollContainer]);
+
+    useEffect(() => {
+      const element = scrollContainer;
+      if (!element) {
+        return;
+      }
+
+      const isMoreThanThresholdFromBottom = () => {
+        return element.scrollHeight - element.scrollTop - element.clientHeight > 30;
+      };
+
+      const handleWheel = (e: WheelEvent) => {
+        e.stopPropagation();
+        if (e.deltaY < 0 && isMoreThanThresholdFromBottom()) {
+          updateScrollingPaused(true);
+        }
+      };
+
+      const handleTouchStart = (e: TouchEvent) => {
+        const touch = e.touches[0];
+        (element as HTMLElement & { dataset: DOMStringMap }).dataset.touchStartY = touch.clientY.toString();
+      };
+
+      const handleTouchMove = (e: TouchEvent) => {
+        const touch = e.touches[0];
+        const touchStartY = (element as HTMLElement & { dataset: DOMStringMap }).dataset.touchStartY
+          ? parseFloat((element as HTMLElement & { dataset: DOMStringMap }).dataset.touchStartY!)
+          : touch.clientY;
+        if (Math.abs(touch.clientY - touchStartY) > 10 && isMoreThanThresholdFromBottom()) {
+          updateScrollingPaused(true);
+        }
+      };
+
+      const handlePointerDown = () => {
+        pointerDownRef.current = true;
+      };
+
+      const handlePointerUp = () => {
+        pointerDownRef.current = false;
+      };
+
+      element.addEventListener('wheel', handleWheel);
+      element.addEventListener('touchstart', handleTouchStart, { passive: true });
+      element.addEventListener('touchmove', handleTouchMove, { passive: true });
+      element.addEventListener('pointerdown', handlePointerDown);
+      window.addEventListener('pointerup', handlePointerUp);
+      window.addEventListener('pointercancel', handlePointerUp);
+
+      return () => {
+        element.removeEventListener('wheel', handleWheel);
+        element.removeEventListener('touchstart', handleTouchStart);
+        element.removeEventListener('touchmove', handleTouchMove);
+        element.removeEventListener('pointerdown', handlePointerDown);
+        window.removeEventListener('pointerup', handlePointerUp);
+        window.removeEventListener('pointercancel', handlePointerUp);
+      };
+    }, [scrollContainer, updateScrollingPaused]);
+
+    useEffect(() => {
+      const element = scrollContainer;
+      const content = element?.querySelector('.legend-list-content-container') as HTMLElement | null;
+      if (!element || !content) {
+        return;
+      }
+
+      const scrollToEndIfFollowing = () => {
+        const tempPaddingBottom = parseFloat(content.style.paddingBottom) || 0;
+        const effectiveScrollHeight = element.scrollHeight - tempPaddingBottom;
+
+        if (effectiveScrollHeight <= element.clientHeight) {
+          updateScrollingPaused(false);
+        }
+        if (!scrollingPausedRef.current) {
+          const target = effectiveScrollHeight - element.clientHeight;
+          if (Math.abs(element.scrollTop - target) > 2) {
+            isProgrammaticScrollRef.current = true;
+            element.scrollTop = target;
+          }
+        }
+      };
+
+      const innerContent = content.firstElementChild;
+      const observer = new ResizeObserver(scrollToEndIfFollowing);
+      observer.observe(innerContent || content);
+      observer.observe(element);
+
+      return () => {
+        observer.disconnect();
+      };
+    }, [scrollContainer, updateScrollingPaused]);
+
+    useLayoutEffect(() => {
+      const element = listRef.current?.getScrollableNode();
+      if (!element || scrollingPausedRef.current) {
+        return;
+      }
+      const content = element.querySelector('.legend-list-content-container') as HTMLElement | null;
+      const tempPaddingBottom = parseFloat(content?.style.paddingBottom ?? '') || 0;
+      const target = element.scrollHeight - element.clientHeight - tempPaddingBottom;
+      if (Math.abs(element.scrollTop - target) > 2) {
+        isProgrammaticScrollRef.current = true;
+        element.scrollTop = target;
+      }
+    }, [processedMessages]);
+
+    const handleScrollState = useCallback(() => {
+      const element = scrollContainer;
+      if (!element) {
+        return;
+      }
+      const scrollTop = element.scrollTop;
+      const scrolledUp = scrollTop < prevScrollTopRef.current - 1;
+      prevScrollTopRef.current = scrollTop;
+      if (isProgrammaticScrollRef.current) {
+        isProgrammaticScrollRef.current = false;
+        return;
+      }
+      const content = element.querySelector('.legend-list-content-container') as HTMLElement | null;
+      const tempPaddingBottom = parseFloat(content?.style.paddingBottom ?? '') || 0;
+      const distanceFromEnd = element.scrollHeight - tempPaddingBottom - scrollTop - element.clientHeight;
+      if (distanceFromEnd <= 2) {
+        updateScrollingPaused(false);
+      } else if (scrolledUp && distanceFromEnd > 30 && pointerDownRef.current) {
+        updateScrollingPaused(true);
+      }
+    }, [scrollContainer, updateScrollingPaused]);
+
+    const scrollToBottom = useCallback(() => {
+      updateScrollingPaused(false);
+      void listRef.current?.scrollToEnd({ animated: false });
+    }, [updateScrollingPaused]);
+
+    const userMessageIds = useMemo(() => {
+      return processedMessages.filter(isUserMessage).map((message) => message.id);
+    }, [processedMessages]);
+
+    const userMessageIndices = useMemo(() => {
+      const indices: number[] = [];
+      processedMessages.forEach((message, index) => {
+        if (isUserMessage(message)) {
+          indices.push(index);
+        }
+      });
+      return indices;
+    }, [processedMessages]);
+
+    const getVisibleRange = useCallback(() => {
+      const state = listRef.current?.getState();
+      return state ? { startIndex: state.start, endIndex: state.end } : null;
+    }, []);
+
+    const scrollToUserMessageIndex = useCallback(
+      (index: number) => {
+        isProgrammaticScrollRef.current = true;
+        updateScrollingPaused(true);
+        void listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0 });
+      },
+      [updateScrollingPaused],
+    );
+
+    const { hasPreviousUserMessage, hasNextUserMessage, renderGoToPrevious, renderGoToNext } = useUserMessageNavigation({
+      containerRef: scrollContainerRef,
+      userMessageIds,
+      userMessageIndices,
+      getVisibleRange,
+      scrollToIndex: scrollToUserMessageIndex,
+      buttonClassName: 'hidden group-hover:block',
+    });
+
+    const exportToImage = async () => {
+      const scrollNode = listRef.current?.getScrollableNode();
+      if (!scrollNode) {
+        return;
+      }
+
+      try {
+        const dataUrl = await toPng(scrollNode, {
+          cacheBust: true,
+          height: scrollNode.scrollHeight,
+        });
+        const link = document.createElement('a');
+        link.download = `session-${new Date().toISOString().replace(/:/g, '-').substring(0, 19)}.png`;
+        link.href = dataUrl;
+        link.click();
+        link.remove();
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('Failed to export chat as PNG', err);
+      }
+    };
+
+    useImperativeHandle(ref, () => ({
+      exportToImage,
+      container: scrollContainer,
+      scrollToBottom,
+    }));
+
+    const extraData = useMemo(
+      () => ({
+        inProgress,
+        allFiles,
+        renderMarkdown,
+        removeMessage,
+        removeGroup,
+        redoUserPrompt,
+        editUserMessage,
+        onInterrupt,
+        onForkFromMessage,
+        onRemoveUpToMessage,
+        messagesLength,
+      }),
+      [
+        inProgress,
+        allFiles,
+        renderMarkdown,
+        removeMessage,
+        removeGroup,
+        redoUserPrompt,
+        editUserMessage,
+        onInterrupt,
+        onForkFromMessage,
+        onRemoveUpToMessage,
+        messagesLength,
+      ],
+    );
+
+    const renderItem = useCallback(
+      ({ item, index }) => (
+        <div className={twMerge('py-1', index === messagesLength - 1 && 'pb-4', index === 0 && 'pt-4')}>
+          <MessageBlockWrapper
+            baseDir={baseDir}
+            taskId={taskId}
+            message={item}
+            allFiles={allFiles}
+            renderMarkdown={renderMarkdown}
+            inProgress={inProgress}
+            removeMessage={removeMessage}
+            removeGroup={removeGroup}
+            redoUserPrompt={redoUserPrompt}
+            editUserMessage={editUserMessage}
+            onInterrupt={onInterrupt}
+            onForkFromMessage={onForkFromMessage}
+            onRemoveUpToMessage={onRemoveUpToMessage}
+          />
+        </div>
+      ),
+      [
+        baseDir,
+        taskId,
+        allFiles,
+        renderMarkdown,
+        inProgress,
+        removeMessage,
+        removeGroup,
+        redoUserPrompt,
+        editUserMessage,
+        onInterrupt,
+        onForkFromMessage,
+        onRemoveUpToMessage,
+        messagesLength,
+      ],
+    );
+
+    return (
+      <div className="relative h-full">
+        <LegendList
+          key={taskId}
+          ref={handleListRef}
+          data={processedMessages}
+          keyExtractor={(item) => item.id}
+          renderItem={renderItem}
+          extraData={extraData}
+          estimatedItemSize={490}
+          onScroll={handleScrollState}
+          initialScrollAtEnd
+          drawDistance={250}
+          className="absolute inset-0 scrollbar-thin scrollbar-track-bg-primary-light scrollbar-thumb-bg-tertiary hover:scrollbar-thumb-bg-fourth px-4"
+        />
+        <div className="absolute left-1/2 -translate-x-1/2 bottom-0 w-[140px] z-10 flex justify-center gap-1 pt-6 pb-1 group">
+          {(hasPreviousUserMessage || hasNextUserMessage) && renderGoToPrevious()}
+          {scrollingPaused && (
+            <IconButton
+              icon={<MdKeyboardDoubleArrowDown className="h-6 w-6" />}
+              onClick={scrollToBottom}
+              tooltip={t('messages.scrollToBottom')}
+              className="bg-bg-primary-light border border-border-default shadow-lg hover:bg-bg-secondary transition-colors duration-200"
+              aria-label={t('messages.scrollToBottom')}
+            />
+          )}
+          {(hasPreviousUserMessage || hasNextUserMessage) && renderGoToNext()}
+        </div>
+      </div>
+    );
+  },
+);
+
+VirtualizedMessagesComponent.displayName = 'VirtualizedMessages';
+
+export const VirtualizedMessages = memo(VirtualizedMessagesComponent);

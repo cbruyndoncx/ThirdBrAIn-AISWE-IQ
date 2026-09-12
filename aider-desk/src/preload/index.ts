@@ -1,0 +1,843 @@
+import {
+  AutocompletionData,
+  ClearTaskData,
+  CommandOutputData,
+  CommandsData,
+  ContextFilesUpdatedData,
+  ContextInfoData,
+  ContextMenuParams,
+  CreateTaskParams,
+  ExtensionUIRefreshData,
+  FileEdit,
+  InputHistoryData,
+  LogData,
+  McpServerConfig,
+  McpServersData,
+  MessageRemovedData,
+  ModalOverlayUrlData,
+  ModelsData,
+  OpenDialogOptions,
+  OS,
+  ProjectSettings,
+  ProjectStartedData,
+  ProviderModelsData,
+  ProvidersUpdatedData,
+  QuestionAnsweredData,
+  QuestionData,
+  QueuedPromptsUpdatedData,
+  ResponseChunkData,
+  ResponseCompletedData,
+  SettingsData,
+  SystemLogLevel,
+  TaskCreatedData,
+  TaskData,
+  TerminalData,
+  TerminalExitData,
+  TokensInfoData,
+  ToolData,
+  ToolInputChunkData,
+  UpdatedFilesUpdatedData,
+  SkillsUpdatedData,
+  UserMessageData,
+  VersionsInfo,
+  WorktreeIntegrationStatusUpdatedData,
+  AiderConnectorStatus,
+  InputPromptData,
+} from '@common/types';
+import { electronAPI } from '@electron-toolkit/preload';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
+import { ApplicationAPI } from '@common/api';
+import { compareBaseDirs } from '@common/utils';
+
+import './index.d';
+
+const api: ApplicationAPI = {
+  isOpenLogsDirectorySupported: () => true,
+  openLogsDirectory: () => ipcRenderer.invoke('open-logs-directory'),
+  loadSettings: () => ipcRenderer.invoke('load-settings'),
+  saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
+  isManageServerSupported: () => true,
+  startServer: (username?: string, password?: string) => ipcRenderer.invoke('start-server', username, password),
+  stopServer: () => ipcRenderer.invoke('stop-server'),
+  startCloudflareTunnel: () => ipcRenderer.invoke('start-cloudflare-tunnel'),
+  stopCloudflareTunnel: () => ipcRenderer.invoke('stop-cloudflare-tunnel'),
+  getCloudflareTunnelStatus: () => ipcRenderer.invoke('get-cloudflare-tunnel-status'),
+  startProject: (baseDir) => ipcRenderer.invoke('start-project', baseDir),
+  stopProject: (baseDir) => ipcRenderer.send('stop-project', baseDir),
+  restartProject: (baseDir) => ipcRenderer.send('restart-project', baseDir),
+  resetTask: (baseDir, taskId) => ipcRenderer.send('reset-task', baseDir, taskId),
+  restartAiderConnector: (baseDir, taskId) => ipcRenderer.send('restart-aider-connector', baseDir, taskId),
+  runPrompt: (baseDir, taskId, prompt, mode, images) => ipcRenderer.send('run-prompt', baseDir, taskId, prompt, mode, images),
+  savePrompt: (baseDir, taskId, prompt) => ipcRenderer.invoke('save-prompt', baseDir, taskId, prompt),
+  saveEditedPrompt: (baseDir, taskId, messageId, prompt) => ipcRenderer.invoke('save-edited-prompt', baseDir, taskId, messageId, prompt),
+  redoUserPrompt: (baseDir, taskId, messageId, mode, updatedPrompt?, updatedImages?) =>
+    ipcRenderer.send('redo-user-prompt', baseDir, taskId, messageId, mode, updatedPrompt, updatedImages),
+  resumeTask: (baseDir, taskId) => ipcRenderer.send('resume-task', baseDir, taskId),
+  answerQuestion: (baseDir, taskId, answer) => ipcRenderer.send('answer-question', baseDir, taskId, answer),
+  removeQueuedPrompt: (baseDir, taskId, promptId) => ipcRenderer.send('remove-queued-prompt', baseDir, taskId, promptId),
+  sendQueuedPromptNow: (baseDir, taskId, promptId) => ipcRenderer.send('send-queued-prompt-now', baseDir, taskId, promptId),
+  reorderQueuedPrompts: (baseDir, taskId, prompts) => ipcRenderer.send('reorder-queued-prompts', baseDir, taskId, prompts),
+  editQueuedPrompt: (baseDir, taskId, promptId, newText) => ipcRenderer.send('edit-queued-prompt', baseDir, taskId, promptId, newText),
+  loadInputHistory: (baseDir) => ipcRenderer.invoke('load-input-history', baseDir),
+  isOpenDialogSupported: () => true,
+  showOpenDialog: (options: OpenDialogOptions) => ipcRenderer.invoke('show-open-dialog', options),
+  getPathForFile: (file) => webUtils.getPathForFile(file),
+  getOpenProjects: () => ipcRenderer.invoke('get-open-projects'),
+  addOpenProject: (baseDir) => ipcRenderer.invoke('add-open-project', baseDir),
+  setActiveProject: (baseDir) => ipcRenderer.invoke('set-active-project', baseDir),
+  removeOpenProject: (baseDir) => ipcRenderer.invoke('remove-open-project', baseDir),
+  updateOpenProjectsOrder: (baseDirs) => ipcRenderer.invoke('update-open-projects-order', baseDirs),
+  openNewWindow: () => ipcRenderer.invoke('create-new-window'),
+  openProjectInNewWindow: (baseDir) => ipcRenderer.invoke('open-project-in-new-window', baseDir),
+  updateMainModel: (baseDir, taskId, model) => ipcRenderer.send('update-main-model', baseDir, taskId, model),
+  updateWeakModel: (baseDir, taskId, model) => ipcRenderer.send('update-weak-model', baseDir, taskId, model),
+  updateArchitectModel: (baseDir, taskId, model) => ipcRenderer.send('update-architect-model', baseDir, taskId, model),
+  updateEditFormats: (baseDir, editFormats) => ipcRenderer.send('update-edit-formats', baseDir, editFormats),
+  getProjectSettings: (baseDir) => ipcRenderer.invoke('get-project-settings', baseDir),
+  patchProjectSettings: (baseDir, settings) => ipcRenderer.invoke('patch-project-settings', baseDir, settings),
+  getFilePathSuggestions: (currentPath, directoriesOnly = false) => ipcRenderer.invoke('get-file-path-suggestions', currentPath, directoriesOnly),
+  getAddableFiles: (baseDir, taskId) => ipcRenderer.invoke('get-addable-files', baseDir, taskId),
+  getAllFiles: (baseDir, taskId, useGit = true) => ipcRenderer.invoke('get-all-files', baseDir, taskId, useGit),
+  refreshContextFiles: (baseDir, taskId) => ipcRenderer.invoke('refresh-context-files', baseDir, taskId),
+  getUpdatedFiles: (baseDir, taskId) => ipcRenderer.invoke('get-updated-files', baseDir, taskId),
+  addFileToGit: (baseDir, taskId, filePath) => ipcRenderer.invoke('add-file-to-git', baseDir, taskId, filePath),
+  restoreFile: (baseDir, taskId, filePath) => ipcRenderer.invoke('restore-file', baseDir, taskId, filePath),
+  readFile: (baseDir, taskId, filePath) => ipcRenderer.invoke('read-file', baseDir, taskId, filePath),
+  saveFile: (baseDir, taskId, filePath, content) => ipcRenderer.invoke('save-file', baseDir, taskId, filePath, content),
+  generateCommitMessage: (baseDir, taskId) => ipcRenderer.invoke('generate-commit-message', baseDir, taskId),
+  commitChanges: (baseDir, taskId, message, amend) => ipcRenderer.invoke('commit-changes', baseDir, taskId, message, amend),
+  cancelCommitChanges: (baseDir, taskId) => ipcRenderer.invoke('cancel-commit-changes', baseDir, taskId),
+  addFile: (baseDir, taskId, filePath, readOnly = false) => ipcRenderer.send('add-file', baseDir, taskId, filePath, readOnly),
+  isValidPath: (baseDir, path) => ipcRenderer.invoke('is-valid-path', baseDir, path),
+  isProjectPath: (path) => ipcRenderer.invoke('is-project-path', path),
+  cloneProject: async (repositoryUrl, targetDir) => {
+    const result = await ipcRenderer.invoke('clone-project', repositoryUrl, targetDir);
+    if (result.error || !result.path) {
+      throw new Error(result.error ?? 'Failed to clone the project');
+    }
+    return result.path;
+  },
+  cancelCloneProject: () => ipcRenderer.invoke('cancel-clone-project'),
+  dropFile: (baseDir, taskId, path) => ipcRenderer.send('drop-file', baseDir, taskId, path),
+  runCommand: (baseDir, taskId, command) => ipcRenderer.send('run-command', baseDir, taskId, command),
+  pasteImage: (baseDir, taskId) => ipcRenderer.send('paste-image', baseDir, taskId),
+  scrapeWeb: (baseDir, taskId, url, filePath) => ipcRenderer.invoke('scrape-web', baseDir, taskId, url, filePath),
+  initProjectRulesFile: (baseDir, taskId, args) => ipcRenderer.invoke('init-project-rules-file', baseDir, taskId, args),
+
+  getSkills: (baseDir, taskId) => ipcRenderer.invoke('get-skills', baseDir, taskId),
+  activateSkill: (baseDir, taskId, skillName) => ipcRenderer.invoke('activate-skill', baseDir, taskId, skillName),
+  deactivateSkill: (baseDir, taskId, skillName) => ipcRenderer.invoke('deactivate-skill', baseDir, taskId, skillName),
+
+  getTodos: (baseDir, taskId) => ipcRenderer.invoke('get-todos', baseDir, taskId),
+  addTodo: (baseDir, taskId, name) => ipcRenderer.invoke('add-todo', baseDir, taskId, name),
+  updateTodo: (baseDir, taskId, name, updates) => ipcRenderer.invoke('update-todo', baseDir, taskId, name, updates),
+  deleteTodo: (baseDir, taskId, name) => ipcRenderer.invoke('delete-todo', baseDir, taskId, name),
+  clearAllTodos: (baseDir, taskId) => ipcRenderer.invoke('clear-all-todos', baseDir, taskId),
+
+  loadMcpServerTools: (serverName, config?: McpServerConfig, projectDir?: string) =>
+    ipcRenderer.invoke('load-mcp-server-tools', serverName, config, projectDir),
+  reloadMcpServers: (projectDir?: string, force = false) => ipcRenderer.invoke('reload-mcp-servers', projectDir, force),
+  reloadMcpServer: (serverName: string, config: McpServerConfig) => ipcRenderer.invoke('reload-mcp-server', serverName, config),
+  getMcpOAuthStatus: (serverName: string, config?: McpServerConfig, projectDir?: string) =>
+    ipcRenderer.invoke('get-mcp-oauth-status', serverName, config, projectDir),
+  startMcpOAuth: (serverName: string, config?: McpServerConfig, projectDir?: string) => ipcRenderer.invoke('start-mcp-oauth', serverName, config, projectDir),
+  disconnectMcpOAuth: (serverName: string, config?: McpServerConfig, projectDir?: string) =>
+    ipcRenderer.invoke('disconnect-mcp-oauth', serverName, config, projectDir),
+  getMcpServers: () => ipcRenderer.invoke('get-mcp-servers'),
+  addMcpServer: (name: string, config: McpServerConfig, projectDir?: string) => ipcRenderer.invoke('add-mcp-server', name, config, projectDir),
+  updateMcpServer: (oldName: string, name: string, config: McpServerConfig, projectDir?: string) =>
+    ipcRenderer.invoke('update-mcp-server', oldName, name, config, projectDir),
+  removeMcpServer: (name: string, projectDir?: string) => ipcRenderer.invoke('remove-mcp-server', name, projectDir),
+  replaceMcpServers: (servers: Record<string, McpServerConfig>, projectDir?: string) => ipcRenderer.invoke('replace-mcp-servers', servers, projectDir),
+
+  // Extension operations
+  getInstalledExtensions: (projectDir?: string) => ipcRenderer.invoke('get-installed-extensions', projectDir),
+  getExtensionToolsInfo: (projectDir?: string) => ipcRenderer.invoke('get-extension-tools-info', projectDir),
+  getAvailableExtensions: (repositories: string[], forceRefresh?: boolean, fetchOnly?: boolean) =>
+    ipcRenderer.invoke('get-available-extensions', repositories, forceRefresh, fetchOnly),
+  installExtension: (extensionId: string, repositoryUrl: string, projectDir?: string) =>
+    ipcRenderer.invoke('install-extension', extensionId, repositoryUrl, projectDir),
+  uninstallExtension: (extensionId: string, projectDir?: string) => ipcRenderer.invoke('uninstall-extension', extensionId, projectDir),
+  updateExtension: (extensionId: string, repositoryUrl: string, projectDir?: string) =>
+    ipcRenderer.invoke('update-extension', extensionId, repositoryUrl, projectDir),
+  reloadExtension: (filePath: string, projectDir?: string) => ipcRenderer.invoke('reload-extension', filePath, projectDir),
+  getExtensionUIComponents: (placement?: string, projectDir?: string, taskId?: string) =>
+    ipcRenderer.invoke('get-extension-ui-components', placement, projectDir, taskId),
+  getUIExtensionData: (extensionId: string, componentId: string, projectDir?: string, taskId?: string) =>
+    ipcRenderer.invoke('get-extension-ui-data', extensionId, componentId, projectDir, taskId),
+  executeUIExtensionAction: (extensionId: string, componentId: string, action: string, args: unknown[], projectDir?: string, taskId?: string) =>
+    ipcRenderer.invoke('execute-extension-ui-action', extensionId, componentId, action, args, projectDir, taskId),
+  onExtensionUIRefresh: (callback: (data: ExtensionUIRefreshData) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, data: ExtensionUIRefreshData) => {
+      callback(data);
+    };
+    ipcRenderer.on('extension-ui-refresh', listener);
+    return () => {
+      ipcRenderer.removeListener('extension-ui-refresh', listener);
+    };
+  },
+  onModalOverlayUrl: (callback: (data: ModalOverlayUrlData) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, data: ModalOverlayUrlData) => {
+      callback(data);
+    };
+    ipcRenderer.on('modal-overlay-url', listener);
+    return () => {
+      ipcRenderer.removeListener('modal-overlay-url', listener);
+    };
+  },
+  onInputPrompt: (callback: (data: InputPromptData) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, data: InputPromptData) => {
+      callback(data);
+    };
+    ipcRenderer.on('input-prompt', listener);
+    return () => {
+      ipcRenderer.removeListener('input-prompt', listener);
+    };
+  },
+  respondInputPrompt: (id: string, value: string | null, rememberSession?: boolean) => ipcRenderer.invoke('respond-input-prompt', id, value, rememberSession),
+  loadExtensionLibrary: (librarySpec: string) => ipcRenderer.invoke('load-extension-library', librarySpec),
+  // Extension config operations (per-extension settings)
+  getExtensionConfigComponent: (extensionId: string, projectDir?: string) => ipcRenderer.invoke('get-extension-config-component', extensionId, projectDir),
+  getExtensionConfig: (extensionId: string, projectDir?: string) => ipcRenderer.invoke('get-extension-config', extensionId, projectDir),
+  saveExtensionConfig: (extensionId: string, configData: unknown, projectDir?: string) =>
+    ipcRenderer.invoke('save-extension-config', extensionId, configData, projectDir),
+  isWebViewSupported: () => true,
+
+  createNewTask: (baseDir, params?: CreateTaskParams) => ipcRenderer.invoke('create-new-task', baseDir, params),
+  updateTask: (baseDir, id, updates) => ipcRenderer.invoke('update-task', baseDir, id, updates),
+  deleteTask: (baseDir, id) => ipcRenderer.invoke('delete-task', baseDir, id),
+  duplicateTask: (baseDir, taskId) => ipcRenderer.invoke('duplicate-task', baseDir, taskId),
+  forkTask: (baseDir, taskId, messageId) => ipcRenderer.invoke('fork-task', baseDir, taskId, messageId),
+  getTasks: (baseDir) => ipcRenderer.invoke('get-tasks', baseDir),
+  loadTask: (baseDir, taskId) => ipcRenderer.invoke('load-task', baseDir, taskId),
+
+  exportTaskToMarkdown: async (baseDir, taskId, copyOnly) => ipcRenderer.invoke('export-task-to-markdown', baseDir, taskId, copyOnly),
+  getRecentProjects: () => ipcRenderer.invoke('get-recent-projects'),
+  addRecentProject: (baseDir) => ipcRenderer.invoke('add-recent-project', baseDir),
+  removeRecentProject: (baseDir) => ipcRenderer.invoke('remove-recent-project', baseDir),
+  interruptResponse: (baseDir, taskId, interruptId) => ipcRenderer.send('interrupt-response', baseDir, taskId, interruptId),
+  applyEdits: (baseDir, taskId, edits: FileEdit[]) => ipcRenderer.send('apply-edits', baseDir, taskId, edits),
+  clearContext: (baseDir, taskId) => ipcRenderer.send('clear-context', baseDir, taskId),
+  removeLastMessage: (baseDir, taskId) => ipcRenderer.send('remove-last-message', baseDir, taskId),
+  removeMessage: (baseDir, taskId, messageId) => ipcRenderer.invoke('remove-message', baseDir, taskId, messageId),
+  removeMessagesUpTo: (baseDir, taskId, messageId) => ipcRenderer.invoke('remove-messages-up-to', baseDir, taskId, messageId),
+  compactConversation: (baseDir, taskId, mode, customInstructions) => ipcRenderer.invoke('compact-conversation', baseDir, taskId, mode, customInstructions),
+  smartCompactConversation: (baseDir, taskId) => ipcRenderer.invoke('smart-compact-conversation', baseDir, taskId),
+  undoContextChange: (baseDir, taskId) => ipcRenderer.invoke('undo-context-change', baseDir, taskId),
+  handoffConversation: (baseDir, taskId, focus) => ipcRenderer.invoke('handoff-conversation', baseDir, taskId, focus),
+  runCodeChangeRequests: (baseDir, taskId, requests, createNewTask?) => ipcRenderer.send('run-code-change-requests', baseDir, taskId, requests, createNewTask),
+  setZoomLevel: (level) => ipcRenderer.invoke('set-zoom-level', level),
+  getVersions: (forceRefresh = false) => ipcRenderer.invoke('get-versions', forceRefresh),
+  downloadLatestAiderDesk: () => ipcRenderer.invoke('download-latest-aiderdesk'),
+
+  getReleaseNotes: () => ipcRenderer.invoke('get-release-notes'),
+  clearReleaseNotes: () => ipcRenderer.invoke('clear-release-notes'),
+  getOS: (): Promise<OS> => ipcRenderer.invoke('get-os'),
+  getProviderModels: (reload?: boolean) => ipcRenderer.invoke('get-provider-models', reload),
+  getProviders: () => ipcRenderer.invoke('get-providers'),
+  updateProviders: async (providers) => await ipcRenderer.invoke('update-providers', providers),
+  upsertModel: (providerId, modelId, model) => ipcRenderer.invoke('upsert-model', providerId, modelId, model),
+  deleteModel: (providerId, modelId) => ipcRenderer.invoke('delete-model', providerId, modelId),
+  updateModels: (modelUpdates) => ipcRenderer.invoke('update-models', modelUpdates),
+  queryUsageData: (from, to) => ipcRenderer.invoke('query-usage-data', from, to),
+  getEffectiveEnvironmentVariable: (key: string, baseDir?: string) => ipcRenderer.invoke('get-effective-environment-variable', key, baseDir),
+
+  // Voice API
+  createVoiceSession: (provider) => ipcRenderer.invoke('create-voice-session', provider),
+
+  addSettingsUpdatedListener: (callback: (data: SettingsData) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, data: SettingsData) => {
+      callback(data);
+    };
+    ipcRenderer.on('settings-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('settings-updated', listener);
+    };
+  },
+
+  addResponseChunkListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: ResponseChunkData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('response-chunk', listener);
+    return () => {
+      ipcRenderer.removeListener('response-chunk', listener);
+    };
+  },
+
+  addResponseCompletedListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: ResponseCompletedData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('response-completed', listener);
+    return () => {
+      ipcRenderer.removeListener('response-completed', listener);
+    };
+  },
+
+  addContextFilesUpdatedListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: ContextFilesUpdatedData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('context-files-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('context-files-updated', listener);
+    };
+  },
+
+  addUpdatedFilesUpdatedListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: UpdatedFilesUpdatedData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('updated-files-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('updated-files-updated', listener);
+    };
+  },
+
+  addSkillsUpdatedListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: SkillsUpdatedData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('skills-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('skills-updated', listener);
+    };
+  },
+
+  addCommandsUpdatedListener: (baseDir, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: CommandsData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir)) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('commands-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('commands-updated', listener);
+    };
+  },
+
+  addUpdateAutocompletionListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: AutocompletionData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('update-autocompletion', listener);
+    return () => {
+      ipcRenderer.removeListener('update-autocompletion', listener);
+    };
+  },
+
+  addAskQuestionListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: QuestionData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('ask-question', listener);
+    return () => {
+      ipcRenderer.removeListener('ask-question', listener);
+    };
+  },
+  addQuestionAnsweredListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: QuestionAnsweredData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('question-answered', listener);
+    return () => {
+      ipcRenderer.removeListener('question-answered', listener);
+    };
+  },
+
+  addQueuedPromptsUpdatedListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: QueuedPromptsUpdatedData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('queued-prompts-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('queued-prompts-updated', listener);
+    };
+  },
+
+  addUpdateAiderModelsListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: ModelsData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('update-aider-models', listener);
+    return () => {
+      ipcRenderer.removeListener('update-aider-models', listener);
+    };
+  },
+
+  addCommandOutputListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: CommandOutputData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('command-output', listener);
+    return () => {
+      ipcRenderer.removeListener('command-output', listener);
+    };
+  },
+
+  addLogListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: LogData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('log', listener);
+    return () => {
+      ipcRenderer.removeListener('log', listener);
+    };
+  },
+
+  addTokensInfoListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: TokensInfoData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('update-tokens-info', listener);
+    return () => {
+      ipcRenderer.removeListener('update-tokens-info', listener);
+    };
+  },
+
+  addToolListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: ToolData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('tool', listener);
+    return () => {
+      ipcRenderer.removeListener('tool', listener);
+    };
+  },
+
+  addToolInputChunkListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: ToolInputChunkData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('tool-input-chunk', listener);
+    return () => {
+      ipcRenderer.removeListener('tool-input-chunk', listener);
+    };
+  },
+
+  addInputHistoryUpdatedListener: (baseDir, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: InputHistoryData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir)) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('input-history-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('input-history-updated', listener);
+    };
+  },
+
+  addUserMessageListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: UserMessageData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('user-message', listener);
+    return () => {
+      ipcRenderer.removeListener('user-message', listener);
+    };
+  },
+
+  addClearTaskListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: ClearTaskData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('clear-task', listener);
+    return () => {
+      ipcRenderer.removeListener('clear-task', listener);
+    };
+  },
+
+  addMessageRemovedListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: MessageRemovedData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('message-removed', listener);
+    return () => {
+      ipcRenderer.removeListener('message-removed', listener);
+    };
+  },
+
+  addContextInfoUpdatedListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: ContextInfoData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('context-info-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('context-info-updated', listener);
+    };
+  },
+
+  addProjectStartedListener: (baseDir, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: ProjectStartedData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir)) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('project-started', listener);
+    return () => {
+      ipcRenderer.removeListener('project-started', listener);
+    };
+  },
+
+  addVersionsInfoUpdatedListener: (callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: VersionsInfo) => {
+      callback(data);
+    };
+    ipcRenderer.on('versions-info-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('versions-info-updated', listener);
+    };
+  },
+
+  addProviderModelsUpdatedListener: (callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: ProviderModelsData) => {
+      callback(data);
+    };
+    ipcRenderer.on('provider-models-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('provider-models-updated', listener);
+    };
+  },
+
+  addProvidersUpdatedListener: (callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: ProvidersUpdatedData) => {
+      callback(data);
+    };
+    ipcRenderer.on('providers-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('providers-updated', listener);
+    };
+  },
+
+  addProjectSettingsUpdatedListener: (baseDir, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: { baseDir: string; settings: ProjectSettings }) => {
+      if (!compareBaseDirs(data.baseDir, baseDir)) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('project-settings-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('project-settings-updated', listener);
+    };
+  },
+
+  // Task lifecycle event listeners
+  addTaskCreatedListener: (baseDir, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: TaskCreatedData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir)) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('task-created', listener);
+    return () => {
+      ipcRenderer.removeListener('task-created', listener);
+    };
+  },
+
+  addTaskInitializedListener: (baseDir, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: TaskData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir)) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('task-initialized', listener);
+    return () => {
+      ipcRenderer.removeListener('task-initialized', listener);
+    };
+  },
+
+  addTaskUpdatedListener: (baseDir, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: TaskData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir)) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('task-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('task-updated', listener);
+    };
+  },
+
+  addTaskStartedListener: (baseDir, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: TaskData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir)) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('task-started', listener);
+    return () => {
+      ipcRenderer.removeListener('task-started', listener);
+    };
+  },
+
+  addTaskCompletedListener: (baseDir, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: TaskData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir)) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('task-completed', listener);
+    return () => {
+      ipcRenderer.removeListener('task-completed', listener);
+    };
+  },
+
+  addTaskCancelledListener: (baseDir, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: TaskData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir)) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('task-cancelled', listener);
+    return () => {
+      ipcRenderer.removeListener('task-cancelled', listener);
+    };
+  },
+
+  addTaskDeletedListener: (baseDir, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: TaskData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir)) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('task-deleted', listener);
+    return () => {
+      ipcRenderer.removeListener('task-deleted', listener);
+    };
+  },
+
+  addTerminalDataListener: (baseDir, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: TerminalData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir)) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('terminal-data', listener);
+    return () => {
+      ipcRenderer.removeListener('terminal-data', listener);
+    };
+  },
+
+  addTerminalExitListener: (baseDir, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: TerminalExitData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir)) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('terminal-exit', listener);
+    return () => {
+      ipcRenderer.removeListener('terminal-exit', listener);
+    };
+  },
+
+  addWorktreeIntegrationStatusUpdatedListener: (baseDir, taskId, callback) => {
+    const listener = (_: Electron.IpcRendererEvent, data: WorktreeIntegrationStatusUpdatedData) => {
+      if (!compareBaseDirs(data.baseDir, baseDir) || data.taskId !== taskId) {
+        return;
+      }
+      callback(data);
+    };
+    ipcRenderer.on('worktree-integration-status-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('worktree-integration-status-updated', listener);
+    };
+  },
+
+  addContextMenuListener: (callback) => {
+    const listener = (_: Electron.IpcRendererEvent, params: ContextMenuParams) => callback(params);
+    ipcRenderer.on('context-menu', listener);
+    return () => {
+      ipcRenderer.removeListener('context-menu', listener);
+    };
+  },
+
+  addShowViewListener: (callback) => {
+    const listener = (_: Electron.IpcRendererEvent, viewId: string) => callback(viewId);
+    ipcRenderer.on('show-view', listener);
+    return () => {
+      ipcRenderer.removeListener('show-view', listener);
+    };
+  },
+
+  getCommands: (baseDir) => ipcRenderer.invoke('get-commands', baseDir),
+  getCustomModes: (baseDir) => ipcRenderer.invoke('get-custom-modes', baseDir),
+  runCustomCommand: (baseDir, taskId, commandName, args, mode) => ipcRenderer.invoke('run-custom-command', baseDir, taskId, commandName, args, mode),
+
+  // Terminal operations
+  isTerminalSupported: () => true,
+  createTerminal: (baseDir, taskId, cols, rows) => ipcRenderer.invoke('terminal-create', baseDir, taskId, cols, rows),
+  writeToTerminal: (terminalId, data) => ipcRenderer.invoke('terminal-write', terminalId, data),
+  resizeTerminal: (terminalId, cols, rows) => ipcRenderer.invoke('terminal-resize', terminalId, cols, rows),
+  closeTerminal: (terminalId) => ipcRenderer.invoke('terminal-close', terminalId),
+  getTerminalForTask: (taskId) => ipcRenderer.invoke('terminal-get-for-task', taskId),
+  getAllTerminalsForTask: (taskId) => ipcRenderer.invoke('terminal-get-all-for-task', taskId),
+  getTerminalBuffer: (terminalId) => ipcRenderer.invoke('terminal-get-buffer', terminalId),
+
+  // Worktree merge operations
+  mergeWorktreeToMain: (baseDir, taskId, squash, targetBranch, commitMessage) =>
+    ipcRenderer.invoke('merge-worktree-to-main', baseDir, taskId, squash, targetBranch, commitMessage),
+  switchToLocalWorkingMode: (baseDir, taskId, options) => ipcRenderer.invoke('switch-to-local-working-mode', baseDir, taskId, options),
+  switchToWorktreeWorkingMode: (baseDir, taskId, options) => ipcRenderer.invoke('switch-to-worktree-working-mode', baseDir, taskId, options),
+  getLocalUncommittedFiles: (baseDir, taskId) => ipcRenderer.invoke('get-local-uncommitted-files', baseDir, taskId),
+  applyUncommittedChanges: (baseDir, taskId) => ipcRenderer.invoke('apply-uncommitted-changes', baseDir, taskId),
+  revertLastMerge: (baseDir, taskId) => ipcRenderer.invoke('revert-last-merge', baseDir, taskId),
+  listBranches: (baseDir) => ipcRenderer.invoke('list-branches', baseDir),
+  getWorktreeIntegrationStatus: (baseDir, taskId, targetBranch) => ipcRenderer.invoke('get-worktree-integration-status', baseDir, taskId, targetBranch),
+  rebaseWorktreeFromBranch: (baseDir, taskId, fromBranch) => ipcRenderer.invoke('rebase-worktree-from-branch', baseDir, taskId, fromBranch),
+  abortWorktreeRebase: (baseDir, taskId) => ipcRenderer.invoke('abort-worktree-rebase', baseDir, taskId),
+  continueWorktreeRebase: (baseDir, taskId) => ipcRenderer.invoke('continue-worktree-rebase', baseDir, taskId),
+  resolveWorktreeConflictsWithAgent: (baseDir, taskId) => ipcRenderer.invoke('resolve-worktree-conflicts-with-agent', baseDir, taskId),
+  renameWorktreeBranch: (baseDir, taskId, newBranchName) => ipcRenderer.invoke('rename-git-branch', baseDir, taskId, newBranchName),
+  renameGitBranch: (baseDir, taskId, newBranchName) => ipcRenderer.invoke('rename-git-branch', baseDir, taskId, newBranchName),
+
+  // Git branch operations
+  listGitBranches: (baseDir, taskId, includeRemote) => ipcRenderer.invoke('list-git-branches', baseDir, taskId, includeRemote),
+  getSyncCommits: (baseDir, taskId, targetBranch) => ipcRenderer.invoke('get-sync-commits', baseDir, taskId, targetBranch),
+  createGitBranch: (baseDir, taskId, name, startPoint, checkout) => ipcRenderer.invoke('create-git-branch', baseDir, taskId, name, startPoint, checkout),
+  checkoutGitBranch: (baseDir, taskId, branch, createTracking, takeOver) =>
+    ipcRenderer.invoke('checkout-git-branch', baseDir, taskId, branch, createTracking, takeOver),
+  deleteGitBranch: (baseDir, taskId, branch, force) => ipcRenderer.invoke('delete-git-branch', baseDir, taskId, branch, force),
+  mergeIntoCurrentBranch: (baseDir, taskId, branch) => ipcRenderer.invoke('merge-into-current-branch', baseDir, taskId, branch),
+  rebaseOntoBranch: (baseDir, taskId, branch) => ipcRenderer.invoke('rebase-onto-branch', baseDir, taskId, branch),
+  updateGitBranch: (baseDir, taskId, branchName) => ipcRenderer.invoke('update-git-branch', baseDir, taskId, branchName),
+  gitPull: (baseDir, taskId, rebase) => ipcRenderer.invoke('git-pull', baseDir, taskId, rebase),
+  gitPush: (baseDir, taskId, force, setUpstream) => ipcRenderer.invoke('git-push', baseDir, taskId, force, setUpstream),
+  resolveGitErrorWithAgent: (baseDir, taskId) => ipcRenderer.invoke('resolve-git-error-with-agent', baseDir, taskId),
+
+  // Agent profile operations
+  getAllAgentProfiles: () => ipcRenderer.invoke('get-agent-profiles'),
+  createAgentProfile: (profile, projectDir) => ipcRenderer.invoke('create-agent-profile', profile, projectDir),
+  updateAgentProfile: (profile, baseDir) => ipcRenderer.invoke('update-agent-profile', profile, baseDir),
+  deleteAgentProfile: (profileId, baseDir) => ipcRenderer.invoke('delete-agent-profile', profileId, baseDir),
+  updateAgentProfilesOrder: (agentProfiles) => ipcRenderer.invoke('update-agent-profiles-order', agentProfiles),
+
+  // Memory operations
+  listAllMemories: () => ipcRenderer.invoke('list-all-memories'),
+  deleteMemory: (id) => ipcRenderer.invoke('delete-memory', id),
+  deleteProjectMemories: (projectId) => ipcRenderer.invoke('delete-project-memories', projectId),
+  getMemoryEmbeddingProgress: () => ipcRenderer.invoke('get-memory-embedding-progress'),
+
+  writeToClipboard: (text: string) => ipcRenderer.invoke('clipboard-write-text', text),
+  openPath: (path: string) => ipcRenderer.invoke('open-path', path),
+  openUrlInWindow: (url: string, title?: string) => ipcRenderer.invoke('open-url-in-window', url, title),
+  openUrlExternally: (url: string) => ipcRenderer.invoke('open-url-externally', url),
+
+  // System logs
+  getSystemLogs: (fromId?: number, limit?: number, levels?: SystemLogLevel[]) => ipcRenderer.invoke('get-system-logs', fromId, limit, levels),
+  clearSystemLogs: () => ipcRenderer.invoke('clear-system-logs'),
+  addSystemLogListener: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on('system-log', listener);
+    return () => ipcRenderer.removeListener('system-log', listener);
+  },
+
+  addAgentProfilesUpdatedListener: (callback) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on('agent-profiles-updated', listener);
+    return () => ipcRenderer.off('agent-profiles-updated', listener);
+  },
+
+  addMcpServersUpdatedListener: (callback: (data: McpServersData) => void) => {
+    const listener = (_, data) => callback(data);
+    ipcRenderer.on('mcp-servers-updated', listener);
+    return () => ipcRenderer.off('mcp-servers-updated', listener);
+  },
+
+  addNotificationListener: () => {
+    // notifications in Electron app are handled by the main process
+    return () => {};
+  },
+
+  // Aider connector status (Python install + per-task connector lifecycle)
+  addAiderConnectorStatusListener: (callback: (data: { baseDir?: string; taskId?: string; status: AiderConnectorStatus }) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, data: { baseDir?: string; taskId?: string; status: AiderConnectorStatus }) => callback(data);
+    ipcRenderer.on('aider-connector-status', listener);
+    return () => ipcRenderer.removeListener('aider-connector-status', listener);
+  },
+
+  getAiderConnectorStatus: (): Promise<AiderConnectorStatus> => ipcRenderer.invoke('get-aider-connector-status'),
+};
+
+if (process.contextIsolated) {
+  try {
+    contextBridge.exposeInMainWorld('electron', electronAPI);
+    contextBridge.exposeInMainWorld('api', api);
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error(error);
+  }
+} else {
+  window.electron = electronAPI;
+  window.api = api;
+}

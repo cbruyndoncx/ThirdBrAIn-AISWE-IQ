@@ -1,0 +1,75 @@
+{
+  "name": "@aiderdesk/extensions",
+  "version": "0.32.1",
+  "description": "Type definitions and examples for AiderDesk extensions",
+  "author": "Hotovo",
+  "homepage": "https://aiderdesk.hotovo.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hotovo/aider-desk.git",
+    "directory": "packages/extensions"
+  },
+  "bugs": {
+    "url": "https://github.com/hotovo/aider-desk/issues"
+  },
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "aiderdesk-extensions": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "extensions.d.ts",
+    "README.md",
+    "dist/cli.js",
+    "dist/index.js",
+    "dist/index.d.ts",
+    "extensions.json"
+  ],
+  "scripts": {
+    "build": "dts-bundle-generator --external-imports zod node --project ../../tsconfig.node.json --no-check --no-banner -o extensions.d.ts ../../packages/common/src/extensions.ts && node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --no-color",
+    "prepublishOnly": "npm run build",
+    "publish:next": "node scripts/publish-next.mjs",
+    "release:latest": "node scripts/release-latest.mjs"
+  },
+  "keywords": [
+    "aiderdesk",
+    "extensions",
+    "typescript",
+    "types",
+    "ai",
+    "coding-assistant"
+  ],
+  "dependencies": {
+    "@inquirer/prompts": "7.10.1",
+    "chalk": "5.6.2",
+    "commander": "13.1.0",
+    "execa": "9.6.1",
+    "ora": "8.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.15",
+    "dts-bundle-generator": "9.5.1",
+    "esbuild": "0.28.1",
+    "typescript": "5.9.3",
+    "zod": "4.3.6"
+  },
+  "peerDependencies": {
+    "zod": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

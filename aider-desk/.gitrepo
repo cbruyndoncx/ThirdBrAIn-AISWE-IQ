@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/hotovo/aider-desk.git
+	branch = main
+	commit = 5016aed78ee238b9c8f1a1824627f51d6f942811
+	parent = 4aade8c29e6612bac21be60d76a45052d87783d5
+	method = merge
+	cmdver = 0.4.9

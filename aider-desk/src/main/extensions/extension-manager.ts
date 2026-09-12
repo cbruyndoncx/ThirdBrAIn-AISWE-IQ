@@ -1,0 +1,2360 @@
+import os from 'os';
+import fs from 'fs/promises';
+import path from 'path';
+
+import { FSWatcher, watch } from 'chokidar';
+import debounce from 'lodash/debounce';
+import { z } from 'zod';
+import {
+  AvailableExtension,
+  ExtensionConfigComponent,
+  ExtensionOperationResult,
+  ExtensionToolInfo,
+  SettingsData,
+  SkillDefinition,
+  ToolApprovalState,
+} from '@common/types';
+import { TOOL_GROUP_NAME_SEPARATOR } from '@common/tools';
+import { AIDER_DESK_EXTENSIONS_REPO_URL, ProviderDefinition, Tool, UIComponentDefinition } from '@common/extensions';
+import { DEFAULT_AGENT_PROFILE } from '@common/agent';
+
+import { ExtensionLoader } from './extension-loader';
+import { ExtensionRegistry, LoadedExtension } from './extension-registry';
+import { ExtensionContextImpl } from './extension-context';
+import { DisposableStore } from './disposable-store';
+import { ExtensionFetcher } from './extension-fetcher';
+import { ExtensionLibraryLoader } from './extension-library-loader';
+
+import type {
+  AfterCommitEvent,
+  AgentFinishedEvent,
+  AgentStartedEvent,
+  AgentStepFinishedEvent,
+  AgentStepStartedEvent,
+  AiderPromptFinishedEvent,
+  AiderPromptStartedEvent,
+  BeforeCommitEvent,
+  CommandDefinition,
+  CommandExecutedEvent,
+  CustomCommandExecutedEvent,
+  Extension,
+  ExtensionContext,
+  FilesAddedEvent,
+  FilesDroppedEvent,
+  HandleApprovalEvent,
+  ImportantRemindersEvent,
+  InterruptedEvent,
+  ModeDefinition,
+  OptimizeMessagesEvent,
+  ProjectStartedEvent,
+  ProjectStoppedEvent,
+  PromptFinishedEvent,
+  PromptStartedEvent,
+  PromptTemplateEvent,
+  QuestionAnsweredEvent,
+  QuestionAskedEvent,
+  ResponseChunkEvent,
+  ResponseCompletedEvent,
+  RuleFilesRetrievedEvent,
+  SubagentFinishedEvent,
+  SubagentStartedEvent,
+  TaskClosedEvent,
+  TaskCreatedEvent,
+  TaskDeletedEvent,
+  TaskInitializedEvent,
+  TaskPreparedEvent,
+  TaskUpdatedEvent,
+  ToolApprovalEvent,
+  ToolCalledEvent,
+  ToolDefinition,
+  ToolFinishedEvent,
+} from '@common/extensions';
+import type { AgentProfile } from '@common/types';
+import type { Store } from '@/store';
+import type { McpConfigManager } from '@/agent/mcp-config-manager';
+import type { ModelManager } from '@/models';
+import type { EventManager } from '@/events';
+import type { MemoryManager } from '@/memory/memory-manager';
+import type { TelemetryManager } from '@/telemetry';
+import type { ToolExecutionOptions, ToolSet } from 'ai';
+
+import { shouldUsePolling } from '@/utils/file-watch';
+import logger from '@/logger';
+import { AIDER_DESK_EXTENSIONS_DIR, AIDER_DESK_GLOBAL_EXTENSIONS_DIR } from '@/constants';
+import { ApprovalManager } from '@/agent/tools/approval-manager';
+import { contentArrayHasNonTextParts, stringifyWithBudget, truncateToolResult } from '@/agent/utils';
+import { Project } from '@/project';
+import { Task } from '@/task';
+
+export type { LoadedExtension } from './extension-registry';
+
+export type ExtensionsChangeListener = (extensions: LoadedExtension[]) => void;
+
+export interface RegisteredTool {
+  extensionId: string;
+  extensionName: string;
+  tool: ToolDefinition;
+}
+
+export interface RegisteredCommand {
+  extensionId: string;
+  extensionName: string;
+  command: CommandDefinition;
+}
+
+export interface RegisteredAgent {
+  extensionId: string;
+  extensionName: string;
+  agent: AgentProfile;
+}
+
+export interface RegisteredMode {
+  extensionId: string;
+  extensionName: string;
+  mode: ModeDefinition;
+}
+
+export interface RegisteredUIComponent {
+  extensionId: string;
+  extensionName: string;
+  component: UIComponentDefinition;
+}
+
+export interface RegisteredProvider {
+  extensionId: string;
+  extensionName: string;
+  provider: ProviderDefinition;
+}
+
+/**
+ * Mapping of extension event names to their event payload types
+ */
+export type ExtensionEventMap = {
+  onProjectStarted: ProjectStartedEvent;
+  onProjectStopped: ProjectStoppedEvent;
+  onTaskCreated: TaskCreatedEvent;
+  onTaskPrepared: TaskPreparedEvent;
+  onTaskInitialized: TaskInitializedEvent;
+  onTaskClosed: TaskClosedEvent;
+  onTaskUpdated: TaskUpdatedEvent;
+  onTaskDeleted: TaskDeletedEvent;
+  onPromptStarted: PromptStartedEvent;
+  onPromptFinished: PromptFinishedEvent;
+  onPromptTemplate: PromptTemplateEvent;
+  onAgentStarted: AgentStartedEvent;
+  onAgentFinished: AgentFinishedEvent;
+  onAgentStepStarted: AgentStepStartedEvent;
+  onAgentStepFinished: AgentStepFinishedEvent;
+  onOptimizeMessages: OptimizeMessagesEvent;
+  onImportantReminders: ImportantRemindersEvent;
+  onAiderPromptStarted: AiderPromptStartedEvent;
+  onAiderPromptFinished: AiderPromptFinishedEvent;
+  onToolApproval: ToolApprovalEvent;
+  onToolCalled: ToolCalledEvent;
+  onToolFinished: ToolFinishedEvent;
+  onFilesAdded: FilesAddedEvent;
+  onFilesDropped: FilesDroppedEvent;
+  onRuleFilesRetrieved: RuleFilesRetrievedEvent;
+  onResponseChunk: ResponseChunkEvent;
+  onResponseCompleted: ResponseCompletedEvent;
+  onHandleApproval: HandleApprovalEvent;
+  onSubagentStarted: SubagentStartedEvent;
+  onSubagentFinished: SubagentFinishedEvent;
+  onQuestionAsked: QuestionAskedEvent;
+  onQuestionAnswered: QuestionAnsweredEvent;
+  onCommandExecuted: CommandExecutedEvent;
+  onCustomCommandExecuted: CustomCommandExecutedEvent;
+  onBeforeCommit: BeforeCommitEvent;
+  onAfterCommit: AfterCommitEvent;
+  onInterrupted: InterruptedEvent;
+};
+
+const EXTENSION_TOOL_RESULT_MAX_CHARS = 200_000;
+
+const hasNonTextContentParts = (value: unknown): boolean => {
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return contentArrayHasNonTextParts(value);
+  }
+  const obj = value as Record<string, unknown>;
+  return ('content' in obj && contentArrayHasNonTextParts(obj.content)) || ('value' in obj && contentArrayHasNonTextParts(obj.value));
+};
+
+const boundExtensionToolResult = async (result: unknown): Promise<unknown> => {
+  if (typeof result === 'string' && result.length > EXTENSION_TOOL_RESULT_MAX_CHARS) {
+    return await truncateToolResult(result, 1000, 200, 20_000);
+  }
+
+  if (result !== null && typeof result === 'object') {
+    if (hasNonTextContentParts(result)) {
+      return result;
+    }
+    const { text, truncated } = stringifyWithBudget(result, EXTENSION_TOOL_RESULT_MAX_CHARS);
+    if (truncated) {
+      return JSON.parse(text);
+    }
+  }
+
+  return result;
+};
+
+export class ExtensionManager {
+  private loader: ExtensionLoader;
+  private fetcher: ExtensionFetcher;
+  private globalWatcher: FSWatcher | null = null;
+  private projectWatchers: Map<string, FSWatcher> = new Map();
+  private initialized = false;
+  private listeners: ExtensionsChangeListener[] = [];
+  private extensionMtimes: Map<string, number> = new Map();
+  private readonly startedProjects = new Map<string, Project>();
+
+  private libraryLoader: ExtensionLibraryLoader;
+
+  constructor(
+    private readonly store: Store,
+    private readonly modelManager: ModelManager,
+    private readonly eventManager: EventManager,
+    private readonly telemetryManager: TelemetryManager,
+    private readonly memoryManager: MemoryManager,
+    private readonly mcpConfigManager?: McpConfigManager,
+    private readonly registry: ExtensionRegistry = new ExtensionRegistry(),
+  ) {
+    this.loader = new ExtensionLoader();
+    this.fetcher = new ExtensionFetcher();
+    this.libraryLoader = new ExtensionLibraryLoader();
+  }
+
+  private debouncedNotifyListeners = debounce(() => {
+    const extensions = this.registry.getExtensions();
+    for (const listener of this.listeners) {
+      listener(extensions);
+    }
+  }, 100);
+
+  private isExtensionDisabled(filePath: string): boolean {
+    const settings = this.store.getSettings();
+    const disabledExtensions = settings.extensions?.disabled || [];
+    return disabledExtensions.includes(filePath);
+  }
+
+  /**
+   * Filter extensions based on disabled list from settings
+   * @param extensions - All loaded extensions
+   * @returns Filtered extensions excluding disabled ones
+   */
+  private filterEnabledExtensions(extensions: LoadedExtension[]): LoadedExtension[] {
+    return extensions.filter((ext) => !this.isExtensionDisabled(ext.filePath));
+  }
+
+  /**
+   * Handle settings changes. Detects when extensions are enabled/disabled
+   * and triggers lifecycle events accordingly.
+   */
+  async settingsChanged(oldSettings: SettingsData, newSettings: SettingsData): Promise<void> {
+    const oldDisabled = oldSettings.extensions?.disabled || [];
+    const newDisabled = newSettings.extensions?.disabled || [];
+    const oldRepositories = oldSettings.extensions?.repositories || [AIDER_DESK_EXTENSIONS_REPO_URL];
+    const newRepositories = newSettings.extensions?.repositories || [AIDER_DESK_EXTENSIONS_REPO_URL];
+
+    // Check for disabled extensions changes
+    const disabledChanged = JSON.stringify([...oldDisabled].sort()) !== JSON.stringify([...newDisabled].sort());
+
+    if (disabledChanged) {
+      // newlyEnabled: was disabled before, now enabled (removed from disabled list)
+      // newlyDisabled: was enabled before, now disabled (added to disabled list)
+      const newlyEnabled = oldDisabled.filter((name) => !newDisabled.includes(name));
+      const newlyDisabled = newDisabled.filter((name) => !oldDisabled.includes(name));
+
+      // Unload newly disabled extensions: disposables first, then onUnload
+      for (const filePath of newlyDisabled) {
+        const loaded = this.registry.getExtension(filePath);
+        if (!loaded?.initialized) {
+          continue;
+        }
+
+        await loaded.disposableStore?.disposeExtension();
+
+        if (loaded.instance.onUnload) {
+          try {
+            await loaded.instance.onUnload();
+            logger.debug(`[Extensions] Unloaded disabled extension: ${loaded.metadata.name}`);
+          } catch (error) {
+            logger.error(`[Extensions] Failed to unload extension '${loaded.metadata.name}':`, error);
+          }
+        }
+
+        this.registry.setInitialized(filePath, false);
+      }
+
+      // Re-initialize newly enabled extensions
+      for (const filePath of newlyEnabled) {
+        const loaded = this.registry.getExtension(filePath);
+        if (!loaded) {
+          continue;
+        }
+
+        try {
+          const success = await this.initializeExtension(loaded, loaded.project);
+          if (success) {
+            logger.debug(`[Extensions] Re-initialized enabled extension: ${loaded.metadata.name}`);
+          }
+        } catch (error) {
+          logger.error(`[Extensions] Failed to re-initialize extension '${loaded.metadata.name}':`, error);
+        }
+      }
+
+      const changedExtensions = [...newlyDisabled, ...newlyEnabled];
+
+      if (changedExtensions.length > 0) {
+        // Check if any changed extensions have UI components
+        const allExtensions = this.registry.getExtensions();
+        const hasUIComponentsChange = allExtensions.some((ext) => changedExtensions.includes(ext.filePath) && ext.instance.getUIComponents !== undefined);
+
+        if (hasUIComponentsChange) {
+          logger.debug('[Extensions] Extensions with UI components changed, triggering UI refresh');
+          this.eventManager.sendExtensionUIRefresh({ reloadComponents: true });
+        }
+      }
+    }
+
+    // Check for repository changes
+    const repositoriesChanged = JSON.stringify([...oldRepositories].sort()) !== JSON.stringify([...newRepositories].sort());
+
+    if (repositoriesChanged) {
+      logger.debug('[Extensions] Repository list changed, refreshing extension cache');
+      void this.fetcher.getAvailableExtensions(newRepositories, true);
+    }
+
+    // Re-create watchers if fileWatchMode changed
+    if (oldSettings.fileWatchMode !== newSettings.fileWatchMode) {
+      void this.restartWatchers();
+    }
+  }
+
+  addListener(listener: ExtensionsChangeListener): void {
+    this.listeners.push(listener);
+  }
+
+  removeListener(listener: ExtensionsChangeListener): void {
+    const index = this.listeners.indexOf(listener);
+    if (index > -1) {
+      this.listeners.splice(index, 1);
+    }
+  }
+
+  async init(): Promise<void> {
+    logger.info('[Extensions] Starting extension system initialization...');
+
+    try {
+      this.registry.clear();
+
+      await this.loadExtensionsForDir(AIDER_DESK_GLOBAL_EXTENSIONS_DIR);
+
+      this.initialized = true;
+
+      this.migrateDisabledExtensions();
+
+      await this.startHotReloadWatcher();
+
+      this.captureExtensionsTelemetry();
+
+      // Preload available extensions from repositories in background
+      this.preloadAvailableExtensions().catch((error) => {
+        logger.warn('[Extensions] Failed to preload available extensions:', error);
+      });
+    } catch (error) {
+      // Mark as initialized even on failure so dispatchEvent doesn't block forever waiting for init
+      this.initialized = true;
+      logger.error(`[Extensions] Extension system initialization failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Preload available extensions from configured repositories.
+   * This warms the fetcher cache so Settings page loads instantly.
+   */
+  private async preloadAvailableExtensions(): Promise<void> {
+    const settings = this.store.getSettings();
+    const repositories = settings.extensions?.repositories || [AIDER_DESK_EXTENSIONS_REPO_URL];
+
+    logger.debug('[Extensions] Preloading available extensions from repositories...');
+
+    try {
+      const extensions = await this.fetcher.getAvailableExtensions(repositories);
+      logger.info(
+        `[Extensions] Preloaded ${extensions.length} available extension(s) from ${repositories.length} repositor${repositories.length === 1 ? 'y' : 'ies'}`,
+      );
+    } catch (error) {
+      logger.error('[Extensions] Failed to preload available extensions:', error);
+      throw error;
+    }
+  }
+
+  private async initializeExtension(loaded: LoadedExtension, project?: Project): Promise<boolean> {
+    const { filePath, instance, metadata } = loaded;
+    loaded.project = project;
+
+    if (!instance.onLoad) {
+      logger.debug(`[Extensions] Extension '${metadata.name}' has no onLoad method, skipping initialization`);
+      this.registry.setInitialized(filePath, true);
+      return true;
+    }
+
+    const context = this.createContext(loaded.id, metadata.name, project);
+    try {
+      await instance.onLoad(context);
+      this.registry.setInitialized(filePath, true);
+      await this.dispatchDelayedProjectStarted(loaded);
+      this.eventManager.sendExtensionUIRefresh({
+        projectDir: project?.baseDir,
+        extensionId: loaded.id,
+      });
+      logger.debug(`[Extensions] Initialized extension: ${metadata.name} v${metadata.version}${project ? ` for project ${project.baseDir}}` : ''}`);
+      return true;
+    } catch (error) {
+      await loaded.disposableStore?.disposeExtension();
+      logger.error(`[Extensions] Failed to call onLoad for extension '${metadata.name}${project ? ` for project ${project.baseDir}}` : ''}':`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Delivers onProjectStarted to a freshly (re)initialized extension for projects that are
+   * already running — otherwise lifecycle events dispatched before this extension was
+   * loaded or reloaded would be silently lost.
+   */
+  private async dispatchDelayedProjectStarted(loaded: LoadedExtension): Promise<void> {
+    const { instance, metadata } = loaded;
+    if (typeof instance.onProjectStarted !== 'function' || this.startedProjects.size === 0) {
+      return;
+    }
+
+    // A project-bound extension initialized during Project.start() is not tracked as started yet;
+    // its onProjectStarted arrives via the regular dispatchEvent call right after.
+    const targets = loaded.project ? [loaded.project].filter((p) => this.startedProjects.has(p.baseDir)) : Array.from(this.startedProjects.values());
+
+    for (const target of targets) {
+      try {
+        const context = this.createContext(loaded.id, metadata.name, target);
+        await instance.onProjectStarted({ baseDir: target.baseDir }, context);
+        logger.debug(`[Extensions] Delivered delayed 'onProjectStarted' to '${metadata.name}' for ${target.baseDir}`);
+      } catch (error) {
+        logger.error(`[Extensions] Failed to deliver delayed 'onProjectStarted' to '${metadata.name}' for ${target.baseDir}:`, error);
+      }
+    }
+  }
+
+  /**
+   * Loads, registers, and initializes an extension from a file path.
+   * Combines the common pattern of load → register → initialize.
+   */
+  private async loadAndInitializeExtension(filePath: string, project?: Project): Promise<{ success: boolean; hasUIComponents: boolean }> {
+    try {
+      const result = await this.loader.loadExtension(filePath);
+      if (!result) {
+        logger.error(`[Extensions] Failed to load extension from ${filePath}${project ? ` for project ${project.baseDir}` : ''}`);
+        return { success: false, hasUIComponents: false };
+      }
+
+      const { extension, metadata } = result;
+      await this.registry.register(extension, metadata, filePath, project?.baseDir);
+
+      const loaded = this.registry.getExtension(filePath);
+      if (!loaded) {
+        logger.error(`[Extensions] Failed to retrieve registered extension: ${metadata.name}${project ? ` for project ${project.baseDir}` : ''}`);
+        return { success: false, hasUIComponents: false };
+      }
+
+      if (this.isExtensionDisabled(filePath)) {
+        logger.debug(`[Extensions] Extension '${metadata.name}' is disabled, skipping initialization`);
+        return { success: true, hasUIComponents: false };
+      }
+
+      const success = await this.initializeExtension(loaded, project);
+      if (!success) {
+        return { success: false, hasUIComponents: false };
+      }
+
+      const stat = await fs.stat(filePath).catch(() => null);
+      if (stat) {
+        this.extensionMtimes.set(filePath, stat.mtimeMs);
+      }
+
+      logger.info(`[Extensions] Loaded and initialized extension: ${metadata.name} v${metadata.version}${project ? ` for project ${project.baseDir}` : ''}`);
+      return { success: true, hasUIComponents: loaded.instance.getUIComponents !== undefined };
+    } catch (error) {
+      logger.error(`[Extensions] Failed to load/initialize extension from ${filePath}:`, error);
+      return { success: false, hasUIComponents: false };
+    }
+  }
+
+  /**
+   * Unified method to load all extensions from a directory.
+   * Discovers, loads, initializes, and collects tools/commands for all extensions in the directory.
+   * Used for both global initialization and project-specific loading.
+   *
+   * @param dir - The directory to load extensions from
+   * @param project - Optional project instance (for project-specific extensions)
+   * @returns Object with loadedCount, initializedCount, and errors
+   */
+  private async loadExtensionsForDir(dir: string, project?: Project): Promise<void> {
+    let initializedCount = 0;
+    let reloadComponents = false;
+
+    const extensionPaths = await this.discoverExtensionsFromDir(dir);
+    const loadedCount = extensionPaths.length;
+
+    for (const filePath of extensionPaths) {
+      try {
+        const { success, hasUIComponents } = await this.loadAndInitializeExtension(filePath, project);
+        if (success) {
+          initializedCount++;
+
+          if (hasUIComponents) {
+            reloadComponents = true;
+          }
+        }
+      } catch (error) {
+        const errorMsg = `Failed to load extension from ${filePath}: ${error instanceof Error ? error.message : String(error)}`;
+        logger.error(`[Extensions] ${errorMsg}`);
+      }
+    }
+
+    if (loadedCount > 0) {
+      logger.info(`[Extensions] Loaded ${initializedCount}/${loadedCount} extension(s) from ${dir}`);
+    } else {
+      logger.debug(`[Extensions] No extensions found in ${dir}`);
+    }
+
+    if (reloadComponents) {
+      this.eventManager.sendExtensionUIRefresh({
+        projectDir: project?.baseDir,
+        reloadComponents: true,
+      });
+    }
+
+    const providers = this.getProviders(project);
+    if (providers.length > 0) {
+      this.modelManager.registerExtensionProviders(providers);
+    }
+
+    this.debouncedNotifyListeners();
+  }
+
+  /**
+   * Diff-based reload: only unload/load extensions that were added, removed, or changed,
+   * rather than reloading all extensions in the directory.
+   */
+  private async reloadChangedExtensions(dir: string, project?: Project): Promise<void> {
+    const before = new Set(
+      this.registry
+        .getExtensions()
+        .filter((ext) => ext.filePath.startsWith(dir))
+        .map((ext) => ext.filePath),
+    );
+
+    const after = await this.discoverExtensionsFromDir(dir);
+
+    let reloadComponents = false;
+
+    // Unload removed extensions
+    for (const filePath of before) {
+      if (!after.includes(filePath)) {
+        logger.debug(`[Extensions] Extension removed: ${filePath}`);
+        const ext = this.registry.getExtension(filePath);
+        await this.unloadExtension(filePath);
+        if (ext?.instance.getUIComponents !== undefined) {
+          reloadComponents = true;
+        }
+      }
+    }
+
+    // Load added extensions
+    for (const filePath of after) {
+      if (!before.has(filePath)) {
+        logger.debug(`[Extensions] Extension added: ${filePath}`);
+        const { success, hasUIComponents } = await this.loadAndInitializeExtension(filePath, project);
+        if (success && hasUIComponents) {
+          reloadComponents = true;
+        }
+      }
+    }
+
+    // Reload changed extensions (file exists before and after, but mtime differs)
+    for (const filePath of after) {
+      if (!before.has(filePath)) {
+        continue;
+      }
+      const oldMtime = this.extensionMtimes.get(filePath);
+      const stat = await fs.stat(filePath).catch(() => null);
+      if (!stat) {
+        continue;
+      }
+      if (oldMtime === undefined || stat.mtimeMs !== oldMtime) {
+        logger.debug(`[Extensions] Extension changed: ${filePath}`);
+        const ext = this.registry.getExtension(filePath);
+        await this.unloadExtension(filePath);
+        const { success, hasUIComponents } = await this.loadAndInitializeExtension(filePath, project);
+        if (success && hasUIComponents) {
+          reloadComponents = true;
+        } else if (ext?.instance.getUIComponents !== undefined) {
+          reloadComponents = true;
+        }
+      }
+    }
+
+    if (reloadComponents) {
+      this.eventManager.sendExtensionUIRefresh({
+        projectDir: project?.baseDir,
+        reloadComponents: true,
+      });
+    }
+
+    const providers = this.getProviders(project);
+    if (providers.length > 0) {
+      this.modelManager.registerExtensionProviders(providers);
+    }
+
+    this.debouncedNotifyListeners();
+  }
+
+  getExtensions(projectDir?: string): LoadedExtension[] {
+    return this.registry.getExtensions(projectDir);
+  }
+
+  isInitialized(): boolean {
+    return this.initialized;
+  }
+
+  async waitForInit(): Promise<void> {
+    while (!this.initialized) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  /**
+   * @deprecated Migration helper: converts old name-based disabled list to filePath-based.
+   * Will be removed in a future version.
+   */
+  private migrateDisabledExtensions(): void {
+    const settings = this.store.getSettings();
+    const disabled = settings.extensions?.disabled;
+    if (!disabled || disabled.length === 0) {
+      return;
+    }
+
+    const allExtensions = this.registry.getExtensions();
+    const filePaths = new Set(allExtensions.map((ext) => ext.filePath));
+    const migrated: string[] = [];
+    let changed = false;
+
+    for (const item of disabled) {
+      if (filePaths.has(item)) {
+        migrated.push(item);
+      } else {
+        const match = allExtensions.find((ext) => ext.metadata.name === item);
+        if (match) {
+          migrated.push(match.filePath);
+          changed = true;
+        } else {
+          migrated.push(item);
+        }
+      }
+    }
+
+    if (changed) {
+      logger.info('[Extensions] Migrated disabled extensions from name-based to filePath-based identifiers');
+      this.store.saveSettings({
+        ...settings,
+        extensions: {
+          ...settings.extensions!,
+          disabled: migrated,
+        },
+      });
+    }
+  }
+
+  private captureExtensionsTelemetry() {
+    const allExtensions = this.registry.getExtensions();
+    const settings = this.store.getSettings();
+    const disabledExtensions = settings.extensions?.disabled || [];
+
+    const globalExtensions = allExtensions.filter((ext) => !ext.projectDir).length;
+    const projectExtensions = allExtensions.filter((ext) => ext.projectDir).length;
+    const enabledCount = allExtensions.filter((ext) => !disabledExtensions.includes(ext.filePath)).length;
+
+    this.telemetryManager.captureExtensionsLoaded(allExtensions.length, globalExtensions, projectExtensions, enabledCount, disabledExtensions.length);
+  }
+
+  async dispose(): Promise<void> {
+    if (!this.initialized) {
+      return;
+    }
+
+    logger.debug('[Extensions] Disposing extension system...');
+
+    await this.stopGlobalWatcher();
+
+    for (const projectDir of this.projectWatchers.keys()) {
+      await this.stopProjectWatcher(projectDir);
+    }
+
+    const extensions = this.registry.getExtensions();
+    for (const loaded of extensions) {
+      if (!loaded.initialized) {
+        continue;
+      }
+
+      await loaded.disposableStore?.disposeExtension();
+
+      if (loaded.instance.onUnload) {
+        try {
+          await loaded.instance.onUnload();
+          logger.debug(`[Extensions] Unloaded extension: ${loaded.metadata.name}`);
+        } catch (error) {
+          logger.error(`[Extensions] Failed to unload extension '${loaded.metadata.name}':`, error);
+        }
+      }
+    }
+
+    this.extensionMtimes.clear();
+    this.initialized = false;
+    logger.debug('[Extensions] Extension system disposed');
+  }
+
+  async unloadExtension(filePath: string): Promise<void> {
+    const extension = this.findExtensionByPath(filePath);
+    if (!extension) {
+      return;
+    }
+
+    const { instance, metadata, initialized } = extension;
+
+    if (initialized) {
+      await extension.disposableStore?.disposeExtension();
+
+      if (instance.onUnload) {
+        try {
+          await instance.onUnload();
+          logger.debug(`[Extensions] Called onUnload for extension: ${metadata.name}`);
+        } catch (error) {
+          logger.error(`[Extensions] Failed to unload extension '${metadata.name}':`, error);
+        }
+      }
+    }
+
+    this.registry.unregister(filePath);
+    this.extensionMtimes.delete(filePath);
+    this.modelManager.unregisterExtensionProviders(extension.id);
+    logger.debug(`[Extensions] Unloaded extension: ${filePath}`);
+  }
+
+  async reloadExtension(filePath: string, project?: Project): Promise<boolean> {
+    const extension = this.findExtensionByPath(filePath);
+    if (!extension) {
+      logger.warn(`[Extensions] Cannot reload: extension not found at ${filePath}`);
+      return false;
+    }
+
+    logger.info(`[Extensions] Reloading extension: ${extension.metadata.name} (${filePath})`);
+
+    const hadUIComponents = extension.instance.getUIComponents !== undefined;
+
+    await this.unloadExtension(filePath);
+    const { success, hasUIComponents } = await this.loadAndInitializeExtension(filePath, project);
+
+    if (success && (hasUIComponents || hadUIComponents)) {
+      this.eventManager.sendExtensionUIRefresh({
+        projectDir: project?.baseDir,
+        reloadComponents: true,
+      });
+    }
+
+    const providers = this.getProviders(project);
+    if (providers.length > 0) {
+      this.modelManager.registerExtensionProviders(providers);
+    }
+
+    this.debouncedNotifyListeners();
+    return success;
+  }
+
+  private getOrCreateDisposableStore(loaded: LoadedExtension): DisposableStore {
+    if (!loaded.disposableStore) {
+      loaded.disposableStore = new DisposableStore(loaded.metadata.name);
+    }
+    return loaded.disposableStore;
+  }
+
+  private findLoadedById(extensionId: string, projectDir?: string): LoadedExtension | undefined {
+    const candidates = this.registry.getExtensions(projectDir);
+    return candidates.find((e) => e.id === extensionId);
+  }
+
+  private createContext(extensionId: string, extensionName: string, project?: Project, task?: Task): ExtensionContextImpl {
+    const loaded = this.findLoadedById(extensionId, project?.baseDir);
+    if (!loaded) {
+      throw new Error(`Cannot create context: extension '${extensionId}' not found`);
+    }
+    const store = this.getOrCreateDisposableStore(loaded);
+    return new ExtensionContextImpl(
+      extensionId,
+      extensionName,
+      store,
+      this.store,
+      this.modelManager,
+      this.eventManager,
+      this.memoryManager,
+      project,
+      task,
+      this.mcpConfigManager,
+    );
+  }
+
+  private findExtensionByPath(filePath: string): LoadedExtension | undefined {
+    const extensions = this.registry.getExtensions();
+    return extensions.find((ext) => ext.filePath === filePath);
+  }
+
+  private async discoverExtensionsFromDir(extensionsDir: string): Promise<string[]> {
+    const extensionPaths = await this.scanDirectory(extensionsDir);
+
+    const extensionMap = new Map<string, string>();
+
+    for (const extPath of extensionPaths) {
+      const extensionKey = path.relative(extensionsDir, extPath);
+      extensionMap.set(extensionKey, extPath);
+    }
+
+    const extensions = Array.from(extensionMap.values());
+    extensions.sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+
+    if (extensions.length > 0) {
+      logger.info(`[Extensions] Discovered ${extensions.length} extension(s): ${extensions.map((e) => path.basename(e)).join(', ')}`);
+    }
+
+    return extensions;
+  }
+
+  private async scanDirectory(dir: string): Promise<string[]> {
+    const extensions: string[] = [];
+
+    try {
+      await fs.access(dir);
+    } catch {
+      logger.debug(`[Extensions] Directory does not exist: ${dir}`);
+      return extensions;
+    }
+
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          const indexPathTs = path.join(dir, entry.name, 'index.ts');
+          const indexPathJs = path.join(dir, entry.name, 'index.js');
+
+          if (await this.fileExists(indexPathTs)) {
+            extensions.push(indexPathTs);
+          } else if (await this.fileExists(indexPathJs)) {
+            extensions.push(indexPathJs);
+          }
+        } else if (entry.isFile() && (entry.name.endsWith('.ts') || entry.name.endsWith('.js'))) {
+          extensions.push(path.join(dir, entry.name));
+        }
+      }
+    } catch (error) {
+      logger.error(`[Extensions] Failed to scan directory ${dir}:`, error);
+    }
+
+    return extensions;
+  }
+
+  private async fileExists(filePath: string): Promise<boolean> {
+    try {
+      await fs.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async setupWatcherForDir(dir: string, onChange: () => Promise<void>): Promise<FSWatcher | null> {
+    try {
+      const dirExists = await fs
+        .access(dir)
+        .then(() => true)
+        .catch(() => false);
+      if (!dirExists) {
+        await fs.mkdir(dir, { recursive: true });
+      }
+
+      const debouncedOnChange = debounce(onChange, 3000);
+
+      const isRelevantFile = (filePath: string): boolean => {
+        return ['.ts', '.js', '.tsx', '.jsx'].includes(path.extname(filePath));
+      };
+
+      const watcher = watch(dir, {
+        persistent: true,
+        usePolling: shouldUsePolling(dir, this.store.getSettings().fileWatchMode),
+        ignoreInitial: true,
+        ignored: (filePath: string) => {
+          const basename = path.basename(filePath);
+          if (basename.startsWith('.')) {
+            return true;
+          }
+          if (basename === 'node_modules') {
+            return true;
+          }
+          if (!path.extname(filePath)) {
+            return false;
+          }
+          return !isRelevantFile(filePath);
+        },
+      });
+
+      watcher
+        .on('all', (_eventName, filePath) => {
+          logger.debug(`[Extensions] File changed: ${filePath}`);
+          if (isRelevantFile(filePath)) {
+            debouncedOnChange();
+          }
+        })
+        .on('error', (error) => {
+          logger.error(`[Extensions] Watcher error for directory ${dir}:`, error);
+        });
+
+      return watcher;
+    } catch (error) {
+      logger.error(`[Extensions] Failed to setup watcher for directory ${dir}:`, error);
+      return null;
+    }
+  }
+
+  private async startHotReloadWatcher(): Promise<void> {
+    if (this.globalWatcher) {
+      return;
+    }
+
+    this.globalWatcher = await this.setupWatcherForDir(AIDER_DESK_GLOBAL_EXTENSIONS_DIR, async () => {
+      logger.debug('[Extensions] Global extensions changed, reloading...');
+      await this.reloadGlobalExtensions();
+    });
+
+    if (this.globalWatcher) {
+      logger.debug('[Extensions] Hot reload enabled for global directory');
+    }
+  }
+
+  private async reloadGlobalExtensions(): Promise<void> {
+    await this.reloadChangedExtensions(AIDER_DESK_GLOBAL_EXTENSIONS_DIR);
+  }
+
+  private async unloadExtensionsForDir(dir: string): Promise<void> {
+    const extensions = this.registry.getExtensions();
+    const extensionsInDir = extensions.filter((ext) => ext.filePath.startsWith(dir));
+
+    for (const ext of extensionsInDir) {
+      await this.unloadExtension(ext.filePath);
+    }
+  }
+
+  private async stopGlobalWatcher(): Promise<void> {
+    if (this.globalWatcher) {
+      await this.globalWatcher.close();
+      this.globalWatcher = null;
+      logger.debug('[Extensions] Hot reload disabled');
+    }
+  }
+
+  async reloadProjectExtensions(project: Project): Promise<void> {
+    const projectDir = project.baseDir;
+    const projectExtensionsDir = path.join(projectDir, AIDER_DESK_EXTENSIONS_DIR);
+
+    logger.debug(`[Extensions] Reloading extensions for project: ${projectDir}`);
+
+    await this.unloadExtensionsForDir(projectExtensionsDir);
+    await this.loadExtensionsForDir(projectExtensionsDir, project);
+
+    if (!this.projectWatchers.has(projectDir)) {
+      const watcher = await this.setupWatcherForDir(projectExtensionsDir, async () => {
+        logger.debug(`[Extensions] Project extensions changed for ${projectDir}, reloading...`);
+        await this.reloadChangedExtensions(projectExtensionsDir, project);
+      });
+
+      if (watcher) {
+        this.projectWatchers.set(projectDir, watcher);
+        logger.debug(`[Extensions] Started watching project extensions: ${projectDir}`);
+      }
+    }
+
+    logger.info(`[Extensions] Reloaded extensions for project: ${projectDir}`);
+  }
+
+  async stopProjectWatcher(projectDir: string): Promise<void> {
+    const watcher = this.projectWatchers.get(projectDir);
+    if (watcher) {
+      await watcher.close();
+      this.projectWatchers.delete(projectDir);
+      logger.debug(`[Extensions] Stopped watching project extensions: ${projectDir}`);
+    }
+  }
+
+  private async restartWatchers(): Promise<void> {
+    const projectDirs = Array.from(this.projectWatchers.keys());
+
+    await this.stopGlobalWatcher();
+    for (const dir of projectDirs) {
+      await this.stopProjectWatcher(dir);
+    }
+
+    await this.startHotReloadWatcher();
+    for (const dir of projectDirs) {
+      const projectExtensionsDir = path.join(dir, AIDER_DESK_EXTENSIONS_DIR);
+      const watcher = await this.setupWatcherForDir(projectExtensionsDir, async () => {
+        logger.debug(`[Extensions] Project extensions changed for ${dir}, reloading...`);
+        await this.reloadChangedExtensions(projectExtensionsDir);
+      });
+      if (watcher) {
+        this.projectWatchers.set(dir, watcher);
+      }
+    }
+  }
+
+  private static readonly TOOL_NAME_REGEX = /^[a-z][a-z0-9_-]*$/;
+
+  private static readonly COMMAND_NAME_REGEX = /^[a-z][a-z0-9_:-]*$/;
+
+  validateToolDefinition(tool: ToolDefinition): {
+    isValid: boolean;
+    errors: string[];
+  } {
+    const errors: string[] = [];
+
+    try {
+      if (!tool.name) {
+        errors.push('Tool name must be a non-empty string');
+      } else if (!ExtensionManager.TOOL_NAME_REGEX.test(tool.name)) {
+        errors.push(
+          `Tool name '${tool.name}' must start with a lowercase letter and contain only lowercase letters, numbers, hyphens, or underscores (e.g., 'run-linter', 'my---tool', 'tool_name')`,
+        );
+      }
+
+      if (!tool.description || tool.description.trim() === '') {
+        errors.push('Tool description must be a non-empty string');
+      }
+
+      if (!tool.inputSchema || !(tool.inputSchema instanceof z.ZodType)) {
+        errors.push('Tool inputSchema must be a Zod schema');
+      }
+
+      if (!tool.execute || typeof tool.execute !== 'function') {
+        errors.push('Tool execute must be a function');
+      }
+    } catch (error) {
+      errors.push(`Validation error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    return {
+      isValid: errors.length === 0,
+      errors,
+    };
+  }
+
+  getToolsInfo(projectDir?: string): ExtensionToolInfo[] {
+    const allExtensions = this.registry.getExtensions(projectDir);
+    const extensions = this.filterEnabledExtensions(allExtensions);
+    const result: ExtensionToolInfo[] = [];
+
+    for (const loaded of extensions) {
+      const { instance, metadata } = loaded;
+
+      if (!instance.getTools) {
+        continue;
+      }
+
+      try {
+        const context = this.createContext(loaded.id, metadata.name);
+        const tools = instance.getTools(context, 'agent', DEFAULT_AGENT_PROFILE);
+
+        if (!Array.isArray(tools)) {
+          continue;
+        }
+
+        const toolInfos = tools.filter((tool) => tool.name && tool.description).map((tool) => ({ name: tool.name, description: tool.description }));
+
+        if (toolInfos.length > 0) {
+          result.push({
+            extensionId: loaded.id,
+            extensionName: metadata.name,
+            tools: toolInfos,
+          });
+        }
+      } catch (error) {
+        logger.error(`[Extensions] Failed to get tools info from extension '${metadata.name}':`, error);
+      }
+    }
+
+    return result;
+  }
+
+  getTools(task: Task, mode: string, profile: AgentProfile): RegisteredTool[] {
+    const collectedTools: RegisteredTool[] = [];
+    const allExtensions = this.registry.getExtensions(task.getProjectDir());
+    const extensions = this.filterEnabledExtensions(allExtensions);
+    const disabledExtensionTools = profile.disabledExtensionTools ?? [];
+
+    for (const loaded of extensions) {
+      const { instance, metadata } = loaded;
+
+      if (!instance.getTools) {
+        continue;
+      }
+
+      if (disabledExtensionTools.includes(loaded.id)) {
+        continue;
+      }
+
+      try {
+        const context = this.createContext(loaded.id, metadata.name, task.project, task);
+        const tools = instance.getTools(context, mode, profile);
+
+        if (!Array.isArray(tools)) {
+          logger.error(`[Extensions] Extension '${metadata.name}' getTools() did not return an array`);
+          continue;
+        }
+
+        for (const tool of tools) {
+          const validation = this.validateToolDefinition(tool);
+
+          if (!validation.isValid) {
+            logger.error(`[Extensions] Invalid tool '${tool.name}' from extension '${metadata.name}': ${validation.errors.join(', ')}`);
+            continue;
+          }
+
+          const fullToolId = `${loaded.id}${TOOL_GROUP_NAME_SEPARATOR}${tool.name}`;
+          if (profile.toolApprovals?.[fullToolId] === ToolApprovalState.Never || profile.toolApprovals?.[tool.name] === ToolApprovalState.Never) {
+            continue;
+          }
+
+          collectedTools.push({
+            extensionId: loaded.id,
+            extensionName: metadata.name,
+            tool,
+          });
+        }
+      } catch (error) {
+        logger.error(`[Extensions] Failed to get tools from extension '${metadata.name}':`, error);
+      }
+    }
+
+    return collectedTools;
+  }
+
+  /**
+   * Creates a Vercel AI SDK compatible ToolSet from registered extension tools.
+   * Each tool is wrapped with validation, error handling, and ExtensionContext creation.
+   *
+   * @param task - The current Task instance
+   * @param mode - The current mode
+   * @param profile - The agent profile with tool approval settings
+   * @param allTools - The complete set of available tools
+   * @param abortSignal - Optional AbortSignal for cancellation support
+   * @returns A ToolSet containing all approved extension tools
+   */
+  createExtensionToolset(
+    task: Task,
+    mode: string,
+    profile: AgentProfile,
+    allTools: ToolSet,
+    approvalManager: ApprovalManager,
+    abortSignal?: AbortSignal,
+  ): ToolSet {
+    const toolSet: ToolSet = {};
+    const registeredTools = this.getTools(task, mode, profile);
+
+    for (const { extensionId, extensionName, tool } of registeredTools) {
+      const toolId = tool.name;
+      const fullToolId = `${extensionId}${TOOL_GROUP_NAME_SEPARATOR}${tool.name}`;
+      const context = this.createContext(extensionId, extensionName, task.project, task);
+
+      // Tool approval filtering is handled in getTools()
+
+      toolSet[toolId] = {
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        execute: async (input: Record<string, unknown>, options: ToolExecutionOptions<unknown>) => {
+          // --- Tool Approval Logic ---
+          const toolApproval = profile.toolApprovals?.[fullToolId];
+          logger.debug(
+            `[Extensions] Tool '${tool.name}' approval check: fullToolId='${fullToolId}', approval=${toolApproval}, allApprovals=${JSON.stringify(profile.toolApprovals)}`,
+          );
+          if (toolApproval === ToolApprovalState.Ask) {
+            const questionKey = fullToolId;
+            const questionText = `Approve tool ${tool.name} from ${extensionName} extension?`;
+            const questionSubject = input ? JSON.stringify(input) : undefined;
+
+            const [isApproved, userInput] = await approvalManager.handleToolApproval(fullToolId, input, questionKey, questionText, questionSubject);
+
+            if (!isApproved) {
+              logger.warn(`Tool execution denied by user: ${fullToolId}`);
+              return `Tool execution denied by user.${userInput ? ` User input: ${userInput}` : ''}`;
+            }
+            logger.debug(`Tool execution approved: ${fullToolId}`);
+          }
+          // --- End Tool Approval Logic ---
+
+          const allToolsInternal = Object.entries(allTools).reduce(
+            (acc, [toolId, tool]) => {
+              acc[toolId] = {
+                execute: async (input: Record<string, unknown>) => {
+                  if (tool.execute) {
+                    return await tool.execute(input, {
+                      toolCallId: '',
+                      abortSignal: abortSignal || options.abortSignal,
+                      messages: [],
+                      context: undefined as never,
+                    });
+                  } else {
+                    return 'Tool does not have an execute function';
+                  }
+                },
+              };
+              return acc;
+            },
+            {} as Record<string, Tool>,
+          );
+
+          try {
+            return await boundExtensionToolResult(await tool.execute(input, abortSignal || options.abortSignal, context, allToolsInternal));
+          } catch (error) {
+            // Error isolation - log and return error message
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            logger.error(`[Extensions] Tool '${tool.name}' failed in extension '${extensionName}':`, error);
+            return `Error: ${errorMsg}`;
+          }
+        },
+      };
+    }
+
+    const toolCount = Object.keys(toolSet).length;
+    if (toolCount > 0) {
+      logger.debug(`[Extensions] Created toolset with ${toolCount} extension tool(s)`);
+    }
+
+    return toolSet;
+  }
+
+  validateCommandDefinition(command: CommandDefinition): {
+    isValid: boolean;
+    errors: string[];
+  } {
+    const errors: string[] = [];
+
+    try {
+      if (!command.name) {
+        errors.push('Command name must be a non-empty string');
+      } else if (!ExtensionManager.COMMAND_NAME_REGEX.test(command.name)) {
+        errors.push(
+          `Command name '${command.name}' must start with a lowercase letter and contain only lowercase letters, numbers, hyphens, underscores, or colons (e.g., 'generate-tests', 'impl:tweak', 'command_name')`,
+        );
+      }
+
+      if (!command.description || command.description.trim() === '') {
+        errors.push('Command description must be a non-empty string');
+      }
+
+      if (!command.execute || typeof command.execute !== 'function') {
+        errors.push('Command execute must be a function');
+      }
+
+      if (command.arguments && !Array.isArray(command.arguments)) {
+        errors.push('Command arguments must be an array');
+      }
+    } catch (error) {
+      errors.push(`Validation error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    return {
+      isValid: errors.length === 0,
+      errors,
+    };
+  }
+
+  getCommands(project: Project): RegisteredCommand[] {
+    const collectedCommands: RegisteredCommand[] = [];
+    const allExtensions = this.registry.getExtensions(project.baseDir);
+    const extensions = this.filterEnabledExtensions(allExtensions);
+
+    for (const loaded of extensions) {
+      const { instance, metadata } = loaded;
+
+      if (!instance.getCommands) {
+        continue;
+      }
+
+      try {
+        const context = this.createContext(loaded.id, metadata.name, project);
+        const commands = instance.getCommands(context);
+
+        if (!Array.isArray(commands)) {
+          logger.error(`[Extensions] Extension '${metadata.name}' getCommands() did not return an array`);
+          continue;
+        }
+
+        for (const command of commands) {
+          const validation = this.validateCommandDefinition(command);
+
+          if (!validation.isValid) {
+            logger.error(`[Extensions] Invalid command '${command.name}' from extension '${metadata.name}': ${validation.errors.join(', ')}`);
+            continue;
+          }
+
+          collectedCommands.push({
+            extensionId: loaded.id,
+            extensionName: metadata.name,
+            command,
+          });
+        }
+      } catch (error) {
+        logger.error(`[Extensions] Failed to get commands from extension '${metadata.name}':`, error);
+      }
+    }
+
+    return collectedCommands;
+  }
+
+  getAgents(project?: Project): RegisteredAgent[] {
+    const collectedAgents: RegisteredAgent[] = [];
+    const allExtensions = this.registry.getExtensions(project?.baseDir);
+    const extensions = this.filterEnabledExtensions(allExtensions);
+
+    for (const loaded of extensions) {
+      const { instance, metadata } = loaded;
+
+      if (!instance.getAgents) {
+        continue;
+      }
+
+      try {
+        const context = this.createContext(loaded.id, metadata.name, project);
+        const agents = instance.getAgents(context);
+
+        if (!Array.isArray(agents)) {
+          logger.error(`[Extensions] Extension '${metadata.name}' getAgents() did not return an array`);
+          continue;
+        }
+
+        for (const agent of agents) {
+          if (!agent.id || !agent.name) {
+            logger.error(`[Extensions] Invalid agent from extension '${metadata.name}': missing id or name`);
+            continue;
+          }
+
+          if (loaded.projectDir && !agent.projectDir) {
+            agent.projectDir = loaded.projectDir;
+          }
+
+          collectedAgents.push({
+            extensionId: loaded.id,
+            extensionName: metadata.name,
+            agent,
+          });
+        }
+      } catch (error) {
+        logger.error(`[Extensions] Failed to get agents from extension '${metadata.name}':`, error);
+      }
+    }
+
+    return collectedAgents;
+  }
+
+  getAgentById(agentId: string, project?: Project): RegisteredAgent | undefined {
+    const agents = this.getAgents(project);
+    return agents.find((a) => a.agent.id === agentId);
+  }
+
+  getModes(project: Project): RegisteredMode[] {
+    const collectedModes: RegisteredMode[] = [];
+    const allExtensions = this.registry.getExtensions(project.baseDir);
+    const extensions = this.filterEnabledExtensions(allExtensions);
+
+    for (const loaded of extensions) {
+      const { instance, metadata } = loaded;
+
+      if (!instance.getModes) {
+        continue;
+      }
+
+      try {
+        const context = this.createContext(loaded.id, metadata.name, project);
+        const modes = instance.getModes(context);
+
+        if (!Array.isArray(modes)) {
+          logger.error(`[Extensions] Extension '${metadata.name}' getModes() did not return an array`);
+          continue;
+        }
+
+        for (const mode of modes) {
+          const validation = this.validateModeDefinition(mode);
+
+          if (!validation.isValid) {
+            logger.error(`[Extensions] Invalid mode '${mode.name}' from extension '${metadata.name}': ${validation.errors.join(', ')}`);
+            continue;
+          }
+
+          collectedModes.push({
+            extensionId: loaded.id,
+            extensionName: metadata.name,
+            mode,
+          });
+        }
+      } catch (error) {
+        logger.error(`[Extensions] Failed to get modes from extension '${metadata.name}':`, error);
+      }
+    }
+
+    return collectedModes;
+  }
+
+  validateModeDefinition(mode: ModeDefinition): {
+    isValid: boolean;
+    errors: string[];
+  } {
+    const errors: string[] = [];
+
+    if (!mode.name || typeof mode.name !== 'string') {
+      errors.push('Mode must have a valid name');
+    }
+
+    if (!mode.label || typeof mode.label !== 'string') {
+      errors.push('Mode must have a valid label');
+    }
+
+    if (mode.description !== undefined && typeof mode.description !== 'string') {
+      errors.push('Mode description must be a string if provided');
+    }
+
+    if (mode.icon !== undefined && typeof mode.icon !== 'string') {
+      errors.push('Mode icon must be a string if provided');
+    }
+
+    return {
+      isValid: errors.length === 0,
+      errors,
+    };
+  }
+
+  getProviders(project?: Project): RegisteredProvider[] {
+    const collectedProviders: RegisteredProvider[] = [];
+    const allExtensions = this.registry.getExtensions(project?.baseDir);
+    const extensions = this.filterEnabledExtensions(allExtensions);
+
+    for (const loaded of extensions) {
+      const { instance, metadata } = loaded;
+
+      if (!instance.getProviders) {
+        continue;
+      }
+
+      try {
+        const context = this.createContext(loaded.id, metadata.name, project);
+        const providers = instance.getProviders(context);
+
+        if (!Array.isArray(providers)) {
+          logger.error(`[Extensions] Extension '${metadata.name}' getProviders() did not return an array`);
+          continue;
+        }
+
+        for (const provider of providers) {
+          if (!provider.id || !provider.name || !provider.strategy) {
+            logger.error(`[Extensions] Invalid provider from extension '${metadata.name}': missing id, name or strategy`);
+            continue;
+          }
+
+          collectedProviders.push({
+            extensionId: loaded.id,
+            extensionName: metadata.name,
+            provider,
+          });
+        }
+      } catch (error) {
+        logger.error(`[Extensions] Failed to get providers from extension '${metadata.name}':`, error);
+      }
+    }
+
+    return collectedProviders;
+  }
+
+  getSkills(project: Project, task: Task): SkillDefinition[] {
+    const collectedSkills: SkillDefinition[] = [];
+    const allExtensions = this.registry.getExtensions(project.baseDir);
+    const extensions = this.filterEnabledExtensions(allExtensions);
+
+    for (const loaded of extensions) {
+      const { instance, metadata } = loaded;
+
+      if (!instance.getSkills) {
+        continue;
+      }
+
+      try {
+        const context = this.createContext(loaded.id, metadata.name, project, task);
+        const skills = instance.getSkills(context);
+
+        if (!Array.isArray(skills)) {
+          logger.error(`[Extensions] Extension '${metadata.name}' getSkills() did not return an array`);
+          continue;
+        }
+
+        for (const skill of skills) {
+          if (!skill.name || !skill.description) {
+            logger.error(`[Extensions] Invalid skill from extension '${metadata.name}': missing name or description`);
+            continue;
+          }
+
+          if (!skill.dirPath && !skill.content) {
+            logger.error(`[Extensions] Invalid skill from extension '${metadata.name}': must have dirPath or content`);
+            continue;
+          }
+
+          collectedSkills.push({
+            ...skill,
+            location: skill.location || 'extension',
+          });
+        }
+      } catch (error) {
+        logger.error(`[Extensions] Failed to get skills from extension '${metadata.name}':`, error);
+      }
+    }
+
+    return collectedSkills;
+  }
+
+  getUIComponents(project?: Project, task?: Task): RegisteredUIComponent[] {
+    const collectedComponents: RegisteredUIComponent[] = [];
+    const allExtensions = this.registry.getExtensions(project?.baseDir);
+    const extensions = this.filterEnabledExtensions(allExtensions);
+
+    for (const loaded of extensions) {
+      // Skip uninitialized extensions
+      if (!loaded.initialized) {
+        continue;
+      }
+
+      const { id, instance, metadata } = loaded;
+
+      if (!instance.getUIComponents) {
+        continue;
+      }
+
+      try {
+        const context = this.createContext(loaded.id, metadata.name, project, task);
+        const components = instance.getUIComponents(context);
+
+        if (!Array.isArray(components)) {
+          logger.error(`[Extensions] Extension '${metadata.name}' getUIComponents() did not return an array`);
+          continue;
+        }
+
+        for (const component of components) {
+          const validation = this.validateUIComponentDefinition(component);
+
+          if (!validation.isValid) {
+            logger.error(`[Extensions] Invalid UI component '${component.id}' from extension '${metadata.name}': ${validation.errors.join(', ')}`);
+            continue;
+          }
+
+          collectedComponents.push({
+            extensionId: id,
+            extensionName: metadata.name,
+            component,
+          });
+        }
+      } catch (error) {
+        logger.error(`[Extensions] Failed to get UI components from extension '${metadata.name}':`, error);
+      }
+    }
+
+    return collectedComponents;
+  }
+
+  getUIComponentsLibraries(project?: Project): Map<string, Record<string, string>> {
+    const librariesByExtension = new Map<string, Record<string, string>>();
+    const allExtensions = this.registry.getExtensions(project?.baseDir);
+    const extensions = this.filterEnabledExtensions(allExtensions);
+
+    for (const loaded of extensions) {
+      const { instance, initialized, metadata } = loaded;
+
+      if (!initialized || !instance.getUIComponentsLibraries) {
+        continue;
+      }
+
+      try {
+        const libraries = instance.getUIComponentsLibraries();
+
+        if (typeof libraries !== 'object' || libraries === null || Array.isArray(libraries)) {
+          logger.error(`[Extensions] Extension '${metadata.name}' getUIComponentsLibraries() did not return a Record<string, string>`);
+          continue;
+        }
+
+        const validLibs: Record<string, string> = {};
+        for (const [key, spec] of Object.entries(libraries)) {
+          if (typeof key === 'string' && typeof spec === 'string') {
+            validLibs[key] = spec;
+          }
+        }
+
+        if (Object.keys(validLibs).length > 0) {
+          librariesByExtension.set(loaded.id, validLibs);
+        }
+      } catch (error) {
+        logger.error(`[Extensions] Failed to get UI component libraries from extension '${metadata.name}':`, error);
+      }
+    }
+
+    return librariesByExtension;
+  }
+
+  async loadExtensionLibrary(librarySpec: string): Promise<string> {
+    return await this.libraryLoader.loadLibrary(librarySpec);
+  }
+
+  /**
+   * Check if an extension provides a settings config component.
+   * Uses the dedicated getConfigComponent() method on the Extension interface.
+   */
+  extensionHasConfig(loadedExt: LoadedExtension): boolean {
+    const { instance, initialized } = loadedExt;
+
+    if (!initialized || !instance.getConfigComponent) {
+      return false;
+    }
+
+    try {
+      const context = this.createContext(loadedExt.id, loadedExt.metadata.name);
+      const jsx = instance.getConfigComponent(context);
+      return typeof jsx === 'string' && jsx.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  async getUIExtensionData(extensionId: string, componentId: string, project?: Project, task?: Task): Promise<unknown> {
+    const allExtensions = this.registry.getExtensions(project?.baseDir);
+    const extensions = this.filterEnabledExtensions(allExtensions);
+
+    for (const loaded of extensions) {
+      if (!loaded.initialized) {
+        continue;
+      }
+
+      const { id, instance, metadata } = loaded;
+
+      if (id !== extensionId) {
+        continue;
+      }
+
+      if (!instance.getUIExtensionData) {
+        logger.debug(`[Extensions] Extension '${id}' has no getUIExtensionData method, skipping`);
+        continue;
+      }
+
+      try {
+        logger.debug(`[Extensions] Getting UI extension data from '${id}' for component '${componentId}'`);
+        const context = this.createContext(id, metadata.name, project, task);
+        return await instance.getUIExtensionData(componentId, context);
+      } catch (error) {
+        logger.error(`[Extensions] Failed to get UI extension data from '${id}' for component '${componentId}':`, error);
+        return undefined;
+      }
+    }
+
+    return undefined;
+  }
+
+  async executeUIExtensionAction(extensionId: string, componentId: string, action: string, args: unknown[], project?: Project, task?: Task): Promise<unknown> {
+    const allExtensions = this.registry.getExtensions(project?.baseDir);
+    const extensions = this.filterEnabledExtensions(allExtensions);
+
+    for (const loaded of extensions) {
+      if (!loaded.initialized) {
+        continue;
+      }
+
+      const { id, instance, metadata } = loaded;
+
+      if (id !== extensionId) {
+        continue;
+      }
+
+      if (!instance.executeUIExtensionAction) {
+        logger.debug(`[Extensions] Extension '${id}' has no executeUIExtensionAction method, skipping`);
+        continue;
+      }
+
+      try {
+        logger.debug(`[Extensions] Executing UI extension action '${action}' from '${id}' for component '${componentId}'`);
+        const context = this.createContext(id, metadata.name, project, task);
+        return await instance.executeUIExtensionAction(componentId, action, args, context);
+      } catch (error) {
+        logger.error(`[Extensions] Failed to execute UI extension action '${action}' from '${id}' for component '${componentId}':`, error);
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Get the config component JSX for a specific extension.
+   * Uses the dedicated getConfigComponent() method on the Extension interface.
+   */
+  getExtensionConfigComponent(extensionId: string, project?: Project): ExtensionConfigComponent | null {
+    const allExtensions = this.registry.getExtensions(project?.baseDir);
+    const extensions = this.filterEnabledExtensions(allExtensions);
+
+    for (const loaded of extensions) {
+      if (!loaded.initialized || loaded.id !== extensionId) {
+        continue;
+      }
+
+      if (!loaded.instance.getConfigComponent) {
+        return null;
+      }
+
+      try {
+        const context = this.createContext(loaded.id, loaded.metadata.name, project);
+        const jsx = loaded.instance.getConfigComponent(context);
+
+        if (typeof jsx !== 'string' || jsx.length === 0) {
+          return null;
+        }
+
+        return { jsx };
+      } catch (error) {
+        logger.error(`[Extensions] Failed to get config component from extension '${extensionId}':`, error);
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Get the current configuration data for an extension's settings.
+   * Delegates to the extension's getConfigData() method.
+   */
+  async getExtensionConfig(extensionId: string, project?: Project): Promise<unknown> {
+    const allExtensions = this.registry.getExtensions(project?.baseDir);
+    const extensions = this.filterEnabledExtensions(allExtensions);
+
+    for (const loaded of extensions) {
+      if (!loaded.initialized || loaded.id !== extensionId) {
+        continue;
+      }
+
+      if (!loaded.instance.getConfigData) {
+        return null;
+      }
+
+      try {
+        const context = this.createContext(loaded.id, loaded.metadata.name, project);
+        return await loaded.instance.getConfigData(context);
+      } catch (error) {
+        logger.error(`[Extensions] Failed to get config data from extension '${extensionId}':`, error);
+        throw error;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Save configuration data for an extension's settings.
+   * Delegates to the extension's saveConfigData() method.
+   */
+  async saveExtensionConfig(extensionId: string, configData: unknown, project?: Project): Promise<unknown> {
+    const allExtensions = this.registry.getExtensions(project?.baseDir);
+    const extensions = this.filterEnabledExtensions(allExtensions);
+
+    for (const loaded of extensions) {
+      if (!loaded.initialized || loaded.id !== extensionId) {
+        continue;
+      }
+
+      if (!loaded.instance.saveConfigData) {
+        return null;
+      }
+
+      try {
+        const context = this.createContext(loaded.id, loaded.metadata.name, project);
+        return await loaded.instance.saveConfigData(configData, context);
+      } catch (error) {
+        logger.error(`[Extensions] Failed to save config data for extension '${extensionId}':`, error);
+        throw error;
+      }
+    }
+
+    return null;
+  }
+
+  validateUIComponentDefinition(component: UIComponentDefinition): {
+    isValid: boolean;
+    errors: string[];
+  } {
+    const errors: string[] = [];
+
+    if (!component.id || typeof component.id !== 'string') {
+      errors.push('UI component must have a valid id');
+    }
+
+    if (!component.placement || typeof component.placement !== 'string') {
+      errors.push('UI component must have a valid placement');
+    }
+
+    if (!component.jsx || typeof component.jsx !== 'string') {
+      errors.push('UI component must have valid jsx content');
+    }
+
+    if (component.placement === 'task-message' && !component.messageFilter) {
+      errors.push('UI component with task-message placement must have a messageFilter');
+    }
+
+    if (component.messageFilter) {
+      if (typeof component.messageFilter !== 'object') {
+        errors.push('messageFilter must be an object');
+      } else {
+        if (component.messageFilter.types !== undefined && !Array.isArray(component.messageFilter.types)) {
+          errors.push('messageFilter.types must be an array');
+        }
+        if (component.messageFilter.serverName !== undefined && typeof component.messageFilter.serverName !== 'string') {
+          errors.push('messageFilter.serverName must be a string');
+        }
+        if (component.messageFilter.toolName !== undefined && typeof component.messageFilter.toolName !== 'string') {
+          errors.push('messageFilter.toolName must be a string');
+        }
+      }
+    }
+
+    return {
+      isValid: errors.length === 0,
+      errors,
+    };
+  }
+
+  async updateAgentProfile(profile: AgentProfile): Promise<AgentProfile | null> {
+    const extensions = this.registry.getExtensions();
+
+    for (const loaded of extensions) {
+      const { instance, metadata } = loaded;
+
+      if (!instance.getAgents) {
+        continue;
+      }
+
+      try {
+        const context = this.createContext(loaded.id, metadata.name);
+        const agents = instance.getAgents(context);
+
+        if (!Array.isArray(agents)) {
+          continue;
+        }
+
+        const matchingAgent = agents.find((agent) => agent.id === profile.id);
+        if (!matchingAgent) {
+          continue;
+        }
+
+        if (!instance.onAgentProfileUpdated) {
+          throw new Error(
+            `Extension '${metadata.name}' does not support profile updates. Implement onAgentProfileUpdated() in your extension that provides the agent.`,
+          );
+        }
+
+        logger.debug(`[Extensions] Updating agent profile '${profile.id}' via extension '${metadata.name}'`);
+        const updatedProfile = await instance.onAgentProfileUpdated(context, profile.id, profile);
+
+        if (!updatedProfile) {
+          throw new Error(`Extension '${metadata.name}' did not return an updated profile`);
+        }
+
+        logger.debug(`[Extensions] Agent profile '${profile.id}' updated successfully`);
+        return updatedProfile;
+      } catch (error) {
+        logger.error(`[Extensions] Failed to update agent profile from extension '${metadata.name}':`, error);
+        throw error;
+      }
+    }
+
+    return null;
+  }
+
+  async executeCommand(commandName: string, args: string[], project: Project, task?: Task): Promise<void> {
+    const commands = this.getCommands(project);
+    const registered = commands.find((c) => c.command.name === commandName);
+
+    if (!registered) {
+      throw new Error(`Extension command '${commandName}' not found`);
+    }
+
+    const { extensionId, extensionName, command } = registered;
+
+    try {
+      const context = this.createContext(extensionId, extensionName, project, task);
+
+      logger.debug(`[Extensions] Executing command '${commandName}' from extension '${extensionName}'`);
+      await command.execute(args, context);
+
+      logger.debug(`[Extensions] Command '${commandName}' executed successfully`);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      logger.error(`[Extensions] Command '${commandName}' failed in extension '${extensionName}':`, error);
+      throw new Error(`Extension command '${commandName}' failed: ${errorMsg}`);
+    }
+  }
+
+  /**
+   * Fetch available extensions from a repository URL
+   * @param repositories - Array of repository URLs
+   * @param forceRefresh - Force refresh cache and refetch
+   * @param fetchOnly - Bypass all caching (promise and repo cache) and fetch directly via git clone
+   * @returns Array of available extensions with metadata
+   */
+  async getAvailableExtensions(repositories: string[], forceRefresh = false, fetchOnly = false): Promise<AvailableExtension[]> {
+    if (fetchOnly) {
+      const allExtensions: AvailableExtension[] = [];
+
+      for (const repoUrl of repositories) {
+        try {
+          const extensions = await this.fetcher.fetchExtensionsFromRepo(repoUrl, true);
+          allExtensions.push(...extensions);
+        } catch (error) {
+          logger.error(`[ExtensionManager] Failed to fetch extensions from ${repoUrl}:`, error);
+        }
+      }
+
+      return allExtensions;
+    }
+
+    return this.fetcher.getAvailableExtensions(repositories, forceRefresh);
+  }
+
+  /**
+   * Install an extension from a repository
+   * @param extensionId - Extension identifier
+   * @param repositoryUrl - Repository URL where the extension is located
+   * @param project - Optional project for project-level install
+   * @returns ExtensionOperationResult indicating success or failure with error details
+   */
+  async installExtension(extensionId: string, repositoryUrl: string, project?: Project): Promise<ExtensionOperationResult> {
+    const projectDir = project?.baseDir;
+    try {
+      logger.debug(`[Extensions] Installing extension '${extensionId}' from ${repositoryUrl} into ${projectDir ?? 'global'}`);
+
+      const targetDir = projectDir ? path.join(projectDir, AIDER_DESK_EXTENSIONS_DIR) : AIDER_DESK_GLOBAL_EXTENSIONS_DIR;
+
+      await fs.mkdir(targetDir, { recursive: true });
+
+      const availableExtensions = await this.getAvailableExtensions([repositoryUrl]);
+      const extension = availableExtensions.find((ext) => ext.id === extensionId);
+
+      if (!extension) {
+        throw new Error(`Extension '${extensionId}' not found in repository`);
+      }
+
+      const githubRawBase = this.fetcher.getRawUrl(repositoryUrl);
+      if (!githubRawBase) {
+        throw new Error('Invalid GitHub repository URL');
+      }
+
+      if (extension.type === 'single' && extension.file) {
+        const url = `${githubRawBase}/${extension.file}`;
+        const response = await fetch(url);
+
+        if (!response.ok) {
+          throw new Error(`Failed to download: ${response.statusText}`);
+        }
+
+        const code = await response.text();
+        const targetPath = path.join(targetDir, extension.file);
+        await fs.writeFile(targetPath, code, 'utf-8');
+
+        logger.debug(`[Extensions] Installed single-file extension: ${extension.file}`);
+      } else if (extension.type === 'folder' && extension.folder) {
+        const repoDir = await this.fetcher.ensureRepoCloned(repositoryUrl);
+
+        const extensionsPath = this.fetcher.getExtensionsPath(repositoryUrl, repoDir);
+        const targetPath = path.join(targetDir, extension.folder);
+
+        // For repo-root extensions (entire repo is the extension), use extensionsPath directly
+        // For subdirectory extensions, join with the folder name
+        let sourcePath = path.join(extensionsPath, extension.folder);
+        if (!(await this.fileExists(sourcePath))) {
+          sourcePath = extensionsPath;
+        }
+
+        if (!(await this.fileExists(sourcePath))) {
+          throw new Error(`Extension folder not found in repository: ${extension.folder}`);
+        }
+
+        // Use temp dir for npm install to avoid triggering the watcher with
+        // hundreds of node_modules file writes
+        const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aider-desk-ext-'));
+        const tempExtPath = path.join(tempDir, extension.folder);
+
+        try {
+          await fs.cp(sourcePath, tempExtPath, { recursive: true });
+
+          // Remove .git directory if present (from cloned repos)
+          const gitDir = path.join(tempExtPath, '.git');
+          if (await this.fileExists(gitDir)) {
+            await fs.rm(gitDir, { recursive: true, force: true });
+          }
+
+          if (extension.hasDependencies) {
+            logger.debug(`[Extensions] Installing dependencies for ${extension.name} in temp dir...`);
+            await this.installDependencies(tempExtPath);
+          }
+
+          // Copy to final location — node_modules is ignored by the watcher
+          await fs.cp(tempExtPath, targetPath, { recursive: true });
+        } finally {
+          await fs.rm(tempDir, { recursive: true, force: true });
+        }
+
+        logger.debug(`[Extensions] Installed folder extension: ${extension.folder}`);
+      }
+
+      await this.loadExtensionsForDir(targetDir, project);
+
+      logger.info(`[Extensions] Successfully installed ${extension.name}`);
+      this.telemetryManager.captureExtensionInstalled(extension.name, projectDir ? 'project' : 'global');
+      return { success: true };
+    } catch (error) {
+      logger.error(`[Extensions] Failed to install extension '${extensionId}':`, error);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
+   * Install npm dependencies for a folder extension
+   */
+  private async installDependencies(extensionPath: string): Promise<void> {
+    const { spawn } = await import('child_process');
+
+    return new Promise((resolve, reject) => {
+      const child = spawn('npm', ['install'], {
+        cwd: extensionPath,
+        stdio: 'inherit',
+        shell: true,
+      });
+
+      child.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+        } else if (code === 127) {
+          reject(new Error('npm-not-found'));
+        } else {
+          reject(new Error(`npm install failed with code ${code}`));
+        }
+      });
+
+      child.on('error', reject);
+    });
+  }
+
+  /**
+   * Uninstall an extension
+   * @param extensionId - Extension identifier (filePath)
+   * @param projectDir - Optional project directory for project-level uninstall
+   * @returns true if uninstallation succeeded
+   */
+  async uninstallExtension(extensionId: string, projectDir?: string): Promise<boolean> {
+    try {
+      logger.debug(`[Extensions] Uninstalling extension '${extensionId}'`);
+
+      const extension = this.registry.getExtension(extensionId);
+      if (!extension) {
+        throw new Error(`Extension '${extensionId}' not found`);
+      }
+
+      if (projectDir && extension.projectDir !== projectDir) {
+        throw new Error(`Extension '${extensionId}' does not belong to project ${projectDir}`);
+      }
+
+      if (!extension.filePath) {
+        throw new Error(`Extension '${extensionId}' has no file path`);
+      }
+
+      // Unload (dispose + onUnload) before removing files
+      await this.unloadExtension(extension.filePath);
+
+      const parsedPath = path.parse(extension.filePath);
+      const isFolderExtension = parsedPath.name === 'index';
+
+      if (isFolderExtension) {
+        const folderPath = parsedPath.dir;
+        await fs.rm(folderPath, { recursive: true, force: true });
+        logger.debug(`[Extensions] Removed folder: ${folderPath}`);
+      } else {
+        await fs.unlink(extension.filePath);
+        logger.debug(`[Extensions] Removed file: ${extension.filePath}`);
+      }
+
+      this.registry.unregister(extension.filePath);
+
+      logger.info(`[Extensions] Successfully uninstalled ${extensionId}`);
+      this.telemetryManager.captureExtensionUninstalled(extensionId, extension.projectDir ? 'project' : 'global');
+      return true;
+    } catch (error) {
+      logger.error(`[Extensions] Failed to uninstall extension '${extensionId}':`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Update an extension from a repository, overwriting existing files
+   * @param extensionId - Extension identifier (filePath of installed extension)
+   * @param repositoryUrl - Repository URL where the extension is located
+   * @param project - Optional project for project-level extension
+   * @returns ExtensionOperationResult indicating success or failure with error details
+   */
+  async updateExtension(extensionId: string, repositoryUrl: string, project?: Project): Promise<ExtensionOperationResult> {
+    const projectDir = project?.baseDir;
+    try {
+      logger.debug(`[Extensions] Updating extension '${extensionId}' from ${repositoryUrl}`);
+
+      const existingExtension = this.registry.getExtension(extensionId);
+      if (!existingExtension) {
+        throw new Error(`Extension '${extensionId}' not found`);
+      }
+
+      if (!existingExtension.filePath) {
+        throw new Error(`Extension '${extensionId}' has no file path`);
+      }
+
+      const targetDir = projectDir ? path.join(projectDir, AIDER_DESK_EXTENSIONS_DIR) : AIDER_DESK_GLOBAL_EXTENSIONS_DIR;
+
+      const availableExtensions = await this.getAvailableExtensions([repositoryUrl]);
+      const extension = availableExtensions.find((ext) => ext.id === existingExtension.id);
+
+      if (!extension) {
+        throw new Error(`Extension '${existingExtension.id}' not found in repository`);
+      }
+
+      const githubRawBase = this.fetcher.getRawUrl(repositoryUrl);
+      if (!githubRawBase) {
+        throw new Error('Invalid GitHub repository URL');
+      }
+
+      // Unload only the extension being updated (not all extensions in the directory)
+      await this.unloadExtension(existingExtension.filePath);
+
+      // Clean up old extension if the type changed (file → folder or folder → file)
+      const parsedExistingPath = path.parse(existingExtension.filePath);
+      const existingIsFolder = parsedExistingPath.name === 'index';
+
+      if (extension.type === 'folder' && !existingIsFolder) {
+        // Previous version was a single file, new version is a folder — remove old file
+        await fs.unlink(existingExtension.filePath);
+        logger.debug(`[Extensions] Removed old single-file extension: ${existingExtension.filePath}`);
+      } else if (extension.type === 'single' && existingIsFolder) {
+        // Previous version was a folder, new version is a single file — remove old folder
+        await fs.rm(parsedExistingPath.dir, { recursive: true, force: true });
+        logger.debug(`[Extensions] Removed old folder extension: ${parsedExistingPath.dir}`);
+      }
+
+      let entryPath: string;
+
+      if (extension.type === 'single' && extension.file) {
+        const url = `${githubRawBase}/${extension.file}`;
+        const response = await fetch(url);
+
+        if (!response.ok) {
+          throw new Error(`Failed to download: ${response.statusText}`);
+        }
+
+        const code = await response.text();
+        entryPath = path.join(targetDir, extension.file);
+        await fs.writeFile(entryPath, code, 'utf-8');
+
+        logger.debug(`[Extensions] Updated single-file extension: ${extension.file}`);
+      } else if (extension.type === 'folder' && extension.folder) {
+        const repoDir = await this.fetcher.ensureRepoCloned(repositoryUrl);
+
+        const extensionsPath = this.fetcher.getExtensionsPath(repositoryUrl, repoDir);
+        const targetPath = path.join(targetDir, extension.folder);
+
+        // For repo-root extensions (entire repo is the extension), use extensionsPath directly
+        let sourcePath = path.join(extensionsPath, extension.folder);
+        if (!(await this.fileExists(sourcePath))) {
+          sourcePath = extensionsPath;
+        }
+
+        if (!(await this.fileExists(sourcePath))) {
+          throw new Error(`Extension folder not found in repository: ${extension.folder}`);
+        }
+
+        // Use temp dir for npm install to avoid triggering the watcher
+        const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aider-desk-ext-'));
+        const tempExtPath = path.join(tempDir, extension.folder);
+
+        try {
+          await fs.cp(sourcePath, tempExtPath, { recursive: true });
+
+          // Remove .git directory if present (from cloned repos)
+          const gitDir = path.join(tempExtPath, '.git');
+          if (await this.fileExists(gitDir)) {
+            await fs.rm(gitDir, { recursive: true, force: true });
+          }
+
+          const packageJsonPath = path.join(tempExtPath, 'package.json');
+          if (await this.fileExists(packageJsonPath)) {
+            logger.debug(`[Extensions] Installing dependencies for ${extension.name} in temp dir...`);
+            await this.installDependencies(tempExtPath);
+          }
+
+          // Copy on top of existing directory — merges files, overwriting source
+          // files while preserving user-created files like config.json
+          await fs.cp(tempExtPath, targetPath, { recursive: true });
+        } finally {
+          await fs.rm(tempDir, { recursive: true, force: true });
+        }
+
+        // Determine the entry file path
+        const indexTs = path.join(targetPath, 'index.ts');
+        const indexJs = path.join(targetPath, 'index.js');
+        entryPath = (await this.fileExists(indexTs)) ? indexTs : indexJs;
+
+        logger.debug(`[Extensions] Updated folder extension: ${extension.folder}`);
+      } else {
+        throw new Error(`Unknown extension type for ${extension.name}`);
+      }
+
+      // Load only the updated extension
+      const { hasUIComponents } = await this.loadAndInitializeExtension(entryPath, project);
+      if (hasUIComponents) {
+        this.eventManager.sendExtensionUIRefresh({ projectDir: project?.baseDir, reloadComponents: true });
+      }
+      const providers = this.getProviders(project);
+      if (providers.length > 0) {
+        this.modelManager.registerExtensionProviders(providers);
+      }
+      this.debouncedNotifyListeners();
+
+      logger.info(`[Extensions] Successfully updated ${extension.name}`);
+      return { success: true };
+    } catch (error) {
+      logger.error(`[Extensions] Failed to update extension '${extensionId}':`, error);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
+   * Dispatches an event to all loaded and initialized extensions.
+   * Events can be modified or blocked by extensions.
+   *
+   * @param eventName - The name of the event to dispatch
+   * @param event - The event payload
+   * @param project - The current Project instance
+   * @param task - Optional Task instance (not available for all events)
+   * @returns The potentially modified event (blocked status is part of the event)
+   */
+  async dispatchEvent<K extends keyof ExtensionEventMap>(
+    eventName: K,
+    event: ExtensionEventMap[K],
+    project: Project,
+    task?: Task,
+  ): Promise<ExtensionEventMap[K]> {
+    // Wait for initialization so events are never delivered to a partially loaded extension set
+    await this.waitForInit();
+
+    if (eventName === 'onProjectStarted') {
+      this.startedProjects.set(project.baseDir, project);
+    } else if (eventName === 'onProjectStopped') {
+      this.startedProjects.delete(project.baseDir);
+    }
+
+    // Get all extensions (global + project-specific)
+    const allExtensions = this.registry.getExtensions();
+    const enabledExtensions = this.filterEnabledExtensions(allExtensions);
+
+    // Early exit if no extensions
+    if (enabledExtensions.length === 0) {
+      return event;
+    }
+
+    // Sort extensions: global first, then project-specific
+    const sortedExtensions = this.sortExtensionsForDispatch(enabledExtensions, project.baseDir);
+
+    let currentEvent = { ...event };
+
+    for (const loaded of sortedExtensions) {
+      // Skip uninitialized extensions
+      if (!loaded.initialized) {
+        continue;
+      }
+
+      const { instance, metadata } = loaded;
+
+      // Get the handler method dynamically
+      const handler = (instance as Extension)[eventName];
+
+      // Skip if extension doesn't handle this event
+      if (typeof handler !== 'function') {
+        continue;
+      }
+
+      logger.debug(`[Extensions] Dispatching event '${String(eventName)}' to extension '${metadata.name}'`);
+
+      try {
+        // For onProjectStopped: dispose project-level disposables BEFORE calling the handler
+        // (disposers first, then manual cleanup — consistent with onUnload pattern)
+        if (eventName === 'onProjectStopped' && loaded.disposableStore) {
+          await loaded.disposableStore.disposeProject(project.baseDir);
+        }
+
+        // Create ExtensionContext for this extension
+        const context = this.createContext(loaded.id, metadata.name, project, task);
+
+        // Call the extension handler
+        // Using type assertion to handle dynamic dispatch across different event types
+        const result = await (handler as (event: ExtensionEventMap[K], context: ExtensionContext) => Promise<unknown>).call(instance, currentEvent, context);
+
+        // Process result if extension returned modifications
+        if (result && typeof result === 'object') {
+          // Merge partial event modifications
+          const partialEvent = result as Partial<ExtensionEventMap[K]>;
+          currentEvent = { ...currentEvent, ...partialEvent };
+
+          // Check for blocking
+          if ('blocked' in currentEvent && currentEvent.blocked) {
+            logger.debug(`[Extensions] Event '${String(eventName)}' blocked by extension '${metadata.name}'`);
+            break;
+          }
+        }
+      } catch (error) {
+        logger.error(`[Extensions] Error in '${String(eventName)}' handler for extension '${metadata.name}':`, error);
+        // Continue to next extension - errors don't stop the chain
+      }
+    }
+
+    return currentEvent;
+  }
+
+  /**
+   * Sorts extensions for event dispatch: global extensions first, then project-specific
+   * @param extensions - All loaded extensions
+   * @param projectDir - Current project directory
+   * @returns Sorted array of extensions
+   */
+  private sortExtensionsForDispatch(extensions: LoadedExtension[], projectDir: string): LoadedExtension[] {
+    const global = extensions.filter((e) => !e.projectDir);
+    const projectSpecific = extensions.filter((e) => e.projectDir === projectDir);
+    return [...global, ...projectSpecific];
+  }
+}

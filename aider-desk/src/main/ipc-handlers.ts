@@ -1,0 +1,803 @@
+import {
+  EditFormat,
+  FileEdit,
+  McpServerConfig,
+  Mode,
+  Model,
+  OpenDialogOptions,
+  ProjectSettings,
+  ProviderProfile,
+  QueuedPromptData,
+  SettingsData,
+  SystemLogLevel,
+  TaskData,
+  CreateTaskParams,
+  TodoItem,
+  AgentProfile,
+  ChangeRequestItem,
+} from '@common/types';
+import { ipcMain, clipboard } from 'electron';
+
+import { EventsHandler } from './events-handler';
+
+import { PythonDependenciesInstaller } from '@/python-dependencies-installer';
+import { ServerController } from '@/server';
+
+export const setupIpcHandlers = (eventsHandler: EventsHandler, serverController: ServerController, pythonInstaller: PythonDependenciesInstaller) => {
+  // Voice handlers
+  ipcMain.handle('create-voice-session', async (_, provider: ProviderProfile) => {
+    return await eventsHandler.createVoiceSession(provider);
+  });
+
+  ipcMain.handle('load-settings', () => {
+    return eventsHandler.loadSettings();
+  });
+
+  ipcMain.handle('save-settings', (_, newSettings: SettingsData) => {
+    return eventsHandler.saveSettings(newSettings);
+  });
+
+  ipcMain.on('run-prompt', async (_, baseDir: string, taskId: string, prompt: string, mode?: Mode, images?: string[]) => {
+    void eventsHandler.runPrompt(baseDir, taskId, prompt, mode, images);
+  });
+
+  ipcMain.handle('save-prompt', async (_, baseDir: string, taskId: string, prompt: string) => {
+    return await eventsHandler.savePrompt(baseDir, taskId, prompt);
+  });
+
+  ipcMain.handle('save-edited-prompt', async (_, baseDir: string, taskId: string, messageId: string, prompt: string) => {
+    return await eventsHandler.saveEditedPrompt(baseDir, taskId, messageId, prompt);
+  });
+
+  ipcMain.on('answer-question', (_, baseDir: string, taskId: string, answer: string) => {
+    void eventsHandler.answerQuestion(baseDir, taskId, answer);
+  });
+
+  ipcMain.handle('respond-input-prompt', (_, id: string, value: string | null, rememberSession?: boolean) => {
+    eventsHandler.respondInputPrompt(id, value, rememberSession);
+  });
+
+  ipcMain.on('remove-queued-prompt', (_, baseDir: string, taskId: string, promptId: string) => {
+    eventsHandler.removeQueuedPrompt(baseDir, taskId, promptId);
+  });
+
+  ipcMain.on('send-queued-prompt-now', async (_, baseDir: string, taskId: string, promptId: string) => {
+    await eventsHandler.sendQueuedPromptNow(baseDir, taskId, promptId);
+  });
+
+  ipcMain.on('reorder-queued-prompts', (_, baseDir: string, taskId: string, prompts: QueuedPromptData[]) => {
+    eventsHandler.reorderQueuedPrompts(baseDir, taskId, prompts);
+  });
+
+  ipcMain.on('edit-queued-prompt', (_, baseDir: string, taskId: string, promptId: string, newText: string) => {
+    eventsHandler.editQueuedPrompt(baseDir, taskId, promptId, newText);
+  });
+
+  ipcMain.on('drop-file', (_, baseDir: string, taskId: string, filePath: string) => {
+    void eventsHandler.dropFile(baseDir, taskId, filePath);
+  });
+
+  ipcMain.on('add-file', (_, baseDir: string, taskId: string, filePath: string, readOnly = false) => {
+    void eventsHandler.addFile(baseDir, taskId, filePath, readOnly);
+  });
+
+  ipcMain.handle('start-project', (_, baseDir: string) => {
+    return eventsHandler.startProject(baseDir);
+  });
+
+  ipcMain.on('stop-project', async (_, baseDir: string) => {
+    await eventsHandler.stopProject(baseDir);
+  });
+
+  ipcMain.on('restart-project', async (_, baseDir: string) => {
+    await eventsHandler.restartProject(baseDir);
+  });
+
+  ipcMain.on('reset-task', async (_, baseDir: string, taskId: string) => {
+    await eventsHandler.resetTask(baseDir, taskId);
+  });
+
+  ipcMain.on('restart-aider-connector', async (_, baseDir: string, taskId: string) => {
+    await eventsHandler.restartAiderConnector(baseDir, taskId);
+  });
+
+  ipcMain.handle('show-open-dialog', async (_, options: OpenDialogOptions) => {
+    return await eventsHandler.showOpenDialog(options);
+  });
+
+  ipcMain.handle('load-input-history', async (_, baseDir: string) => {
+    return await eventsHandler.loadInputHistory(baseDir);
+  });
+
+  ipcMain.handle('get-open-projects', async () => {
+    return eventsHandler.getOpenProjects();
+  });
+
+  ipcMain.handle('add-open-project', async (_, baseDir: string) => {
+    return eventsHandler.addOpenProject(baseDir);
+  });
+
+  ipcMain.handle('remove-open-project', async (_, baseDir: string) => {
+    return eventsHandler.removeOpenProject(baseDir);
+  });
+
+  ipcMain.handle('create-new-window', async () => {
+    const { getCreateNewWindow } = await import('./index');
+    const createWindowFn = getCreateNewWindow();
+    await createWindowFn();
+  });
+
+  ipcMain.handle('open-project-in-new-window', async (_, baseDir: string) => {
+    const { getCreateNewWindow } = await import('./index');
+    const createWindowFn = getCreateNewWindow();
+    await createWindowFn(baseDir);
+  });
+
+  ipcMain.handle('set-active-project', async (_, baseDir: string) => {
+    return eventsHandler.setActiveProject(baseDir);
+  });
+
+  ipcMain.handle('update-open-projects-order', async (_, baseDirs: string[]) => {
+    return eventsHandler.updateOpenProjectsOrder(baseDirs);
+  });
+
+  ipcMain.handle('get-recent-projects', async () => {
+    return eventsHandler.getRecentProjects();
+  });
+
+  ipcMain.handle('add-recent-project', async (_, baseDir: string) => {
+    eventsHandler.addRecentProject(baseDir);
+  });
+
+  ipcMain.handle('remove-recent-project', async (_, baseDir: string) => {
+    eventsHandler.removeRecentProject(baseDir);
+  });
+
+  ipcMain.handle('get-project-settings', (_, baseDir: string) => {
+    return eventsHandler.getProjectSettings(baseDir);
+  });
+
+  ipcMain.handle('patch-project-settings', async (_, baseDir: string, settings: Partial<ProjectSettings>) => {
+    return eventsHandler.patchProjectSettings(baseDir, settings);
+  });
+
+  ipcMain.handle('get-addable-files', async (_, baseDir: string, taskId: string) => {
+    return await eventsHandler.getAddableFiles(baseDir, taskId);
+  });
+
+  ipcMain.handle('get-all-files', async (_, baseDir: string, taskId: string, useGit = true) => {
+    return await eventsHandler.getAllFiles(baseDir, taskId, useGit);
+  });
+
+  ipcMain.handle('get-updated-files', async (_, baseDir: string, taskId: string) => {
+    return await eventsHandler.getUpdatedFiles(baseDir, taskId);
+  });
+
+  ipcMain.handle('refresh-context-files', async (_, baseDir: string, taskId: string) => {
+    await eventsHandler.refreshContextFiles(baseDir, taskId);
+  });
+
+  ipcMain.handle('is-project-path', async (_, path: string) => {
+    return await eventsHandler.isProjectPath(path);
+  });
+
+  ipcMain.handle('clone-project', async (_, repositoryUrl: string, targetDir?: string): Promise<{ path?: string; error?: string }> => {
+    try {
+      const path = await eventsHandler.cloneProject(repositoryUrl, targetDir);
+      return { path };
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle('cancel-clone-project', async () => {
+    eventsHandler.cancelCloneProject();
+  });
+
+  ipcMain.handle('is-valid-path', async (_, baseDir: string, path: string) => {
+    return await eventsHandler.isValidPath(baseDir, path);
+  });
+
+  ipcMain.handle('get-file-path-suggestions', async (_, currentPath: string, directoriesOnly = true) => {
+    return await eventsHandler.getFilePathSuggestions(currentPath, directoriesOnly);
+  });
+
+  ipcMain.on('update-main-model', (_, baseDir: string, taskId: string, mainModel: string) => {
+    void eventsHandler.updateMainModel(baseDir, taskId, mainModel);
+  });
+
+  ipcMain.on('update-weak-model', (_, baseDir: string, taskId: string, weakModel: string) => {
+    void eventsHandler.updateWeakModel(baseDir, taskId, weakModel);
+  });
+
+  ipcMain.on('update-architect-model', (_, baseDir: string, taskId: string, architectModel: string) => {
+    eventsHandler.updateArchitectModel(baseDir, taskId, architectModel);
+  });
+
+  ipcMain.on('update-edit-formats', (_, baseDir: string, updatedFormats: Record<string, EditFormat>) => {
+    eventsHandler.updateEditFormats(baseDir, updatedFormats);
+  });
+
+  ipcMain.on('run-command', (_, baseDir: string, taskId: string, command: string) => {
+    eventsHandler.runCommand(baseDir, taskId, command);
+  });
+
+  ipcMain.on('paste-image', async (_, baseDir: string, taskId: string) => {
+    await eventsHandler.pasteImage(baseDir, taskId);
+  });
+
+  ipcMain.on('interrupt-response', (_, baseDir: string, taskId: string, interruptId?: string) => {
+    void eventsHandler.interruptResponse(baseDir, taskId, interruptId);
+  });
+
+  ipcMain.on('apply-edits', (_, baseDir: string, taskId: string, edits: FileEdit[]) => {
+    eventsHandler.applyEdits(baseDir, taskId, edits);
+  });
+
+  ipcMain.on('clear-context', (_, baseDir: string, taskId: string) => {
+    eventsHandler.clearContext(baseDir, taskId);
+  });
+
+  ipcMain.on('remove-last-message', (_, baseDir: string, taskId: string) => {
+    void eventsHandler.removeLastMessage(baseDir, taskId);
+  });
+
+  ipcMain.handle('remove-message', async (_, baseDir: string, taskId: string, messageId: string) => {
+    await eventsHandler.removeMessage(baseDir, taskId, messageId);
+    return { message: 'Message removed' };
+  });
+
+  ipcMain.handle('remove-messages-up-to', async (_, baseDir: string, taskId: string, messageId: string) => {
+    await eventsHandler.removeMessagesUpTo(baseDir, taskId, messageId);
+    return { message: 'Messages removed' };
+  });
+
+  ipcMain.on('redo-user-prompt', (_, baseDir: string, taskId: string, messageId: string, mode: Mode, updatedPrompt?: string, updatedImages?: string[]) => {
+    void eventsHandler.redoUserPrompt(baseDir, taskId, messageId, mode, updatedPrompt, updatedImages);
+  });
+
+  ipcMain.on('resume-task', (_, baseDir: string, taskId: string) => {
+    void eventsHandler.resumeTask(baseDir, taskId);
+  });
+
+  ipcMain.handle('compact-conversation', async (_event, baseDir: string, taskId: string, mode: Mode, customInstructions?: string) => {
+    return await eventsHandler.compactConversation(baseDir, taskId, mode, customInstructions);
+  });
+
+  ipcMain.handle('smart-compact-conversation', async (_event, baseDir: string, taskId: string) => {
+    return await eventsHandler.smartCompactConversation(baseDir, taskId);
+  });
+
+  ipcMain.handle('undo-context-change', async (_event, baseDir: string, taskId: string) => {
+    return await eventsHandler.undoContextChange(baseDir, taskId);
+  });
+
+  ipcMain.handle('handoff-conversation', async (_event, baseDir: string, taskId: string, focus?: string) => {
+    return await eventsHandler.handoffConversation(baseDir, taskId, focus);
+  });
+
+  ipcMain.on('run-code-change-requests', async (_, baseDir: string, taskId: string, requests: ChangeRequestItem[], createNewTask?: boolean) => {
+    await eventsHandler.runCodeChangeRequests(baseDir, taskId, requests, createNewTask);
+  });
+
+  ipcMain.handle('scrape-web', async (_, baseDir: string, taskId: string, url: string, filePath?: string) => {
+    await eventsHandler.scrapeWeb(baseDir, taskId, url, filePath);
+  });
+
+  ipcMain.handle('create-new-task', async (_, baseDir: string, params?: CreateTaskParams) => {
+    return await eventsHandler.createNewTask(baseDir, params);
+  });
+
+  ipcMain.handle('update-task', async (_, baseDir: string, id: string, updates: Partial<TaskData>) => {
+    return await eventsHandler.updateTask(baseDir, id, updates);
+  });
+
+  ipcMain.handle('delete-task', async (_, baseDir: string, id: string) => {
+    return await eventsHandler.deleteTask(baseDir, id);
+  });
+
+  ipcMain.handle('duplicate-task', async (_, baseDir: string, taskId: string) => {
+    return await eventsHandler.duplicateTask(baseDir, taskId);
+  });
+
+  ipcMain.handle('fork-task', async (_, baseDir: string, taskId: string, messageId: string) => {
+    return await eventsHandler.forkTask(baseDir, taskId, messageId);
+  });
+
+  ipcMain.handle('get-tasks', async (_, baseDir: string) => {
+    return await eventsHandler.getTasks(baseDir);
+  });
+
+  ipcMain.handle('load-task', async (_, baseDir: string, taskId: string) => {
+    return await eventsHandler.loadTask(baseDir, taskId);
+  });
+
+  ipcMain.handle('load-mcp-server-tools', async (_, serverName: string, config?: McpServerConfig, projectDir?: string) => {
+    return await eventsHandler.loadMcpServerTools(serverName, config, projectDir);
+  });
+
+  ipcMain.handle('reload-mcp-servers', async (_, projectDir?: string, force = false) => {
+    await eventsHandler.reloadMcpServers(projectDir, force);
+  });
+
+  ipcMain.handle('reload-mcp-server', async (_, serverName: string, config: McpServerConfig) => {
+    return await eventsHandler.reloadMcpServer(serverName, config);
+  });
+
+  ipcMain.handle('get-mcp-oauth-status', async (_, serverName: string, config?: McpServerConfig, projectDir?: string) => {
+    return await eventsHandler.getMcpOAuthStatus(serverName, config, projectDir);
+  });
+
+  ipcMain.handle('start-mcp-oauth', async (_, serverName: string, config?: McpServerConfig, projectDir?: string) => {
+    return await eventsHandler.startMcpOAuth(serverName, config, projectDir);
+  });
+
+  ipcMain.handle('disconnect-mcp-oauth', async (_, serverName: string, config?: McpServerConfig, projectDir?: string) => {
+    await eventsHandler.disconnectMcpOAuth(serverName, config, projectDir);
+  });
+
+  // MCP server config handlers (file-based, global + per-project)
+  ipcMain.handle('get-mcp-servers', async () => {
+    return await eventsHandler.getMcpServers();
+  });
+
+  ipcMain.handle('add-mcp-server', async (_, name: string, config: McpServerConfig, projectDir?: string) => {
+    await eventsHandler.addMcpServer(name, config, projectDir);
+    return await eventsHandler.getMcpServers();
+  });
+
+  ipcMain.handle('update-mcp-server', async (_, oldName: string, name: string, config: McpServerConfig, projectDir?: string) => {
+    await eventsHandler.updateMcpServer(oldName, name, config, projectDir);
+    return await eventsHandler.getMcpServers();
+  });
+
+  ipcMain.handle('remove-mcp-server', async (_, name: string, projectDir?: string) => {
+    await eventsHandler.removeMcpServer(name, projectDir);
+    return await eventsHandler.getMcpServers();
+  });
+
+  ipcMain.handle('replace-mcp-servers', async (_, servers: Record<string, McpServerConfig>, projectDir?: string) => {
+    await eventsHandler.replaceMcpServers(servers, projectDir);
+    return await eventsHandler.getMcpServers();
+  });
+
+  // Extension handlers
+  ipcMain.handle('get-installed-extensions', (_, projectDir?: string) => {
+    return eventsHandler.getInstalledExtensions(projectDir);
+  });
+
+  ipcMain.handle('get-extension-tools-info', (_, projectDir?: string) => {
+    return eventsHandler.getExtensionToolsInfo(projectDir);
+  });
+
+  ipcMain.handle('get-available-extensions', async (_, repositories: string[], forceRefresh?: boolean, fetchOnly?: boolean) => {
+    return await eventsHandler.getAvailableExtensions(repositories, forceRefresh, fetchOnly);
+  });
+
+  ipcMain.handle('install-extension', async (_, extensionId: string, repositoryUrl: string, projectDir?: string) => {
+    return await eventsHandler.installExtension(extensionId, repositoryUrl, projectDir);
+  });
+
+  ipcMain.handle('uninstall-extension', async (_, extensionId: string, projectDir?: string) => {
+    return await eventsHandler.uninstallExtension(extensionId, projectDir);
+  });
+
+  ipcMain.handle('update-extension', async (_, extensionId: string, repositoryUrl: string, projectDir?: string) => {
+    return await eventsHandler.updateExtension(extensionId, repositoryUrl, projectDir);
+  });
+
+  ipcMain.handle('reload-extension', async (_, filePath: string, projectDir?: string) => {
+    return await eventsHandler.reloadExtension(filePath, projectDir);
+  });
+
+  ipcMain.handle('get-extension-ui-components', (_, placement?: string, projectDir?: string, taskId?: string) => {
+    return eventsHandler.getUIComponents(placement, projectDir, taskId);
+  });
+
+  ipcMain.handle('get-extension-ui-data', async (_, extensionId: string, componentId: string, projectDir?: string, taskId?: string) => {
+    return await eventsHandler.getUIExtensionData(extensionId, componentId, projectDir, taskId);
+  });
+
+  ipcMain.handle(
+    'execute-extension-ui-action',
+    async (_, extensionId: string, componentId: string, action: string, args: unknown[], projectDir?: string, taskId?: string) => {
+      return await eventsHandler.executeUIExtensionAction(extensionId, componentId, action, args, projectDir, taskId);
+    },
+  );
+
+  ipcMain.handle('load-extension-library', async (_, librarySpec: string) => {
+    return await eventsHandler.loadExtensionLibrary(librarySpec);
+  });
+
+  // Extension config handlers (per-extension settings)
+  ipcMain.handle('get-extension-config-component', (_, extensionId: string, projectDir?: string) => {
+    return eventsHandler.getExtensionConfigComponent(extensionId, projectDir);
+  });
+
+  ipcMain.handle('get-extension-config', async (_, extensionId: string, projectDir?: string) => {
+    return await eventsHandler.getExtensionConfig(extensionId, projectDir);
+  });
+
+  ipcMain.handle('save-extension-config', async (_, extensionId: string, configData: unknown, projectDir?: string) => {
+    return await eventsHandler.saveExtensionConfig(extensionId, configData, projectDir);
+  });
+
+  ipcMain.handle('export-task-to-markdown', async (_, baseDir: string, taskId: string, copyOnly: boolean = false) => {
+    return await eventsHandler.exportTaskToMarkdown(baseDir, taskId, copyOnly);
+  });
+
+  ipcMain.handle('set-zoom-level', async (_, zoomLevel: number) => {
+    return await eventsHandler.setZoomLevel(zoomLevel);
+  });
+
+  ipcMain.handle('get-versions', async (_, forceRefresh = false) => {
+    return await eventsHandler.getVersions(forceRefresh);
+  });
+
+  ipcMain.handle('download-latest-aiderdesk', async () => {
+    await eventsHandler.downloadLatestAiderDesk();
+  });
+
+  ipcMain.handle('get-release-notes', () => {
+    return eventsHandler.getReleaseNotes();
+  });
+
+  ipcMain.handle('clear-release-notes', () => {
+    eventsHandler.clearReleaseNotes();
+  });
+
+  ipcMain.handle('get-os', () => {
+    return eventsHandler.getOS();
+  });
+
+  ipcMain.handle('init-project-rules-file', async (_, baseDir: string, taskId: string, args?: string) => {
+    return await eventsHandler.initProjectRulesFile(baseDir, taskId, args);
+  });
+
+  ipcMain.handle('get-skills', async (_, baseDir: string, taskId: string) => {
+    return await eventsHandler.getSkills(baseDir, taskId);
+  });
+
+  ipcMain.handle('activate-skill', async (_, baseDir: string, taskId: string, skillName: string) => {
+    return await eventsHandler.activateSkill(baseDir, taskId, skillName);
+  });
+
+  ipcMain.handle('deactivate-skill', async (_, baseDir: string, taskId: string, skillName: string) => {
+    await eventsHandler.deactivateSkill(baseDir, taskId, skillName);
+  });
+
+  ipcMain.handle('get-todos', async (_, baseDir: string, taskId: string) => {
+    return await eventsHandler.getTodos(baseDir, taskId);
+  });
+
+  ipcMain.handle('add-todo', async (_, baseDir: string, taskId: string, name: string) => {
+    return await eventsHandler.addTodo(baseDir, taskId, name);
+  });
+
+  ipcMain.handle('update-todo', async (_, baseDir: string, taskId: string, name: string, updates: Partial<TodoItem>) => {
+    return await eventsHandler.updateTodo(baseDir, taskId, name, updates);
+  });
+
+  ipcMain.handle('delete-todo', async (_, baseDir: string, taskId: string, name: string) => {
+    return await eventsHandler.deleteTodo(baseDir, taskId, name);
+  });
+
+  ipcMain.handle('clear-all-todos', async (_, baseDir: string, taskId: string) => {
+    return await eventsHandler.clearAllTodos(baseDir, taskId);
+  });
+
+  ipcMain.handle('query-usage-data', async (_, from: string, to: string) => {
+    return eventsHandler.queryUsageData(new Date(from), new Date(to));
+  });
+
+  ipcMain.handle('get-effective-environment-variable', (_, key: string, baseDir?: string) => {
+    return eventsHandler.getEffectiveEnvironmentVariable(key, baseDir);
+  });
+
+  ipcMain.handle('open-logs-directory', async () => {
+    return eventsHandler.openLogsDirectory();
+  });
+
+  ipcMain.handle('open-path', async (_, path: string) => {
+    return eventsHandler.openPath(path);
+  });
+
+  ipcMain.handle('open-url-in-window', async (_, url: string, title?: string) => {
+    return eventsHandler.openUrlInWindow(url, title);
+  });
+
+  ipcMain.handle('open-url-externally', async (_, url: string) => {
+    return eventsHandler.openUrlExternally(url);
+  });
+
+  ipcMain.handle('get-commands', async (_, baseDir: string) => {
+    return eventsHandler.getCommands(baseDir);
+  });
+
+  ipcMain.handle('get-custom-modes', async (_, baseDir: string) => {
+    return eventsHandler.getCustomModes(baseDir);
+  });
+
+  ipcMain.handle('run-custom-command', async (_, baseDir: string, taskId: string, commandName: string, args: string[], mode: Mode) => {
+    await eventsHandler.runCustomCommand(baseDir, taskId, commandName, args, mode);
+  });
+
+  // Terminal handlers
+  ipcMain.handle('terminal-create', async (_, baseDir: string, taskId: string, cols?: number, rows?: number) => {
+    return await eventsHandler.createTerminal(baseDir, taskId, cols, rows);
+  });
+
+  ipcMain.handle('terminal-write', async (_, terminalId: string, data: string) => {
+    return eventsHandler.writeToTerminal(terminalId, data);
+  });
+
+  ipcMain.handle('terminal-resize', async (_, terminalId: string, cols: number, rows: number) => {
+    return eventsHandler.resizeTerminal(terminalId, cols, rows);
+  });
+
+  ipcMain.handle('terminal-close', async (_, terminalId: string) => {
+    return eventsHandler.closeTerminal(terminalId);
+  });
+
+  ipcMain.handle('terminal-get-buffer', async (_, terminalId: string) => {
+    return eventsHandler.getTerminalBuffer(terminalId);
+  });
+
+  ipcMain.handle('terminal-get-for-task', async (_, taskId: string) => {
+    return eventsHandler.getTerminalForTask(taskId);
+  });
+
+  ipcMain.handle('terminal-get-all-for-task', async (_, taskId: string) => {
+    return eventsHandler.getTerminalsForTask(taskId);
+  });
+
+  // Worktree merge handlers
+  ipcMain.handle('merge-worktree-to-main', async (_, baseDir: string, taskId: string, squash: boolean, targetBranch?: string, commitMessage?: string) => {
+    await eventsHandler.mergeWorktreeToMain(baseDir, taskId, squash, targetBranch, commitMessage);
+  });
+
+  ipcMain.handle(
+    'switch-to-local-working-mode',
+    async (_, baseDir: string, taskId: string, options?: { mergeBeforeSwitch?: boolean; targetBranch?: string; switchAllInWorktree?: boolean }) => {
+      await eventsHandler.switchToLocalWorkingMode(baseDir, taskId, options);
+    },
+  );
+
+  ipcMain.handle(
+    'switch-to-worktree-working-mode',
+    async (_, baseDir: string, taskId: string, options?: { carryOverUncommittedChanges?: boolean; dropSourceChanges?: boolean }) => {
+      await eventsHandler.switchToWorktreeWorkingMode(baseDir, taskId, options);
+    },
+  );
+
+  ipcMain.handle('get-local-uncommitted-files', async (_, baseDir: string, taskId: string) => {
+    return await eventsHandler.getLocalUncommittedFiles(baseDir, taskId);
+  });
+
+  ipcMain.handle('apply-uncommitted-changes', async (_, baseDir: string, taskId: string) => {
+    await eventsHandler.applyUncommittedChanges(baseDir, taskId);
+  });
+
+  ipcMain.handle('revert-last-merge', async (_, baseDir: string, taskId: string) => {
+    await eventsHandler.revertLastMerge(baseDir, taskId);
+  });
+
+  ipcMain.handle('add-file-to-git', async (_, baseDir: string, taskId: string, filePath: string) => {
+    await eventsHandler.addFileToGit(baseDir, taskId, filePath);
+  });
+
+  ipcMain.handle('restore-file', async (_, baseDir: string, taskId: string, filePath: string) => {
+    await eventsHandler.restoreFile(baseDir, taskId, filePath);
+  });
+
+  ipcMain.handle('read-file', async (_, baseDir: string, taskId: string, filePath: string) => {
+    return await eventsHandler.readFile(baseDir, taskId, filePath);
+  });
+
+  ipcMain.handle('save-file', async (_, baseDir: string, taskId: string, filePath: string, content: string) => {
+    await eventsHandler.saveFile(baseDir, taskId, filePath, content);
+  });
+
+  ipcMain.handle('generate-commit-message', async (_, baseDir: string, taskId: string) => {
+    return await eventsHandler.generateCommitMessage(baseDir, taskId);
+  });
+
+  ipcMain.handle('commit-changes', async (_, baseDir: string, taskId: string, message: string, amend: boolean) => {
+    await eventsHandler.commitChanges(baseDir, taskId, message, amend);
+  });
+
+  ipcMain.handle('cancel-commit-changes', async (_, baseDir: string, taskId: string) => {
+    eventsHandler.cancelCommitChanges(baseDir, taskId);
+  });
+
+  ipcMain.handle('list-branches', async (_, baseDir: string) => {
+    return await eventsHandler.listBranches(baseDir);
+  });
+
+  // Git branch operations
+  ipcMain.handle('list-git-branches', async (_, baseDir: string, taskId: string, includeRemote?: boolean) => {
+    return await eventsHandler.listGitBranches(baseDir, taskId, includeRemote);
+  });
+
+  ipcMain.handle('get-sync-commits', async (_, baseDir: string, taskId: string, targetBranch?: string) => {
+    return await eventsHandler.getSyncCommits(baseDir, taskId, targetBranch);
+  });
+
+  ipcMain.handle('create-git-branch', async (_, baseDir: string, taskId: string, name: string, startPoint?: string, checkout?: boolean) => {
+    await eventsHandler.createGitBranch(baseDir, taskId, name, startPoint, checkout);
+  });
+
+  ipcMain.handle('checkout-git-branch', async (_, baseDir: string, taskId: string, branch: string, createTracking?: boolean, takeOver?: boolean) => {
+    await eventsHandler.checkoutGitBranch(baseDir, taskId, branch, createTracking, takeOver);
+  });
+
+  ipcMain.handle('delete-git-branch', async (_, baseDir: string, taskId: string, branch: string, force?: boolean) => {
+    await eventsHandler.deleteGitBranch(baseDir, taskId, branch, force);
+  });
+
+  ipcMain.handle('merge-into-current-branch', async (_, baseDir: string, taskId: string, branch: string) => {
+    return await eventsHandler.mergeIntoCurrentBranch(baseDir, taskId, branch);
+  });
+
+  ipcMain.handle('rebase-onto-branch', async (_, baseDir: string, taskId: string, branch: string) => {
+    return await eventsHandler.rebaseOntoBranch(baseDir, taskId, branch);
+  });
+
+  ipcMain.handle('update-git-branch', async (_, baseDir: string, taskId: string, branchName: string) => {
+    return await eventsHandler.updateGitBranch(baseDir, taskId, branchName);
+  });
+
+  ipcMain.handle('git-pull', async (_, baseDir: string, taskId: string, rebase?: boolean) => {
+    return await eventsHandler.gitPull(baseDir, taskId, rebase);
+  });
+
+  ipcMain.handle('git-push', async (_, baseDir: string, taskId: string, force?: boolean, setUpstream?: boolean) => {
+    return await eventsHandler.gitPush(baseDir, taskId, force, setUpstream);
+  });
+
+  ipcMain.handle('resolve-git-error-with-agent', async (_, baseDir: string, taskId: string) => {
+    await eventsHandler.resolveGitErrorWithAgent(baseDir, taskId);
+  });
+
+  ipcMain.handle('get-worktree-integration-status', async (_, baseDir: string, taskId: string, targetBranch?: string) => {
+    return await eventsHandler.getWorktreeIntegrationStatus(baseDir, taskId, targetBranch);
+  });
+
+  ipcMain.handle('rebase-worktree-from-branch', async (_, baseDir: string, taskId: string, fromBranch?: string) => {
+    await eventsHandler.rebaseWorktreeFromBranch(baseDir, taskId, fromBranch);
+  });
+
+  ipcMain.handle('abort-worktree-rebase', async (_, baseDir: string, taskId: string) => {
+    await eventsHandler.abortWorktreeRebase(baseDir, taskId);
+  });
+
+  ipcMain.handle('continue-worktree-rebase', async (_, baseDir: string, taskId: string) => {
+    await eventsHandler.continueWorktreeRebase(baseDir, taskId);
+  });
+
+  ipcMain.handle('resolve-worktree-conflicts-with-agent', async (_, baseDir: string, taskId: string) => {
+    await eventsHandler.resolveConflictsWithAgent(baseDir, taskId);
+  });
+
+  ipcMain.handle('rename-git-branch', async (_, baseDir: string, taskId: string, newBranchName: string) => {
+    await eventsHandler.renameGitBranch(baseDir, taskId, newBranchName);
+  });
+
+  ipcMain.handle('rename-worktree-branch', async (_, baseDir: string, taskId: string, newBranchName: string) => {
+    await eventsHandler.renameGitBranch(baseDir, taskId, newBranchName);
+  });
+
+  // Server control handlers
+  ipcMain.handle('start-server', async (_, username?: string, password?: string) => {
+    const started = await serverController.startServer();
+    if (started) {
+      await eventsHandler.enableServer(username, password);
+    }
+    return started;
+  });
+
+  ipcMain.handle('stop-server', async () => {
+    const stopped = await serverController.stopServer();
+    if (stopped) {
+      await eventsHandler.disableServer();
+    }
+    return stopped;
+  });
+
+  // Cloudflare tunnel handlers
+  ipcMain.handle('start-cloudflare-tunnel', async () => {
+    return await eventsHandler.startCloudflareTunnel();
+  });
+
+  ipcMain.handle('stop-cloudflare-tunnel', async () => {
+    eventsHandler.stopCloudflareTunnel();
+  });
+
+  ipcMain.handle('get-cloudflare-tunnel-status', () => {
+    return eventsHandler.getCloudflareTunnelStatus();
+  });
+
+  ipcMain.handle('get-provider-models', async (_, reload = false) => {
+    return await eventsHandler.getProviderModels(reload);
+  });
+
+  ipcMain.handle('get-providers', () => {
+    return eventsHandler.getProviders();
+  });
+
+  ipcMain.handle('update-providers', async (_, providers: ProviderProfile[]) => {
+    await eventsHandler.updateProviders(providers);
+    return providers;
+  });
+
+  ipcMain.handle('upsert-model', async (_, providerId: string, modelId: string, model: Model) => {
+    await eventsHandler.upsertModel(providerId, modelId, model);
+    return await eventsHandler.getProviderModels();
+  });
+
+  ipcMain.handle('update-models', async (_, modelUpdates: Array<{ providerId: string; modelId: string; model: Model }>) => {
+    await eventsHandler.updateModels(modelUpdates);
+    return await eventsHandler.getProviderModels();
+  });
+
+  ipcMain.handle('delete-model', async (_, providerId: string, modelId: string) => {
+    await eventsHandler.deleteModel(providerId, modelId);
+    return await eventsHandler.getProviderModels();
+  });
+
+  // Agent profile handlers
+  ipcMain.handle('get-agent-profiles', async () => {
+    return await eventsHandler.getAllAgentProfiles();
+  });
+
+  ipcMain.handle('create-agent-profile', async (_, profile: AgentProfile, projectDir?: string) => {
+    return await eventsHandler.createAgentProfile(profile, projectDir);
+  });
+
+  ipcMain.handle('update-agent-profile', async (_, profile: AgentProfile) => {
+    return await eventsHandler.updateAgentProfile(profile);
+  });
+
+  ipcMain.handle('delete-agent-profile', async (_, profileId: string) => {
+    return await eventsHandler.deleteAgentProfile(profileId);
+  });
+
+  ipcMain.handle('update-agent-profiles-order', async (_, agentProfiles: AgentProfile[]) => {
+    return await eventsHandler.updateAgentProfilesOrder(agentProfiles);
+  });
+
+  // Memory handlers
+  ipcMain.handle('list-all-memories', async () => {
+    return await eventsHandler.listAllMemories();
+  });
+
+  ipcMain.handle('delete-memory', async (_, id: string) => {
+    return await eventsHandler.deleteMemory(id);
+  });
+
+  ipcMain.handle('delete-project-memories', async (_, projectId: string) => {
+    return await eventsHandler.deleteProjectMemories(projectId);
+  });
+
+  ipcMain.handle('get-memory-embedding-progress', async () => {
+    return eventsHandler.getMemoryEmbeddingProgress();
+  });
+
+  ipcMain.handle('clipboard-write-text', async (_, text: string) => {
+    clipboard.writeText(text);
+  });
+
+  // System logs handlers
+  ipcMain.handle('get-system-logs', async (_, fromId?: number, limit?: number, levels?: SystemLogLevel[]) => {
+    return eventsHandler.getSystemLogs(fromId, limit, levels);
+  });
+
+  ipcMain.handle('clear-system-logs', async () => {
+    return eventsHandler.clearSystemLogs();
+  });
+
+  // Aider connector status (Python install + per-task connector lifecycle)
+  ipcMain.handle('get-aider-connector-status', async () => {
+    return pythonInstaller.getStatus();
+  });
+};
