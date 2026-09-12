@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/Piebald-AI/awesome-gemini-cli.git
+	branch = main
+	commit = 70a776c24874492eb447124ea60dd6ccb3f80523
+	parent = 37fe6918c92ed73a6cd74eae5c1c57e6a5fa53ce
+	method = merge
+	cmdver = 0.4.9
