@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/andrepimenta/claude-code-chat.git
+	branch = main
+	commit = ab6e307209a41ed6079011ae7037505d56fa2cc9
+	parent = d54732dc721538d10f53d373313e89dafe060430
+	method = merge
+	cmdver = 0.4.9
