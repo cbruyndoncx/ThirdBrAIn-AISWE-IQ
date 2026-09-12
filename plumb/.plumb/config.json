@@ -1,0 +1,23 @@
+{
+  "spec_paths": [
+    "plumb_spec.md"
+  ],
+  "test_paths": [
+    "tests/"
+  ],
+  "claude_log_path": null,
+  "initialized_at": "2026-03-01T00:32:10.439519+00:00",
+  "last_commit": "defdfa443d2721c5229a1cc1f1feab08dd113329",
+  "last_commit_branch": "main",
+  "last_extracted_at": null,
+  "program_models": {
+    "decision_deduplicator": {
+      "model": "groq/openai/gpt-oss-120b",
+      "max_tokens": 8192
+    },
+    "question_synthesizer": {
+      "model": "groq/openai/gpt-oss-120b",
+      "max_tokens": 8192
+    }
+  }
+}

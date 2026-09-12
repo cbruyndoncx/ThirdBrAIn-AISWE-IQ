@@ -1,0 +1,1424 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+import textwrap
+from datetime import datetime, timezone
+from pathlib import Path
+
+import click
+from rich.console import Console
+from rich.table import Table
+
+from plumb import PlumbAuthError
+from plumb.config import (
+    DEFAULT_MODEL,
+    MODES,
+    PlumbConfig,
+    effective_mode,
+    find_repo_root,
+    ensure_plumb_dir,
+    load_config,
+    save_config,
+)
+from plumb.ignore import DEFAULT_PLUMBIGNORE
+from plumb.decision_log import (
+    Decision,
+    read_all_decisions,
+    append_decision,
+    update_decision_status,
+    filter_decisions,
+    find_decision_branch,
+)
+
+
+def validate_api_access(repo_root=None, model=None):
+    """Lazy indirection: importing plumb.programs pulls in dspy (~0.7s),
+    which non-LLM commands must not pay at startup."""
+    from plumb.programs import validate_api_access as _validate
+    return _validate(repo_root=repo_root, model=model)
+
+
+# Suggested litellm model strings per provider for the init walkthrough.
+PROVIDER_SUGGESTIONS = {
+    "anthropic": "anthropic/claude-haiku-4-5",
+    "openai": "openai/gpt-4.1-mini",
+    "groq": "groq/llama-3.3-70b-versatile",
+    "gemini": "gemini/gemini-2.0-flash",
+    "ollama": "ollama/llama3.1",
+    "other": None,
+}
+
+
+def _quiet_broken_pipe() -> None:
+    """stdout's reader went away (e.g. `plumb search | head`): stop printing
+    and exit cleanly instead of tracing back."""
+    try:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    except (OSError, ValueError):
+        pass
+    raise SystemExit(0)
+
+
+class _Console(Console):
+    """Rich swallows BrokenPipeError itself and exits 1; exit 0 quietly instead."""
+
+    def on_broken_pipe(self) -> None:
+        self.quiet = True
+        _quiet_broken_pipe()
+
+
+console = _Console()
+
+
+def _find_spec_suggestions(repo_root: Path) -> list[str]:
+    """Scan repo root for markdown files/dirs, respecting .plumbignore."""
+    from plumb.ignore import parse_plumbignore, is_ignored
+
+    patterns = parse_plumbignore(repo_root)
+    suggestions: list[str] = []
+
+    # Top-level .md files
+    for f in sorted(repo_root.glob("*.md")):
+        rel = f.name
+        if not is_ignored(rel, patterns):
+            suggestions.append(rel)
+
+    # Directories containing .md files (one level deep)
+    for d in sorted(repo_root.iterdir()):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        rel = d.name + "/"
+        if is_ignored(rel, patterns) or is_ignored(d.name, patterns):
+            continue
+        md_count = len(list(d.rglob("*.md")))
+        if md_count > 0:
+            suggestions.append(f"{d.name}/  ({md_count} .md file{'s' if md_count != 1 else ''})")
+
+    return suggestions
+
+
+def _find_test_suggestions(repo_root: Path) -> list[str]:
+    """Scan repo root for test directories/files."""
+    suggestions: list[str] = []
+    for name in ["tests", "test"]:
+        d = repo_root / name
+        if d.is_dir():
+            test_files = list(d.rglob("test_*.py")) + list(d.rglob("*_test.py"))
+            count = len(test_files)
+            if count > 0:
+                suggestions.append(f"{name}/  ({count} test file{'s' if count != 1 else ''})")
+            else:
+                suggestions.append(f"{name}/")
+    return suggestions
+
+
+def _prompt_with_suggestions(prompt_text: str, suggestions: list[str], default_no_suggestions: str) -> str:
+    """Show numbered suggestions, then prompt. Returns the resolved path string."""
+    if suggestions:
+        console.print(f"\n[bold]Found candidates:[/bold]")
+        for i, s in enumerate(suggestions, 1):
+            console.print(f"  [cyan][{i}][/cyan] {s}")
+        console.print()
+        answer = click.prompt(prompt_text, default="1")
+    else:
+        answer = click.prompt(prompt_text, default=default_no_suggestions)
+
+    # If answer is a number, resolve it to the suggestion
+    if answer.isdigit():
+        idx = int(answer) - 1
+        if 0 <= idx < len(suggestions):
+            raw = suggestions[idx]
+            # Strip count suffix like "  (3 .md files)" for dirs
+            if "  (" in raw:
+                raw = raw.split("  (")[0]
+            return raw
+    return answer
+
+
+@click.group()
+def cli():
+    """Plumb: Keep spec, tests, and code in sync."""
+    pass
+
+
+def _install_hooks(repo_root: Path) -> None:
+    """Write the pre-commit and post-commit hooks into .git/hooks and make them executable."""
+    hooks_dir = repo_root / ".git" / "hooks"
+    hooks_dir.mkdir(exist_ok=True)
+    hook_path = hooks_dir / "pre-commit"
+    hook_path.write_text("#!/bin/sh\nplumb hook\nexit $?\n")
+    hook_path.chmod(0o755)
+    post_commit_path = hooks_dir / "post-commit"
+    post_commit_path.write_text("#!/bin/sh\nplumb post-commit\n")
+    post_commit_path.chmod(0o755)
+
+
+def _init_clone_setup(repo_root: Path, cfg: PlumbConfig) -> None:
+    """Set up plumb on a freshly cloned repo that already has .plumb/ config."""
+    console.print("[cyan]Plumb is already initialized in this repo.[/cyan]")
+    console.print("[cyan]Setting up for this machine...[/cyan]\n")
+
+    with console.status("[bold cyan]Setting up plumb...", spinner="dots") as status:
+        # Install git hooks (may be missing after clone)
+        status.update("[bold cyan]Installing git hooks...")
+        _install_hooks(repo_root)
+
+        # Verify API access
+        status.update("[bold cyan]Verifying API access...")
+        try:
+            validate_api_access(repo_root)
+        except PlumbAuthError as e:
+            console.print(f"\n[red]API verification failed:[/red] {e}\n")
+            console.print("[yellow]To fix this:[/yellow]")
+            console.print("  1. Set the credential named above in a .env file at the repo root, or export it")
+            console.print("  2. To use a different model instead, run 'plumb model <litellm-string>'")
+            console.print("  3. Run 'plumb init' again\n")
+            raise SystemExit(1)
+
+    console.print("[green]Git hooks installed.[/green]")
+    console.print("[green]API access verified.[/green]\n")
+
+    # Run coverage report
+    console.print("[cyan]Running coverage report...[/cyan]\n")
+    from plumb.coverage_reporter import print_coverage_report
+    print_coverage_report(repo_root)
+
+
+@cli.command()
+def init():
+    """Initialize Plumb in the current git repository."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+
+    # Check if plumb is already initialized (e.g., cloning existing repo)
+    existing_config = load_config(repo_root)
+    if existing_config is not None:
+        _init_clone_setup(repo_root, existing_config)
+        return
+
+    # --- Collect user input (before spinner) ---
+
+    # Spec path
+    spec_suggestions = _find_spec_suggestions(repo_root)
+    spec_input = _prompt_with_suggestions(
+        "Path to spec file or directory of spec markdown files",
+        spec_suggestions,
+        default_no_suggestions=".",
+    )
+    spec_path = repo_root / spec_input
+    if not spec_path.exists():
+        console.print(f"[red]Error: Path '{spec_input}' does not exist.[/red]")
+        raise SystemExit(1)
+    if spec_path.is_file() and not spec_input.endswith(".md"):
+        console.print(f"[red]Error: '{spec_input}' is not a markdown file. Plumb requires markdown spec files (.md).[/red]")
+        raise SystemExit(1)
+    if spec_path.is_dir():
+        md_files = list(spec_path.rglob("*.md"))
+        if not md_files:
+            console.print(f"[red]Error: No .md files found in '{spec_input}'.[/red]")
+            raise SystemExit(1)
+
+    # Test path
+    test_suggestions = _find_test_suggestions(repo_root)
+    test_input = _prompt_with_suggestions(
+        "Path to test file or test directory",
+        test_suggestions,
+        default_no_suggestions="tests/",
+    )
+    test_path = repo_root / test_input
+    if not test_path.exists():
+        console.print(f"[yellow]Warning: Path '{test_input}' does not exist. Creating it.[/yellow]")
+        test_path.mkdir(parents=True, exist_ok=True)
+
+    # Mode
+    console.print("How should Plumb handle decisions?")
+    console.print("  review  — stop each commit until you approve/ignore/reject (default)", soft_wrap=True)
+    console.print("  record  — record decisions after each commit; review later with plumb log/search", soft_wrap=True)
+    mode_input = click.prompt(
+        "Mode",
+        type=click.Choice(list(MODES)),
+        default="review",
+        show_choices=True,
+    )
+
+    # Inference model
+    model_input = DEFAULT_MODEL
+    if not click.confirm(
+        f"Plumb will use {DEFAULT_MODEL} for analysis. Use this model?",
+        default=True,
+    ):
+        provider = click.prompt(
+            "Provider",
+            type=click.Choice(["anthropic", "openai", "groq", "gemini", "ollama", "other"]),
+        )
+        suggestion = PROVIDER_SUGGESTIONS[provider]
+        if suggestion:
+            model_input = click.prompt("Model", default=suggestion)
+        else:
+            model_input = click.prompt("Model")
+
+    # Pytest compatibility check
+    pytest_installed = importlib.util.find_spec("pytest") is not None
+    if not pytest_installed:
+        console.print(
+            "\n[yellow]Note: pytest was not detected. Currently, plumb only supports pytest.\n"
+            "Install it with: pip install pytest[/yellow]\n"
+        )
+    else:
+        if test_path.is_dir():
+            test_files = list(test_path.rglob("test_*.py")) + list(test_path.rglob("*_test.py"))
+        elif test_path.is_file() and (test_path.name.startswith("test_") or test_path.name.endswith("_test.py")):
+            test_files = [test_path]
+        else:
+            test_files = []
+        if test_files:
+            try:
+                collect_result = subprocess.run(
+                    [sys.executable, "-m", "pytest", "--collect-only", "-q", str(test_path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if collect_result.returncode != 0:
+                    console.print("\n[red]Error: pytest failed to collect tests from your test directory.[/red]")
+                    console.print("[red]Fix the issues below before initializing plumb:[/red]\n")
+                    if collect_result.stdout.strip():
+                        console.print(collect_result.stdout.strip())
+                    if collect_result.stderr.strip():
+                        console.print(collect_result.stderr.strip())
+                    console.print("\n[yellow]Hint: Run 'pytest --collect-only' manually to debug.[/yellow]")
+                    raise SystemExit(1)
+            except subprocess.TimeoutExpired:
+                console.print("[yellow]Warning: pytest collection timed out. Skipping validation.[/yellow]")
+            except FileNotFoundError:
+                console.print("[yellow]Warning: Could not run pytest. Skipping validation.[/yellow]")
+
+    # --- Progress spinner for setup steps ---
+    with console.status("[bold cyan]Initializing plumb...", spinner="dots") as status:
+        # Create .plumb/
+        status.update("[bold cyan]Creating .plumb/ directory...")
+        ensure_plumb_dir(repo_root)
+
+        # Save config
+        status.update("[bold cyan]Saving configuration...")
+        cfg = PlumbConfig(
+            spec_paths=[spec_input],
+            test_paths=[test_input],
+            initialized_at=datetime.now(timezone.utc).isoformat(),
+            mode=mode_input,
+            model=model_input,
+        )
+        save_config(repo_root, cfg)
+
+        # Install git hooks
+        status.update("[bold cyan]Installing git hooks...")
+        _install_hooks(repo_root)
+
+        # Create default .plumbignore
+        status.update("[bold cyan]Creating .plumbignore...")
+        plumbignore_path = repo_root / ".plumbignore"
+        if not plumbignore_path.exists():
+            plumbignore_path.write_text(DEFAULT_PLUMBIGNORE)
+
+        # Install skill file
+        status.update("[bold cyan]Installing Claude skill...")
+        skill_dir = repo_root / ".claude" / "skills" / "plumb"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_src = Path(__file__).parent / "skill" / "SKILL.md"
+        skill_dst = skill_dir / "SKILL.md"
+        if skill_src.exists():
+            shutil.copy2(str(skill_src), str(skill_dst))
+        else:
+            console.print("[yellow]Warning: SKILL.md source not found in package.[/yellow]")
+
+        # CLAUDE.md / AGENTS.md integration
+        status.update("[bold cyan]Updating CLAUDE.md and AGENTS.md...")
+        _update_claude_md(repo_root, cfg)
+
+        # Parse spec
+        status.update("[bold cyan]Parsing spec files...")
+        try:
+            from plumb.sync import parse_spec_files
+            parse_spec_files(repo_root)
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not parse spec: {e}[/yellow]")
+
+        # Verify API access for the chosen model
+        status.update("[bold cyan]Verifying API access...")
+        try:
+            validate_api_access(repo_root, model=model_input)
+        except PlumbAuthError as e:
+            console.print(f"\n[red]API verification failed:[/red] {e}\n")
+            console.print("[yellow]To fix this:[/yellow]")
+            console.print("  1. Set the credential named above in a .env file at the repo root, or export it")
+            console.print("  2. To use a different model instead, run 'plumb model <litellm-string>'")
+            console.print("  3. Run 'plumb init' again\n")
+            raise SystemExit(1)
+
+    console.print(f"\n[green]Plumb initialized successfully![/green]")
+    console.print(f"  Config: .plumb/config.json")
+    console.print(f"  Hooks: .git/hooks/pre-commit, post-commit")
+    console.print(f"  Ignore: .plumbignore")
+    console.print(f"  Skill: .claude/skills/plumb/SKILL.md")
+    console.print(f"  Spec: {spec_input}")
+    console.print(f"  Tests: {test_input}")
+    console.print(f"  Mode: {mode_input}")
+    console.print(f"  Model: {model_input}")
+
+
+def _coverage_bar(covered: int, total: int, width: int = 20) -> str:
+    """Render an inline coverage bar like: ████████░░░░░░░░░░░░ 37%  (60/163)"""
+    pct = (covered / total) * 100 if total else 0
+    filled = round(width * covered / total) if total else 0
+    bar = "█" * filled + "░" * (width - filled)
+    color = "green" if pct >= 70 else "yellow" if pct >= 40 else "red"
+    return f"[{color}]{bar}[/{color}] {pct:.0f}%  ({covered}/{total})"
+
+
+def _write_block(path: Path, block: str) -> None:
+    """Write `block` into `path`, replacing an existing marker-delimited block,
+    appending to existing content, or creating the file."""
+    import re
+    pattern = r"<!-- plumb:start -->.*?<!-- plumb:end -->"
+    if path.exists():
+        content = path.read_text()
+        if re.search(pattern, content, re.DOTALL):
+            content = re.sub(pattern, lambda _m: block, content, flags=re.DOTALL)
+        else:
+            content = content.rstrip() + "\n\n" + block + "\n"
+        path.write_text(content)
+    else:
+        path.write_text(block + "\n")
+
+
+def _update_claude_md(repo_root: Path, cfg: PlumbConfig) -> None:
+    """Append/update the Plumb instruction block in CLAUDE.md and AGENTS.md.
+
+    The block follows the effective mode: review mode carries the approval
+    choreography; record mode drops it in favour of `plumb log` / `plumb search`.
+    """
+    spec_list = ", ".join(cfg.spec_paths)
+    test_list = ", ".join(cfg.test_paths)
+
+    header = f"""<!-- plumb:start -->
+## Plumb (Spec/Test/Code Sync)
+
+This project uses Plumb to keep the spec, tests, and code in sync.
+
+- **Spec:** {spec_list}
+- **Tests:** {test_list}
+- **Decision log:** `.plumb/decisions/`
+
+### When working in this project:
+"""
+
+    record_block = header + """
+- Plumb is in **record** mode: decisions are recorded automatically after each
+  commit; nothing blocks `git commit`.
+- Before ending a session, run `plumb log --since <base-ref>` and mention
+  notable recorded decisions to the user.
+- Before proposing a decision that may contradict a prior one, run
+  `plumb search <terms>`.
+- The user can audit auto-recorded decisions with `plumb review --recorded`.
+- Pending decisions (below the record threshold) are the user's to resolve via
+  `plumb review` — never approve, reject, or edit on their behalf.
+- Run `plumb sync` when the user asks to update the spec; `plumb status` shows
+  the sync debt.
+- Never edit files in `.plumb/decisions/` directly.
+<!-- plumb:end -->"""
+
+    review_block = header + """
+- Run `plumb status` before beginning work to understand current alignment.
+- Run `plumb diff` before committing to preview what Plumb will capture.
+- When `git commit` is intercepted by Plumb, **use `AskUserQuestion`** to present
+  each pending decision via the native multiple-choice UI. Options: Approve,
+  Ignore, Reject. Then run the corresponding `plumb` command.
+  **NEVER approve, reject, or edit decisions on the user's behalf.** This is
+  non-negotiable.
+- After all decisions are resolved, run `plumb sync` to update the spec and
+  generate tests. Stage the sync output, then re-run `git commit`. Draft the
+  commit message **after** decision review and include a list of approved
+  decisions.
+- Use `plumb coverage` to identify what needs to be implemented or tested next.
+- Never edit files in `.plumb/decisions/` directly.
+- Treat the spec markdown files as the source of truth for intended behavior.
+  Plumb will keep them updated as decisions are approved.
+<!-- plumb:end -->"""
+
+    block = record_block if effective_mode(cfg)[0] == "record" else review_block
+    for name in ("CLAUDE.md", "AGENTS.md"):
+        _write_block(repo_root / name, block)
+
+
+@cli.command()
+@click.argument("new_mode", required=False, type=click.Choice(list(MODES)))
+def mode(new_mode):
+    """Show or set how Plumb handles decisions (review | record)."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+    cfg = load_config(repo_root)
+    if cfg is None:
+        console.print("[yellow]Plumb not initialized. Run 'plumb init'.[/yellow]")
+        raise SystemExit(1)
+    if new_mode is None:
+        m, src = effective_mode(cfg)
+        console.print(f"{m}  (from {src})")
+        return
+    cfg.mode = new_mode
+    save_config(repo_root, cfg)
+    _install_hooks(repo_root)
+    _update_claude_md(repo_root, cfg)
+    console.print(f"[green]Mode set to {new_mode}. Hooks reinstalled; CLAUDE.md/AGENTS.md block updated.[/green]")
+    env_mode, src = effective_mode(cfg)
+    if src == "env":
+        console.print(
+            f"[yellow](PLUMB_MODE={os.environ['PLUMB_MODE'].strip()} overrides this "
+            "in the current environment)[/yellow]"
+        )
+
+
+@cli.command()
+@click.argument("new_model", required=False)
+def model(new_model):
+    """Show or set the inference model (a litellm model string)."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+    cfg = load_config(repo_root)
+    if cfg is None:
+        console.print("[yellow]Plumb not initialized. Run 'plumb init'.[/yellow]")
+        raise SystemExit(1)
+    if new_model is None:
+        source = "config" if cfg.model != DEFAULT_MODEL else "default"
+        console.print(f"{cfg.model}  (from {source})")
+        for program, entry in cfg.program_models.items():
+            override = entry.get("model") if isinstance(entry, dict) else None
+            if override:
+                console.print(f"  {program}: {override}")
+        return
+    console.print(f"Testing {new_model}...")
+    try:
+        validate_api_access(repo_root, model=new_model)
+    except PlumbAuthError as e:
+        console.print(f"[red]{e}[/red]")
+        raise SystemExit(1)
+    cfg.model = new_model
+    save_config(repo_root, cfg)
+    console.print(f"[green]Model set to {new_model}.[/green]")
+
+
+@cli.command()
+@click.option("--dry-run", is_flag=True, help="Preview only, don't write decisions")
+def hook(dry_run):
+    """Run the pre-commit hook analysis."""
+    from plumb.git_hook import run_hook
+
+    repo_root = find_repo_root()
+    exit_code = run_hook(repo_root, dry_run=dry_run)
+    raise SystemExit(exit_code)
+
+
+@cli.command()
+@click.option("--dry-run", is_flag=True, help="Preview only, don't write decisions")
+def check(dry_run):
+    """Scan staged changes for decisions (alias for hook)."""
+    from plumb.git_hook import run_hook
+
+    repo_root = find_repo_root()
+    exit_code = run_hook(repo_root, dry_run=dry_run)
+    raise SystemExit(exit_code)
+
+
+@cli.command(name="post-commit")
+def post_commit():
+    """Run the post-commit hook to update last_commit."""
+    from plumb.git_hook import run_post_commit
+
+    repo_root = find_repo_root()
+    run_post_commit(repo_root)
+
+
+@cli.command(name="record-extract")
+@click.argument("sha")
+@click.option("--branch", default=None, help="Decision shard to write to (default: the checked-out branch)")
+@click.option("--wait", is_flag=True, help="Accepted for compatibility; the command always runs inline once it holds the lock.")
+def record_extract_cmd(sha, branch, wait):
+    """Extract decisions for a landed commit (record mode worker)."""
+    from plumb.record import record_extract, record_lock
+
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+    if load_config(repo_root) is None:
+        console.print("[yellow]Plumb not initialized. Run 'plumb init'.[/yellow]")
+        raise SystemExit(1)
+
+    with record_lock(repo_root):
+        written = record_extract(repo_root, sha, branch=branch)
+    recorded = sum(d.status == "recorded" for d in written)
+    pending = sum(d.status == "pending" for d in written)
+    console.print(f"Recorded {recorded} decision(s), {pending} pending for {sha[:12]}.")
+
+
+@cli.command()
+def diff():
+    """Preview what Plumb will capture from staged changes (read-only)."""
+    from plumb.git_hook import run_hook
+
+    repo_root = find_repo_root()
+    run_hook(repo_root, dry_run=True)
+
+
+@cli.command()
+@click.option("--branch", default=None, help="Filter by branch")
+@click.option("--recorded", is_flag=True, help="Walk auto-recorded decisions instead of pending ones")
+def review(branch, recorded):
+    """Interactive review of pending (or, with --recorded, auto-recorded) decisions."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+
+    kind = "recorded" if recorded else "pending"
+    pending = filter_decisions(repo_root, status=kind)
+    if branch:
+        pending = [d for d in pending if d.branch == branch]
+
+    if not pending:
+        console.print(f"No {kind} decisions.")
+        return
+
+    console.print(f"\n[bold]Plumb Review: {len(pending)} {kind} decision(s)[/bold]\n")
+
+    # Pre-compute branch for each decision so updates target the correct shard
+    branch_for = {d.id: find_decision_branch(repo_root, d.id) for d in pending}
+
+    approved_ids = []
+    for i, d in enumerate(pending, 1):
+        console.print(f"[bold]Decision {i} of {len(pending)}[/bold] [{d.id}]")
+        if d.question:
+            console.print(f"  [cyan]Question:[/cyan] {d.question}")
+        if d.decision:
+            console.print(f"  [cyan]Decision:[/cyan] {d.decision}")
+        console.print(f"  Made by: {d.made_by or 'unknown'} | Confidence: {d.confidence or 'N/A'}")
+        if d.branch:
+            console.print(f"  Branch: {d.branch}")
+        if d.ref_status == "broken":
+            console.print("  [red]Warning: Git reference is broken[/red]")
+        console.print()
+
+        action = click.prompt(
+            "  [a]pprove / [i]gnore / [r]eject / [e]dit",
+            type=click.Choice(["a", "i", "r", "e"], case_sensitive=False),
+        )
+
+        now = datetime.now(timezone.utc).isoformat()
+        if action == "a":
+            update_decision_status(
+                repo_root, d.id, branch=branch_for.get(d.id), status="approved",
+                approved_by="user", reviewed_at=now,
+            )
+            approved_ids.append(d.id)
+            console.print("  [green]Approved.[/green]\n")
+        elif action == "i":
+            update_decision_status(repo_root, d.id, branch=branch_for.get(d.id), status="ignored", reviewed_at=now)
+            console.print("  [dim]Ignored.[/dim]\n")
+        elif action == "r":
+            reason = click.prompt("  Rejection reason", default="")
+            update_decision_status(
+                repo_root, d.id, branch=branch_for.get(d.id), status="rejected",
+                rejection_reason=reason, reviewed_at=now,
+            )
+            console.print("  [red]Rejected.[/red]")
+            if recorded:
+                # The code landed with the commit; rewriting it is a separate,
+                # explicit act — never run modify from here.
+                console.print("  Code already committed; rejection recorded, no automatic modification.")
+            else:
+                _run_modify(repo_root, d.id)
+            console.print()
+        elif action == "e":
+            new_text = click.prompt("  New decision text")
+            update_decision_status(
+                repo_root, d.id, branch=branch_for.get(d.id), status="edited",
+                decision=new_text, approved_by="user", reviewed_at=now,
+            )
+            approved_ids.append(d.id)
+            console.print("  [yellow]Edited.[/yellow]\n")
+
+    if approved_ids:
+        console.print(f"\n{len(approved_ids)} decision(s) resolved. "
+                      "Run [bold]plumb sync[/bold] to update spec and tests.")
+
+
+def _run_modify(repo_root: Path, decision_id: str) -> None:
+    """Run the modify command for a rejected decision."""
+    from plumb.programs.code_modifier import CodeModifier
+    from git import Repo
+
+    decisions = read_all_decisions(repo_root)
+    target = None
+    for d in decisions:
+        if d.id == decision_id:
+            target = d
+            break
+
+    if not target or target.status != "rejected":
+        console.print(f"  [red]Decision {decision_id} not found or not rejected.[/red]")
+        return
+
+    repo = Repo(repo_root)
+    staged_diff = repo.git.diff("--cached")
+    if not staged_diff:
+        console.print("  [yellow]No staged changes to modify.[/yellow]")
+        return
+
+    # Read spec
+    config = load_config(repo_root)
+    spec_content = ""
+    if config:
+        for sp in config.spec_paths:
+            spec_file = repo_root / sp
+            if spec_file.is_file():
+                spec_content += spec_file.read_text()
+
+    decision_branch = find_decision_branch(repo_root, decision_id)
+
+    try:
+        modifier = CodeModifier(repo_root=repo_root)
+        modifications = modifier.modify(
+            staged_diff=staged_diff,
+            decision=target.decision or "",
+            rejection_reason=target.rejection_reason or "",
+            spec_content=spec_content,
+        )
+    except Exception as e:
+        console.print(f"  [red]Code modification failed: {e}[/red]")
+        update_decision_status(repo_root, decision_id, branch=decision_branch, status="rejected_manual")
+        return
+
+    if not modifications:
+        console.print("  [yellow]No modifications produced.[/yellow]")
+        update_decision_status(repo_root, decision_id, branch=decision_branch, status="rejected_manual")
+        return
+
+    # Apply modifications
+    for filepath, content in modifications.items():
+        full_path = repo_root / filepath
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_text(content)
+
+    # Run pytest
+    test_result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "--no-header"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+    )
+
+    is_tty = sys.stdout.isatty()
+
+    if test_result.returncode == 0:
+        # Stage modified files
+        for filepath in modifications:
+            repo.index.add([filepath])
+        update_decision_status(repo_root, decision_id, branch=decision_branch, status="rejected_modified")
+        if is_tty:
+            console.print("  [green]Tests passed. Modified files staged.[/green]")
+        else:
+            diff_output = repo.git.diff("--cached")
+            print(json.dumps({
+                "id": decision_id,
+                "result": "modified",
+                "tests_passed": True,
+                "diff": diff_output,
+            }))
+    else:
+        update_decision_status(repo_root, decision_id, branch=decision_branch, status="rejected_manual")
+        if is_tty:
+            console.print("  [red]Tests failed. Modification not staged.[/red]")
+            console.print(f"  {test_result.stdout}")
+        else:
+            print(json.dumps({
+                "id": decision_id,
+                "result": "failed",
+                "tests_passed": False,
+                "diff": "",
+            }))
+
+
+@cli.command()
+@click.argument("decision_id", required=False, default=None)
+@click.option("--all", "-a", "approve_all", is_flag=True, help="Approve all pending decisions")
+def approve(decision_id, approve_all):
+    """Approve a decision by ID, or all pending decisions with --all."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+
+    if approve_all and decision_id:
+        console.print("[red]Error: Cannot use --all with a specific decision ID.[/red]")
+        raise SystemExit(1)
+
+    if not approve_all and not decision_id:
+        console.print("[red]Error: Provide a decision ID or use --all.[/red]")
+        raise SystemExit(1)
+
+    if approve_all:
+        pending = filter_decisions(repo_root, status="pending")
+        if not pending:
+            console.print("[yellow]No pending decisions to approve.[/yellow]")
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        branch_for = {d.id: find_decision_branch(repo_root, d.id) for d in pending}
+        for d in pending:
+            update_decision_status(
+                repo_root, d.id, branch=branch_for.get(d.id), status="approved",
+                approved_by="user", reviewed_at=now,
+            )
+        console.print(f"[green]Approved {len(pending)} decision(s).[/green]")
+        console.print("Run [bold]plumb sync[/bold] to update spec and tests.")
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    branch = find_decision_branch(repo_root, decision_id)
+    result = update_decision_status(
+        repo_root, decision_id, branch=branch, status="approved",
+        approved_by="user", reviewed_at=now,
+    )
+    if result is None:
+        console.print(f"[red]Decision '{decision_id}' not found.[/red]")
+        raise SystemExit(1)
+
+    console.print(f"[green]Approved {decision_id}.[/green]")
+    console.print("Run [bold]plumb sync[/bold] to update spec and tests.")
+
+
+@cli.command()
+@click.argument("decision_id")
+@click.option("--reason", default=None, help="Reason for rejection")
+def reject(decision_id, reason):
+    """Reject a decision by ID."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+
+    now = datetime.now(timezone.utc).isoformat()
+    branch = find_decision_branch(repo_root, decision_id)
+    result = update_decision_status(
+        repo_root, decision_id,
+        branch=branch,
+        status="rejected",
+        rejection_reason=reason,
+        reviewed_at=now,
+    )
+    if result is None:
+        console.print(f"[red]Decision '{decision_id}' not found.[/red]")
+        raise SystemExit(1)
+
+    console.print(f"[yellow]Rejected {decision_id}.[/yellow]")
+    _run_modify(repo_root, decision_id)
+
+
+@cli.command()
+@click.argument("decision_id")
+def ignore(decision_id):
+    """Ignore a decision by ID (mark as not spec-relevant)."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+
+    now = datetime.now(timezone.utc).isoformat()
+    branch = find_decision_branch(repo_root, decision_id)
+    result = update_decision_status(
+        repo_root, decision_id,
+        branch=branch,
+        status="ignored",
+        reviewed_at=now,
+    )
+    if result is None:
+        console.print(f"[red]Decision '{decision_id}' not found.[/red]")
+        raise SystemExit(1)
+
+    console.print(f"Ignored {decision_id}.")
+
+
+@cli.command()
+@click.argument("decision_id")
+@click.argument("text")
+def edit(decision_id, text):
+    """Edit a decision's text and approve it."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+
+    now = datetime.now(timezone.utc).isoformat()
+    branch = find_decision_branch(repo_root, decision_id)
+    result = update_decision_status(
+        repo_root, decision_id,
+        branch=branch,
+        status="edited",
+        decision=text,
+        approved_by="user",
+        reviewed_at=now,
+    )
+    if result is None:
+        console.print(f"[red]Decision '{decision_id}' not found.[/red]")
+        raise SystemExit(1)
+
+    console.print(f"[yellow]Edited {decision_id}.[/yellow]")
+    console.print("Run [bold]plumb sync[/bold] to update spec and tests.")
+
+
+@cli.command()
+@click.argument("decision_id")
+def modify(decision_id):
+    """Modify staged code to satisfy a rejected decision."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+
+    _run_modify(repo_root, decision_id)
+
+
+@cli.command(name="sync")
+def sync_cmd():
+    """Sync all unsynced approved/edited/recorded decisions."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+
+    # Check for unsynced decisions before doing expensive work
+    decisions = read_all_decisions(repo_root)
+    to_sync = [d for d in decisions if d.status in ("approved", "edited", "recorded") and not d.synced_at]
+    if not to_sync:
+        console.print("No unsynced decisions to sync.")
+        return
+
+    from plumb.sync import sync_decisions
+    try:
+        with console.status("[bold cyan]Syncing decisions...", spinner="dots") as status:
+            def on_progress(msg):
+                status.update(f"[bold cyan]{msg}")
+            result = sync_decisions(repo_root, on_progress=on_progress)
+        console.print(f"Synced: {result['spec_updated']} spec sections updated, "
+                      f"{result['tests_generated']} tests generated.")
+    except Exception as e:
+        console.print(f"[red]Sync failed: {e}[/red]")
+        raise SystemExit(1)
+
+
+@cli.command(name="parse-spec")
+def parse_spec():
+    """Parse spec files into requirements.json."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+
+    from plumb.sync import parse_spec_files
+    try:
+        reqs = parse_spec_files(repo_root)
+        console.print(f"Parsed {len(reqs)} requirements from spec files.")
+    except Exception as e:
+        console.print(f"[red]Parse failed: {e}[/red]")
+        raise SystemExit(1)
+
+
+@cli.command(name="map-tests")
+@click.option("--dry-run", is_flag=True, help="Show proposed mappings without writing")
+def map_tests(dry_run):
+    """Map existing tests to requirements using LLM analysis."""
+    import ast
+
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+
+    config = load_config(repo_root)
+    if not config:
+        console.print("[red]Error: Plumb not initialized.[/red]")
+        raise SystemExit(1)
+
+    req_path = Path(repo_root) / ".plumb" / "requirements.json"
+    if not req_path.exists():
+        console.print("[red]No requirements.json found. Run 'plumb parse-spec' first.[/red]")
+        raise SystemExit(1)
+
+    requirements = json.loads(req_path.read_text())
+    if not requirements:
+        console.print("[yellow]No requirements found.[/yellow]")
+        return
+
+    # Collect test summaries from all test files
+    test_summaries = []
+    test_files: dict[str, str] = {}  # rel_path -> content
+    for tp in config.test_paths:
+        test_dir = Path(repo_root) / tp
+        if test_dir.is_file():
+            files = [test_dir]
+        elif test_dir.is_dir():
+            files = list(test_dir.rglob("test_*.py"))
+        else:
+            continue
+        for tf in files:
+            content = tf.read_text()
+            rel_path = str(tf.relative_to(repo_root))
+            test_files[rel_path] = content
+            try:
+                tree = ast.parse(content)
+            except SyntaxError:
+                continue
+            lines = content.split("\n")
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+                    # Extract docstring
+                    docstring = ast.get_docstring(node) or ""
+                    # Extract first few lines of body for context
+                    end_line = min(node.end_lineno or node.lineno + 10, len(lines))
+                    body_preview = "\n".join(lines[node.lineno - 1:end_line])[:300]
+                    test_summaries.append({
+                        "file": rel_path,
+                        "name": node.name,
+                        "docstring": docstring,
+                        "preview": body_preview,
+                    })
+
+    if not test_summaries:
+        console.print("[yellow]No test functions found.[/yellow]")
+        return
+
+    console.print(f"Found {len(test_summaries)} test functions and {len(requirements)} requirements.")
+    console.print("Running LLM mapping...")
+
+    from plumb.programs import configure_dspy, run_chunked_mapper
+    from plumb.programs.test_mapper import TestMapper
+
+    configure_dspy()
+    mapper = TestMapper()
+
+    req_json = json.dumps([{"id": r["id"], "text": r["text"]} for r in requirements])
+    items = [(s["name"], json.dumps(s)) for s in test_summaries]
+
+    def _combine(chunk):
+        return json.dumps([json.loads(t) for _, t in chunk])
+
+    try:
+        mappings = run_chunked_mapper(
+            mapper, req_json, items, budget=60000, combine_fn=_combine,
+        )
+    except Exception as e:
+        console.print(f"[red]Mapping failed: {e}[/red]")
+        raise SystemExit(1)
+
+    if not mappings:
+        console.print("[yellow]No mappings found.[/yellow]")
+        return
+
+    # Display results
+    table = Table(title="Proposed Test-to-Requirement Mappings")
+    table.add_column("Test", style="cyan")
+    table.add_column("File")
+    table.add_column("Requirements", style="green")
+    table.add_column("Confidence", justify="right")
+
+    for m in mappings:
+        table.add_row(
+            m.test_function,
+            m.file_path,
+            ", ".join(m.requirement_ids),
+            f"{m.confidence:.0%}",
+        )
+    console.print(table)
+
+    if dry_run:
+        console.print("\n[yellow]Dry run — no markers written.[/yellow]")
+        return
+
+    # Ask user for approval
+    action = click.prompt(
+        "\nApply these mappings? [y]es / [n]o / [s]elect individually",
+        type=click.Choice(["y", "n", "s"], case_sensitive=False),
+    )
+
+    if action == "n":
+        console.print("Aborted.")
+        return
+
+    approved_mappings = mappings
+    if action == "s":
+        approved_mappings = []
+        for m in mappings:
+            if click.confirm(
+                f"  Map {m.test_function} -> {', '.join(m.requirement_ids)}?"
+            ):
+                approved_mappings.append(m)
+
+    # Inject markers into test files
+    injected = 0
+    modified_files: dict[str, str] = {}
+    for m in approved_mappings:
+        file_path = m.file_path
+        if file_path not in test_files:
+            continue
+        content = modified_files.get(file_path, test_files[file_path])
+        lines = content.split("\n")
+        # Find the function definition line
+        for i, line in enumerate(lines):
+            if f"def {m.test_function}(" in line:
+                # Find indentation of the function body
+                indent = "    "
+                for j in range(i + 1, min(i + 5, len(lines))):
+                    stripped = lines[j]
+                    if stripped.strip():
+                        indent = stripped[: len(stripped) - len(stripped.lstrip())]
+                        break
+                # Build marker comments
+                markers = []
+                for req_id in m.requirement_ids:
+                    marker = f"{indent}# plumb:{req_id}"
+                    # Check it's not already there
+                    if marker not in content:
+                        markers.append(marker)
+                if markers:
+                    marker_text = "\n".join(markers)
+                    lines.insert(i + 1, marker_text)
+                    injected += len(markers)
+                break
+        modified_files[file_path] = "\n".join(lines)
+
+    # Write back modified files
+    for rel_path, content in modified_files.items():
+        (Path(repo_root) / rel_path).write_text(content)
+
+    console.print(f"\n[green]Injected {injected} marker(s) across {len(modified_files)} file(s).[/green]")
+
+
+@cli.command()
+def coverage():
+    """Run and print all three coverage dimensions."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+
+    from plumb.coverage_reporter import print_coverage_report
+    print_coverage_report(repo_root)
+
+
+@cli.command(name="log")
+@click.option("--since", "since_ref", default=None, help="Only commits in <ref>..HEAD (plus uncommitted)")
+@click.option("--verify", is_flag=True, help="Re-check evidence digests against transcripts; marks stale refs")
+def log_cmd(since_ref, verify):
+    """Decisions grouped by commit, then by agent."""
+    from git import Repo
+    from rich.markup import escape
+    from plumb.log_view import UNCOMMITTED, group_decisions, verify_evidence
+
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+    # read_all_decisions has no stable order (DuckDB); sort so runs are reproducible.
+    decisions = sorted(
+        (d for d in read_all_decisions(repo_root) if d.status != "ignored"),
+        key=lambda d: (d.created_at or "", d.id),
+    )
+    if since_ref:
+        try:
+            shas = {c.hexsha for c in Repo(repo_root).iter_commits(f"{since_ref}..HEAD")}
+        except Exception as e:
+            console.print(f"[red]Error: cannot resolve '{since_ref}': {e}[/red]")
+            raise SystemExit(1)
+        decisions = [d for d in decisions if d.commit_sha is None or d.commit_sha in shas]
+        console.print("[dim](uncommitted decisions are always shown)[/dim]")
+    if not decisions:
+        console.print("No decisions.")
+        return
+    try:
+        _print_log(repo_root, decisions, verify)
+    except BrokenPipeError:
+        _quiet_broken_pipe()
+
+
+def _print_log(repo_root: Path, decisions: list[Decision], verify: bool) -> None:
+    from rich.markup import escape
+    from plumb.log_view import UNCOMMITTED, group_decisions, verify_evidence
+
+    for commit, agents in group_decisions(decisions).items():
+        console.print(f"[bold]{commit if commit == UNCOMMITTED else commit[:12]}[/bold]")
+        for agent, ds in agents.items():
+            console.print(f"  [cyan]{escape(agent)}[/cyan] ({len(ds)})")
+            for d in ds:
+                sess = f"session {escape(d.session_id[:8])}" if d.session_id else ""
+                rng = f"turns {d.turn_range[0]}-{d.turn_range[1]}" if d.turn_range else ""
+                flag = ""
+                if verify:
+                    result = verify_evidence(d)
+                    color = {"ok": "green", "stale": "yellow"}.get(result, "dim")
+                    flag = f"  [{color}]{result}[/{color}]"
+                    # Only a definitive answer moves ref_status; missing/unverifiable leave it alone.
+                    new_ref = {"stale": "stale", "ok": "ok"}.get(result)
+                    if new_ref is not None and d.ref_status != new_ref and d.ref_status in ("ok", "stale"):
+                        branch = find_decision_branch(repo_root, d.id)
+                        if branch is not None:
+                            update_decision_status(repo_root, d.id, branch=branch, ref_status=new_ref)
+                conf = f"{d.confidence:.2f}" if d.confidence is not None else "-"
+                console.print(
+                    f"    {escape(d.id)}  {escape(d.status):<9} {escape(d.made_by or '-'):<6} {conf}  {sess} {rng}{flag}"
+                )
+                body = textwrap.fill(
+                    d.decision or "", width=max(40, console.width - 6),
+                    initial_indent="      ", subsequent_indent="      ",
+                )
+                console.print(escape(body))
+
+
+@cli.command()
+@click.argument("query", nargs=-1)
+@click.option("--sort", type=click.Choice(["relevance", "date", "confidence"]), default=None,
+              help="Default: relevance with a query, date otherwise. relevance requires a query (falls back to date)")
+@click.option("--status", multiple=True, help="Repeatable. Default hides ignored and rejected*")
+@click.option("--agent", multiple=True, help="Repeatable")
+@click.option("--branch")
+@click.option("--file", help="Match file_refs[*].file")
+@click.option("--made-by", type=click.Choice(["user", "agent"]))
+@click.option("--since", help="ISO date or git ref")
+@click.option("--limit", type=int, default=50, show_default=True, help="Max hits; 0 = all")
+@click.option("--json", "as_json", is_flag=True)
+def search(query, sort, status, agent, branch, file, made_by, since, limit, as_json):
+    """Search the decision log across every branch (flat, newest first by default)."""
+    from rich.markup import escape
+    from plumb.search import search_decisions
+
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+    text = " ".join(query).strip()
+    try:
+        hits = search_decisions(
+            repo_root, text, sort=sort, status=list(status) or None, agent=list(agent) or None,
+            branch=branch, file=file, made_by=made_by, since=since, limit=limit,
+        )
+    except ValueError as e:
+        console.print(f"[red]Error: {escape(str(e))}[/red]")
+        raise SystemExit(1)
+    if as_json:
+        try:
+            click.echo(json.dumps([h.decision.model_dump() | {"score": h.score} for h in hits], indent=2))
+        except BrokenPipeError:
+            _quiet_broken_pipe()
+        return
+    if not hits:
+        console.print("No decisions.")
+        return
+    show_score = (sort or ("relevance" if text else "date")) == "relevance" and bool(text)
+    try:
+        _print_hits(hits, show_score)
+    except BrokenPipeError:
+        _quiet_broken_pipe()
+
+
+def _print_hits(hits, show_score: bool) -> None:
+    from rich.markup import escape
+
+    for h in hits:
+        d = h.decision
+        conf = f"{d.confidence:.2f}" if d.confidence is not None else "-"
+        date = (d.created_at or "")[:10] or "-"
+        sha = (d.commit_sha or "")[:7] or "-"
+        tail = []
+        if d.session_id:
+            tail.append(f"session {escape(d.session_id[:8])}")
+        if d.turn_range:
+            tail.append(f"turns {d.turn_range[0]}-{d.turn_range[1]}")
+        if d.status == "recorded" and d.approved_by:
+            tail.append(f"by {escape(d.approved_by)}")
+        if show_score:
+            tail.append(f"score {h.score:.2f}")
+        console.print(
+            f"{escape(d.id)}  {escape(d.status):<9} {escape(d.agent or '-'):<7} "
+            f"{escape(d.made_by or '-'):<6} {conf:<4}  {date}  {sha}  {' '.join(tail)}".rstrip()
+        )
+        body = textwrap.fill(
+            d.decision or "", width=max(40, console.width - 6),
+            initial_indent="    ", subsequent_indent="    ",
+        )
+        console.print(escape(body))
+        if d.file_refs:
+            refs = ", ".join(
+                f"{r.file}:{r.lines[0]}-{r.lines[-1]}" if r.lines else r.file for r in d.file_refs
+            )
+            console.print(f"    [dim]files: {escape(refs)}[/dim]")
+
+
+@cli.command()
+def status():
+    """Print a summary of the project's Plumb state."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+
+    config = load_config(repo_root)
+    if config is None:
+        console.print("[yellow]Plumb not initialized. Run 'plumb init'.[/yellow]")
+        return
+    
+    # Mode
+    m, src = effective_mode(config)
+    console.print(f"[cyan]Mode:[/cyan] {m} (from {src})")
+    if m == "record" and (Path(repo_root) / ".plumb" / "record.lock").exists():
+        from plumb.record import record_lock
+        with record_lock(repo_root, wait=False) as free:
+            if not free:
+                console.print("[yellow]Recording in progress…[/yellow]")
+
+    # Spec files
+    console.print(f"[cyan]Spec files:[/cyan] {', '.join(config.spec_paths)}")
+
+    # Requirements count
+    req_path = Path(repo_root) / ".plumb" / "requirements.json"
+    if req_path.exists():
+        try:
+            reqs = json.loads(req_path.read_text())
+            console.print(f"[cyan]Requirements:[/cyan] {len(reqs)}")
+        except Exception:
+            console.print("[cyan]Requirements:[/cyan] Error reading")
+    else:
+        console.print("[cyan]Requirements:[/cyan] Not parsed yet")
+
+    # Test count
+    test_count = 0
+    for tp in config.test_paths:
+        test_dir = Path(repo_root) / tp
+        if test_dir.is_dir():
+            for tf in test_dir.rglob("test_*.py"):
+                try:
+                    content = tf.read_text()
+                    test_count += content.count("def test_")
+                except Exception:
+                    pass
+    console.print(f"[cyan]Tests:[/cyan] {test_count}")
+
+    # Check for uncommitted changes
+    has_uncommitted = False
+    try:
+        from git import Repo
+        repo = Repo(repo_root)
+        has_uncommitted = repo.is_dirty() or len(repo.untracked_files) > 0
+    except Exception:
+        pass
+
+    # Decisions
+    decisions = read_all_decisions(repo_root)
+    pending = [d for d in decisions if d.status == "pending"]
+    recorded_unsynced = [d for d in decisions if d.status == "recorded" and not d.synced_at]
+    broken = [d for d in decisions if d.ref_status == "broken"]
+    stale = [d for d in decisions if d.ref_status == "stale"]
+
+    if pending:
+        # Group by branch
+        by_branch: dict[str, int] = {}
+        for d in pending:
+            b = d.branch or "unknown"
+            by_branch[b] = by_branch.get(b, 0) + 1
+        branch_info = ", ".join(f"{b}: {c}" for b, c in by_branch.items())
+        console.print(f"[cyan]Pending decisions:[/cyan] {len(pending)} ({branch_info})")
+    elif has_uncommitted:
+        console.print("[cyan]Pending decisions:[/cyan] 0 [yellow](uncommitted changes — commit to capture decisions)[/yellow]")
+    else:
+        console.print("[cyan]Pending decisions:[/cyan] 0")
+
+    if recorded_unsynced:
+        console.print(f"[cyan]Sync debt:[/cyan] {len(recorded_unsynced)} recorded, unsynced (run 'plumb sync')")
+
+    if broken:
+        console.print(f"[red]Broken references:[/red] {len(broken)}")
+    if stale:
+        console.print(f"[yellow]Stale evidence:[/yellow] {len(stale)} (re-check with 'plumb log --verify')")
+
+    console.print(f"[cyan]Last sync commit:[/cyan] {config.last_commit or 'None'}")
+
+    # Coverage summary
+    from plumb.coverage_reporter import (
+        check_spec_to_test_coverage,
+        check_spec_to_code_coverage,
+    )
+    test_cov, test_total = check_spec_to_test_coverage(repo_root)
+    code_cov, code_total = check_spec_to_code_coverage(repo_root)
+    if test_total > 0:
+        console.print(f"[cyan]Spec-to-test:[/cyan]  {_coverage_bar(test_cov, test_total)}")
+    if code_total > 0:
+        stale = code_cov == 0 and code_total > 0
+        bar = _coverage_bar(code_cov, code_total)
+        if stale:
+            bar += "  [dim](run plumb coverage to refresh)[/dim]"
+        console.print(f"[cyan]Spec-to-code:[/cyan]  {bar}")
+
+
+@cli.command()
+def migrate():
+    """Migrate from monolithic decisions.jsonl to branch-sharded layout."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+
+    from plumb.decision_log import migrate_decisions
+    result = migrate_decisions(repo_root)
+
+    if result["already_migrated"]:
+        console.print("Already migrated to sharded layout.")
+        return
+
+    if result["migrated"] == 0:
+        console.print("No decisions to migrate.")
+    else:
+        console.print(f"[green]Migrated {result['migrated']} decisions to .plumb/decisions/main.jsonl[/green]")
+
+
+@cli.command(name="merge-decisions")
+@click.argument("branch")
+@click.option("--target", default="main", help="Target branch to merge into (default: main)")
+def merge_decisions(branch, target):
+    """Merge a branch's decisions into the target branch (default: main)."""
+    repo_root = find_repo_root()
+    if repo_root is None:
+        console.print("[red]Error: Not a git repository.[/red]")
+        raise SystemExit(1)
+
+    from plumb.decision_log import merge_branch_decisions
+    result = merge_branch_decisions(repo_root, branch, target=target)
+
+    if result.get("error"):
+        console.print(f"[red]Error: {result['error']}[/red]")
+        raise SystemExit(1)
+
+    if result["merged"] == 0:
+        console.print(f"No decisions found for branch '{branch}'.")
+    else:
+        console.print(f"[green]Merged {result['merged']} decision lines from '{branch}' into '{target}'.[/green]")
+
+
+if __name__ == "__main__":
+    cli()

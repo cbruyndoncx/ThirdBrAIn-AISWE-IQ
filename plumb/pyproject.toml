@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "plumb-dev"
+version = "0.2.4"
+description = "Keep spec, tests, and code in sync during AI-assisted development"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "dspy",
+    "litellm>=1.65.8",
+    "pytest",
+    "pytest-cov",
+    "gitpython",
+    "click",
+    "rich",
+    "jsonlines",
+    "duckdb",
+    "python-dotenv",
+]
+
+[project.scripts]
+plumb = "plumb.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["plumb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "e2e: end-to-end tests that call the real LLM and git hooks; run with PLUMB_E2E=1",
+]

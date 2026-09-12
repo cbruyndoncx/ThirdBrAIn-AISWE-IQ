@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/dbreunig/plumb.git
+	branch = main
+	commit = 76ac6bd222a2065b84ee0dabfb8ee9d109c453d9
+	parent = 2c4a524aa6df887b66cee730f9579fdb95f1e35c
+	method = merge
+	cmdver = 0.4.9
