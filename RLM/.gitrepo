@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/brainqub3/RLM.git
+	branch = main
+	commit = 0039c005c990daeffef818e5e090279b7ac20874
+	parent = d620c19c36ed513e85ca3887db7a27fd6159d0d3
+	method = merge
+	cmdver = 0.4.9

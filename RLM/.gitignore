@@ -1,0 +1,19 @@
+# RLM state (persistent REPL)
+.claude/rlm_state/
+.claude/rlm_runs/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Codex local workspace state.
+.codex/
+
+# OOLONG eval run artifacts (timestamped; local scratch).
+# The committed deliverable is rlm_vs_agent_experiment/REPORT.md.
+rlm_vs_agent_experiment/runs/
+# Sealed prior-arm results (cross-arm leak guard; transient -- unsealed back into runs/).
+rlm_vs_agent_experiment/_sealed/
+
+# read-pdfs skill workspace (derived Markdown/render scratch; the committed source is the PDF).
+paper/2512.24601v3/
