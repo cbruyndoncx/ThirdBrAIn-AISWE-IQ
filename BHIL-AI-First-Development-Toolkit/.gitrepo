@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/PolymathWizard/BHIL-AI-First-Development-Toolkit.git
+	branch = main
+	commit = 161f8e5311bdfc88bc650dcf800948437aecb93b
+	parent = aeebc29f9346ccf5e1adb528c7316363fbbe186d
+	method = merge
+	cmdver = 0.4.9
