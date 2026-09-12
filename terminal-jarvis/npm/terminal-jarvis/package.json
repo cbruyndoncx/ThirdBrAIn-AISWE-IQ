@@ -1,0 +1,36 @@
+{
+  "name": "terminal-jarvis",
+  "version": "0.1.19",
+  "description": "Data-driven harness switcher for AI coding agents",
+  "bin": {
+    "terminal-jarvis": "bin/terminal-jarvis",
+    "tj": "bin/terminal-jarvis"
+  },
+  "files": [
+    "bin/",
+    "postinstall.js",
+    "README.md",
+    "package.json"
+  ],
+  "scripts": {
+    "build:rust": "cd ../.. && cargo build",
+    "postinstall": "node postinstall.js",
+    "test": "node --test test-wrapper.js",
+    "smoke": "npm run build:rust && node bin/terminal-jarvis --help"
+  },
+  "keywords": [
+    "cli",
+    "ai",
+    "agents",
+    "harness"
+  ],
+  "author": "BA-CalderonMorales",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BA-CalderonMorales/terminal-jarvis.git"
+  },
+  "engines": {
+    "node": ">=18.17"
+  }
+}

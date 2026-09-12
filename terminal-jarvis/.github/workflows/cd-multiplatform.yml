@@ -1,0 +1,370 @@
+name: Multi-Platform CD
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to publish, such as v0.1.3"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-meta:
+    name: Release Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - id: meta
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            tag="$INPUT_VERSION"
+          fi
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "release tag must look like vX.Y.Z: $tag" >&2
+            exit 1
+          }
+          git fetch --force --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          git fetch --force --no-tags origin "+refs/tags/$tag:refs/tags/$tag"
+          git checkout --detach "refs/tags/$tag"
+          scripts/bash/release/index.sh preflight --tag "$tag" --expected-main-ref refs/remotes/origin/main
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  package:
+    name: Package - ${{ matrix.platform }}
+    needs: release-meta
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64-gnu
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - platform: linux-arm64-gnu
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - platform: macos-x64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+          - platform: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - platform: win32-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-meta.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: npm/terminal-jarvis/package-lock.json
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: cargo-cd-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}-v1
+          restore-keys: cargo-cd-${{ runner.os }}-${{ matrix.target }}-
+
+      - name: Build package
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
+        run: scripts/bash/release/index.sh package
+
+      - name: Verify platform package shape
+        env:
+          VERSION: ${{ needs.release-meta.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -eu
+          dist="dist/$VERSION/$PLATFORM"
+          archive="$dist/terminal-jarvis-$VERSION-$PLATFORM.tar.gz"
+          native="$dist/terminal-jarvis-$VERSION-$PLATFORM"
+          if [ "$PLATFORM" = "win32-x64" ]; then
+            native="$native.exe"
+            test -f "$dist/terminal-jarvis-$VERSION-$PLATFORM.zip"
+            test -f "$dist/terminal-jarvis-$VERSION-$PLATFORM.zip.sha256"
+          fi
+          test -f "$archive"
+          test -f "$archive.sha256"
+          test -f "$native"
+          test -f "$native.sha256"
+          test -f "$dist/homebrew/Formula/terminal-jarvis.rb"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/**
+          retention-days: 7
+
+  publish-crate:
+    name: Publish Crates.io
+    needs: [release-meta, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-meta.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: cargo-publish-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-v1
+          restore-keys: cargo-publish-${{ runner.os }}-
+
+      - name: Publish or verify crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ needs.release-meta.outputs.version }}
+        run: |
+          set -eu
+          if curl -A "terminal-jarvis-release-ci" -fsS "https://crates.io/api/v1/crates/terminal-jarvis/$VERSION" >/dev/null; then
+            echo "terminal-jarvis@$VERSION already exists on crates.io"
+            exit 0
+          fi
+          test -n "${CARGO_REGISTRY_TOKEN:-}" || {
+            echo "CARGO_REGISTRY_TOKEN is required to publish terminal-jarvis@$VERSION" >&2
+            exit 1
+          }
+          cargo publish --locked
+
+  release:
+    name: Publish GitHub Release
+    needs: [release-meta, package, publish-crate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-meta.outputs.tag }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-meta.outputs.tag }}
+          VERSION: ${{ needs.release-meta.outputs.version }}
+        run: |
+          set -eu
+          mkdir -p release-assets
+          find artifacts -type f -name "terminal-jarvis-$VERSION-*" \
+            -exec cp {} release-assets/ \;
+          verify_asset() {
+            asset="$1"
+            checksum="release-assets/$asset.sha256"
+            test -f "release-assets/$asset"
+            test -f "$checksum"
+            expected="$(cut -d ' ' -f 1 "$checksum")"
+            recorded="$(awk '{print $2}' "$checksum")"
+            actual="$(sha256sum "release-assets/$asset" | cut -d ' ' -f 1)"
+            case "$recorded" in
+              "$asset" | "./$asset") ;;
+              *) echo "$checksum references $recorded, expected $asset" >&2; exit 1 ;;
+            esac
+            test "$expected" = "$actual"
+          }
+          platforms="$(
+            sed -n 's/^release_platforms = \[\(.*\)\]/\1/p' scripts/config/release/constants/release.toml |
+              tr ',' '\n' |
+              tr -d ' "'
+          )"
+          test -n "$platforms"
+          for platform in $platforms; do
+            archive="terminal-jarvis-$VERSION-$platform.tar.gz"
+            native="terminal-jarvis-$VERSION-$platform"
+            test "$platform" != "win32-x64" || native="$native.exe"
+            verify_asset "$archive"
+            verify_asset "$native"
+            test "$platform" != "win32-x64" || verify_asset "terminal-jarvis-$VERSION-$platform.zip"
+          done
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+            gh release edit "$TAG" --draft=false --prerelease=false --latest \
+              --title "$TAG" --notes "Release $TAG harness catalog assets."
+          else
+            gh release create "$TAG" release-assets/* --verify-tag --latest \
+              --title "$TAG" --notes "Release $TAG harness catalog assets."
+          fi
+
+  update-homebrew-tap:
+    name: Update Homebrew Tap
+    needs: [release-meta, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: main
+          ref: ${{ needs.release-meta.outputs.tag }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: actions/checkout@v7
+        with:
+          repository: BA-CalderonMorales/homebrew-terminal-jarvis
+          path: tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update Formula
+        env:
+          TAG: ${{ needs.release-meta.outputs.tag }}
+          VERSION: ${{ needs.release-meta.outputs.version }}
+        run: |
+          set -eu
+          cd main
+          mkdir -p ../release-assets ../tap/Formula
+          find ../artifacts -type f \( -name "terminal-jarvis-$VERSION-*.tar.gz" -o -name "terminal-jarvis-$VERSION-*.tar.gz.sha256" \) \
+            -exec cp {} ../release-assets/ \;
+          sha_for() {
+            cut -d ' ' -f 1 "../release-assets/terminal-jarvis-$VERSION-$1.tar.gz.sha256"
+          }
+          repo="https://github.com/${GITHUB_REPOSITORY}"
+          linux_x64_sha="$(sha_for linux-x64-gnu)"
+          linux_arm64_sha="$(sha_for linux-arm64-gnu)"
+          macos_x64_sha="$(sha_for macos-x64)"
+          macos_arm64_sha="$(sha_for macos-arm64)"
+          cat > ../tap/Formula/terminal-jarvis.rb <<EOF
+          class TerminalJarvis < Formula
+            desc "Data-driven harness switcher for AI coding agents"
+            homepage "$repo"
+            version "$VERSION"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.intel?
+                url "$repo/releases/download/$TAG/terminal-jarvis-$VERSION-macos-x64.tar.gz"
+                sha256 "$macos_x64_sha"
+              elsif Hardware::CPU.arm?
+                url "$repo/releases/download/$TAG/terminal-jarvis-$VERSION-macos-arm64.tar.gz"
+                sha256 "$macos_arm64_sha"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.intel?
+                url "$repo/releases/download/$TAG/terminal-jarvis-$VERSION-linux-x64-gnu.tar.gz"
+                sha256 "$linux_x64_sha"
+              elsif Hardware::CPU.arm?
+                url "$repo/releases/download/$TAG/terminal-jarvis-$VERSION-linux-arm64-gnu.tar.gz"
+                sha256 "$linux_arm64_sha"
+              end
+            end
+
+            def install
+              bin.install "bin/terminal-jarvis"
+              pkgshare.install "harnesses", "gates"
+            end
+
+            test do
+              assert_match "terminal-jarvis", shell_output("#{bin}/terminal-jarvis --help")
+            end
+          end
+          EOF
+          ruby -c ../tap/Formula/terminal-jarvis.rb
+
+      - name: Commit Formula update
+        env:
+          VERSION: ${{ needs.release-meta.outputs.version }}
+        run: |
+          set -eu
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/terminal-jarvis.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date"
+            exit 0
+          fi
+          git commit -m "feat: update terminal-jarvis to $VERSION"
+          git push
+
+  publish-npm:
+    name: Publish NPM Package
+    needs: [release-meta, update-homebrew-tap]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-linux-x64-gnu
+          path: artifacts
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish or retag npm channels
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.release-meta.outputs.version }}
+        run: |
+          set -eu
+          test -n "${NODE_AUTH_TOKEN:-}" || {
+            echo "NPM_TOKEN is required to publish terminal-jarvis@$VERSION" >&2
+            exit 1
+          }
+          package_dir="artifacts/$VERSION/linux-x64-gnu/npm/terminal-jarvis"
+          test -f "$package_dir/package.json"
+          chmod +x "$package_dir/bin/terminal-jarvis"
+          test -x "$package_dir/bin/terminal-jarvis"
+          (cd "$package_dir" && npm pack --dry-run --loglevel error)
+          if npm view "terminal-jarvis@$VERSION" version >/dev/null 2>&1; then
+            npm dist-tag add "terminal-jarvis@$VERSION" latest
+          else
+            (cd "$package_dir" && npm publish --tag latest)
+          fi
+          for tag in stable beta; do
+            npm dist-tag add "terminal-jarvis@$VERSION" "$tag"
+          done
+          for tag in latest stable beta; do
+            npm dist-tag ls terminal-jarvis | grep "^$tag: $VERSION$"
+          done

@@ -1,0 +1,397 @@
+#!/usr/bin/env node
+const fs = require("node:fs");
+const https = require("node:https");
+const os = require("node:os");
+const path = require("node:path");
+const crypto = require("node:crypto");
+const { spawnSync } = require("node:child_process");
+const cacheIntegrity = require("./cache-integrity");
+
+const args = process.argv.slice(2);
+const here = __dirname;
+const pkg = require(path.resolve(here, "../package.json"));
+const repo = path.resolve(here, "../../..");
+
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(`terminal-jarvis: ${error.message}`);
+    process.exit(1);
+  });
+}
+
+async function main() {
+  const resolved = await resolveBinary(args);
+  const env = childEnv(resolved);
+  const result = spawnSync(resolved.binary, args, { stdio: "inherit", env });
+  if (result.error) throw new Error(`failed to execute ${resolved.binary}: ${result.error.message}`);
+  process.exit(result.status ?? 1);
+}
+
+function childEnv(resolved) {
+  const env = {
+    ...process.env,
+    TERMINAL_JARVIS_DISTRIBUTION: resolved.source,
+    TERMINAL_JARVIS_WRAPPER: __filename,
+  };
+  if (resolved.releaseUrl) env.TERMINAL_JARVIS_RELEASE_URL = resolved.releaseUrl;
+  if (resolved.cache) env.TERMINAL_JARVIS_CACHE = resolved.cache;
+  if (resolved.catalog) env.TERMINAL_JARVIS_CATALOG = resolved.catalog;
+  if (resolved.gates) env.TERMINAL_JARVIS_GATES = resolved.gates;
+  if (resolved.checksum) env.TERMINAL_JARVIS_CHECKSUM = resolved.checksum;
+  return env;
+}
+
+async function resolveBinary(argv = args) {
+  if (process.env.TERMINAL_JARVIS_BIN) {
+    return explicit(process.env.TERMINAL_JARVIS_BIN, "env");
+  }
+  for (const candidate of sourceCandidates()) {
+    if (fs.existsSync(candidate.binary)) return explicit(candidate.binary, "source", candidate.catalog);
+  }
+  if (fs.existsSync(path.resolve(repo, "Cargo.toml"))) {
+    const result = spawnSync("cargo", ["run", "--quiet", "--", ...argv], {
+      cwd: repo,
+      stdio: "inherit",
+    });
+    process.exit(result.status ?? 1);
+  }
+  return downloadRelease();
+}
+
+function explicit(binary, source, catalog = "") {
+  if (!fs.existsSync(binary)) throw new Error(`binary not found: ${binary}`);
+  return { binary, source, catalog };
+}
+
+function sourceCandidates() {
+  const catalog = path.resolve(repo, "harnesses");
+  const binary = executableName();
+  return [
+    { binary: path.resolve(repo, "target/release", binary), catalog },
+    { binary: path.resolve(repo, "target/debug", binary), catalog },
+  ];
+}
+
+async function downloadRelease(options = {}) {
+  const hostPlatform = options.platform || process.platform;
+  const hostArch = options.arch || process.arch;
+  const runtime = options.runtime || runtimePlatformDetails(hostPlatform);
+  const platform = platformNameFor(hostPlatform, hostArch, runtime);
+  const archive = archiveName(hostPlatform, hostArch, runtime);
+  const base = options.releaseBase || releaseBase();
+  const releaseUrl = `${base}/${archive}`;
+  const checksumUrl = `${releaseUrl}.sha256`;
+  const cache = options.cache || cacheRoot();
+  const env = options.env || process.env;
+  const fetch = options.fetchFile || fetchFile;
+  const checksum = options.verifyChecksum || verifyChecksum;
+  const extract = options.unpack || unpack;
+  const root = path.join(cache, pkg.version, platform);
+  const identity = {
+    name: pkg.name,
+    version: pkg.version,
+    target: platform,
+    platform: hostPlatform,
+    arch: hostArch,
+    archive,
+    binaryName: executableName(hostPlatform),
+    releaseUrl,
+  };
+  const cached = cacheIntegrity.inspect(root, identity);
+  if (cached) {
+    return resolvedRelease(cached, "github-release-cache", releaseUrl, cache);
+  }
+  if (env.TERMINAL_JARVIS_NO_DOWNLOAD) {
+    if (fs.existsSync(root)) {
+      throw new Error(`cached release is not usable: ${root}`);
+    }
+    throw new Error(`release binary is not cached: ${root}`);
+  }
+  const stage = cacheIntegrity.stagePath(root);
+  fs.mkdirSync(stage, { recursive: true });
+  const staged = cacheIntegrity.payloadPaths(stage, identity);
+  try {
+    await fetch(releaseUrl, staged.archive);
+    await checksum(checksumUrl, staged.archive);
+    extract(staged.archive, stage, hostPlatform);
+    if (fs.existsSync(staged.binary)) fs.chmodSync(staged.binary, 0o755);
+    cacheIntegrity.writeMetadata(stage, cacheIntegrity.createMetadata(stage, identity));
+    cacheIntegrity.promote(stage, root);
+  } catch (error) {
+    fs.rmSync(stage, { recursive: true, force: true });
+    throw downloadFailure(releaseUrl, error);
+  }
+  const installed = cacheIntegrity.inspect(root, identity);
+  if (!installed) throw downloadFailure(releaseUrl, new Error("staged cache validation failed"));
+  return resolvedRelease(installed, "github-release", releaseUrl, cache);
+}
+
+function resolvedRelease(files, source, releaseUrl, cache) {
+  return {
+    binary: files.binary,
+    source,
+    releaseUrl,
+    cache,
+    catalog: files.catalog,
+    gates: files.gates,
+    checksum: "cache-integrity-verified",
+  };
+}
+
+function downloadFailure(releaseUrl, error) {
+  return new Error(
+    `failed to download Terminal Jarvis release from ${releaseUrl}: ${error.message}; ` +
+    "check network access, proxy settings, offline cache, or TERMINAL_JARVIS_RELEASE_BASE. " +
+    guidanceHint()
+  );
+}
+
+function runtimePlatformDetails(platform = process.platform, env = process.env, report = process.report) {
+  const android = platform === "android" || Boolean(env.TERMUX_VERSION) ||
+    Boolean(env.ANDROID_ROOT && env.ANDROID_DATA);
+  if (platform !== "linux" || android) return { android, libc: "" };
+  try {
+    const header = report && typeof report.getReport === "function"
+      ? report.getReport().header
+      : {};
+    return { android: false, libc: header && header.glibcVersionRuntime ? "gnu" : "unknown" };
+  } catch {
+    return { android: false, libc: "unknown" };
+  }
+}
+
+function platformNameFor(platform, arch, runtime = {}) {
+  if (platform === "android" || runtime.android) {
+    throw new Error(unsupportedPlatformMessage(platform, arch, { ...runtime, android: true }));
+  }
+  if (platform === "linux" && runtime.libc !== "gnu") {
+    throw new Error(unsupportedPlatformMessage(platform, arch, runtime));
+  }
+  if (platform === "linux" && arch === "x64") return "linux-x64-gnu";
+  if (platform === "linux" && arch === "arm64") return "linux-arm64-gnu";
+  if (platform === "darwin" && arch === "x64") return "macos-x64";
+  if (platform === "darwin" && arch === "arm64") return "macos-arm64";
+  if (platform === "win32" && arch === "x64") return "win32-x64";
+  throw new Error(unsupportedPlatformMessage(platform, arch, runtime));
+}
+
+function archiveName(
+  platform = process.platform,
+  arch = process.arch,
+  runtime = runtimePlatformDetails(platform)
+) {
+  return `${pkg.name}-${pkg.version}-${platformNameFor(platform, arch, runtime)}` +
+    archiveExtension(platform);
+}
+
+function archiveExtension(platform = process.platform) {
+  return platform === "win32" ? ".zip" : ".tar.gz";
+}
+
+function unsupportedPlatformMessage(platform, arch, runtime = {}) {
+  const current = `${platform}-${arch}`;
+  let reason = "";
+  if (platform === "android" || runtime.android) {
+    reason = " Android/Termux is not a claimed native target.";
+  } else if (platform === "linux" && runtime.libc !== "gnu") {
+    const libc = runtime.libc || "unknown";
+    reason = ` Only GNU libc is supported on Linux; detected libc=${libc}. ` +
+      "musl/Alpine and unidentified libc combinations are not claimed.";
+  }
+  return `unsupported platform: ${current}.${reason} ` +
+    "The npm package downloads GitHub Release assets for linux-x64-gnu, linux-arm64-gnu, " +
+    "macos-x64, macos-arm64, and win32-x64. " +
+    guidanceHint();
+}
+
+function executableName(platform = process.platform) {
+  return platform === "win32" ? "terminal-jarvis.exe" : "terminal-jarvis";
+}
+
+function guidanceHint() {
+  return `See ${path.join(here, "README.txt")} for npm launcher behavior and install-path limits.`;
+}
+
+function releaseBase() {
+  return process.env.TERMINAL_JARVIS_RELEASE_BASE ||
+    `https://github.com/BA-CalderonMorales/terminal-jarvis/releases/download/v${pkg.version}`;
+}
+
+function cacheRoot() {
+  return cacheRootFor(process.platform, process.env, os.homedir());
+}
+
+function cacheRootFor(platform, env, home) {
+  if (env.TERMINAL_JARVIS_CACHE) return env.TERMINAL_JARVIS_CACHE;
+  if (platform === "win32") {
+    const root = env.LOCALAPPDATA || env.APPDATA || home || os.tmpdir();
+    return path.join(root, "terminal-jarvis", "npm");
+  }
+  return path.join(home || os.tmpdir(), ".cache", "terminal-jarvis", "npm");
+}
+
+function pathEntries(pathValue = process.env.PATH || "") {
+  return pathValue.split(path.delimiter).filter(Boolean);
+}
+
+function commandExtensions(platform = process.platform, pathExt = process.env.PATHEXT || "") {
+  if (platform !== "win32") return [""];
+  const extensions = pathExt.split(";").filter(Boolean);
+  return ["", ...extensions].map((extension) => extension.toLowerCase());
+}
+
+function commandPathMatches(command, options = {}) {
+  const entries = pathEntries(options.pathValue);
+  const extensions = commandExtensions(options.platform, options.pathExt);
+  const names = extensions.map((extension) => `${command}${extension}`);
+  const matches = [];
+  for (const entry of entries) {
+    for (const name of names) {
+      const candidate = path.join(entry, name);
+      if (isExecutableFile(candidate)) matches.push(candidate);
+    }
+  }
+  return matches;
+}
+
+function isExecutableFile(candidate) {
+  try {
+    const stats = fs.statSync(candidate);
+    return stats.isFile() && (process.platform === "win32" || (stats.mode & 0o111) !== 0);
+  } catch {
+    return false;
+  }
+}
+
+function samePath(left, right, platform = process.platform) {
+  const normalize = (candidate) => {
+    const resolved = fs.existsSync(candidate) ? fs.realpathSync(candidate) : path.resolve(candidate);
+    return platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  return normalize(left) === normalize(right);
+}
+
+function expectedGlobalShim(prefix = process.env.npm_config_prefix, platform = process.platform) {
+  if (!prefix) return "";
+  const binDir = platform === "win32" ? prefix : path.join(prefix, "bin");
+  return path.join(binDir, platform === "win32" ? "terminal-jarvis.cmd" : "terminal-jarvis");
+}
+
+function pathShadowStatus(options = {}) {
+  const command = options.command || "terminal-jarvis";
+  const expectedPaths = (options.expectedPaths || [__filename, expectedGlobalShim()])
+    .filter(Boolean);
+  const matches = commandPathMatches(command, options);
+  const expectedIndex = matches.findIndex((match) =>
+    expectedPaths.some((expected) => samePath(match, expected, options.platform))
+  );
+  if (expectedIndex === 0) return { kind: "ok", diagnostic: "" };
+  const expected = expectedIndex > 0 ? matches[expectedIndex] : expectedPaths[0];
+  const expectedDir = path.dirname(expected);
+  if (matches.length > 0) {
+    const first = matches[0];
+    const firstDir = path.dirname(first);
+    return {
+      kind: "shadow",
+      diagnostic: `terminal-jarvis: PATH resolves to ${first} before the npm shim ${expected}. ` +
+        `Remove or update the stale binary, or put ${expectedDir} before ${firstDir} in PATH.`,
+    };
+  }
+  return {
+    kind: "missing",
+    diagnostic: `terminal-jarvis: npm shim ${expected} is not reachable on PATH. Add ${expectedDir} to PATH.`,
+  };
+}
+
+function pathShadowDiagnostic(options = {}) {
+  return pathShadowStatus(options).diagnostic;
+}
+
+function shouldRunPostinstallDiagnostic(env = process.env) {
+  if (env.TERMINAL_JARVIS_SKIP_PATH_DIAGNOSTIC) return false;
+  return env.npm_config_global === "true" || env.npm_config_location === "global";
+}
+
+function postinstallPathStatus(env = process.env) {
+  if (!shouldRunPostinstallDiagnostic(env)) return { kind: "ok", diagnostic: "" };
+  return pathShadowStatus({
+    pathValue: env.PATH,
+    pathExt: env.PATHEXT,
+    platform: process.platform,
+    expectedPaths: [expectedGlobalShim(env.npm_config_prefix, process.platform), __filename],
+  });
+}
+
+async function verifyChecksum(checksumUrl, archivePath, readChecksum = fetchText) {
+  const expected = (await readChecksum(checksumUrl)).trim().split(/\s+/)[0].toLowerCase();
+  const actual = crypto.createHash("sha256").update(fs.readFileSync(archivePath)).digest("hex");
+  if (!/^[a-f0-9]{64}$/.test(expected)) {
+    throw new Error(`invalid SHA-256 checksum from ${checksumUrl}`);
+  }
+  if (expected !== actual) throw new Error(`checksum mismatch for ${archivePath}`);
+}
+
+function unpack(archivePath, cwd, platform = process.platform, run = spawnSync) {
+  const result = platform === "win32"
+    ? run("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      powershellExtractCommand(archivePath, cwd),
+    ], { stdio: "inherit" })
+    : run("tar", ["-xzf", archivePath, "-C", cwd], { stdio: "inherit" });
+  if (result.error) {
+    throw new Error(`failed to start ${platform === "win32" ? "zip" : "tar"} extraction: ` +
+      result.error.message);
+  }
+  if (result.status !== 0) throw new Error(`${platform === "win32" ? "zip" : "tar"} extraction failed`);
+}
+
+function powershellExtractCommand(archivePath, cwd) {
+  return `Expand-Archive -LiteralPath ${powershellLiteral(archivePath)} ` +
+    `-DestinationPath ${powershellLiteral(cwd)} -Force`;
+}
+
+function powershellLiteral(value) {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function fetchText(url) {
+  const tmp = path.join(os.tmpdir(), `terminal-jarvis-${process.pid}.txt`);
+  return fetchFile(url, tmp).then(() => fs.readFileSync(tmp, "utf8"));
+}
+
+function fetchFile(url, destination, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        if (redirects > 5) return reject(new Error(`too many redirects: ${url}`));
+        return resolve(fetchFile(res.headers.location, destination, redirects + 1));
+      }
+      if (res.statusCode !== 200) return reject(new Error(`download failed ${res.statusCode}: ${url}`));
+      const file = fs.createWriteStream(destination, { mode: 0o644 });
+      res.pipe(file);
+      file.on("finish", () => file.close(resolve));
+      file.on("error", reject);
+    }).on("error", reject);
+  });
+}
+
+module.exports = {
+  cacheRoot,
+  cacheRootFor,
+  childEnv,
+  downloadRelease,
+  downloadFailure,
+  executableName,
+  guidanceHint,
+  pathShadowDiagnostic,
+  powershellExtractCommand,
+  archiveExtension,
+  archiveName,
+  platformNameFor,
+  postinstallPathStatus,
+  runtimePlatformDetails,
+  unpack,
+  verifyChecksum,
+};

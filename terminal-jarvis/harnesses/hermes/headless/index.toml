@@ -1,0 +1,12 @@
+summary = "Run Hermes Agent headlessly with a one-shot prompt (-z)."
+command = "hermes"
+args = ["-z"]
+support = "verified"
+evidence = "disposable-real"
+effect = "dangerous"
+network = true
+interaction = "noninteractive"
+platforms = ["linux-x64-gnu"]
+executable = "hermes"
+source = "internal:phase-01@fab5848"
+verified_at = "2026-08-05T00:00:00Z"

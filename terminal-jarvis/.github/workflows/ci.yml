@@ -1,0 +1,172 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths-ignore:
+      - 'docs/**'
+      - 'plan/**'
+      - 'README.md'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  conformance:
+    name: Adversarial Conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+
+      - name: Run exact-ref adversarial evidence
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: |
+          mkdir -p evidence
+          scripts/bash/catalog/index.sh adversarial-report \
+            --output evidence/adversarial.tsv \
+            --tested-ref "${{ github.sha }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: adversarial-${{ github.sha }}
+          path: evidence/adversarial.tsv
+          retention-days: 7
+          if-no-files-found: error
+
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: npm/terminal-jarvis/package-lock.json
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/bin/cargo-deny
+            ~/.cargo/bin/cargo-llvm-cov
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: cargo-verify-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-v1
+          restore-keys: cargo-verify-${{ runner.os }}-
+
+      - name: Install CI cargo tools
+        run: |
+          command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
+          command -v cargo-deny >/dev/null || cargo install cargo-deny --locked
+          command -v cargo-llvm-cov >/dev/null || cargo install cargo-llvm-cov --locked
+
+      - name: Run branch verification
+        run: scripts/bash/verify/index.sh verify
+        env:
+          TJ_REQUIRE_SECURITY_TOOLS: "1"
+
+  package:
+    name: Package Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: npm/terminal-jarvis/package-lock.json
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: cargo-package-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-v1
+          restore-keys: cargo-package-${{ runner.os }}-
+
+      - name: Build release package
+        run: scripts/bash/release/index.sh package
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: package-smoke-linux
+          path: dist/**
+          retention-days: 7
+
+  security-general:
+    name: Security - Grype SARIF
+    permissions:
+      contents: read
+      security-events: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Scan workspace with Grype
+        id: grype
+        uses: anchore/scan-action@v7
+        with:
+          path: .
+          fail-build: false
+          output-format: sarif
+          cache-db: true
+
+      - name: Validate Grype SARIF output
+        run: |
+          set -eu
+          sarif_file="${{ steps.grype.outputs.sarif }}"
+          if [ -z "$sarif_file" ] || [ ! -s "$sarif_file" ]; then
+            echo "Grype SARIF output is missing: $sarif_file"
+            exit 1
+          fi
+          echo "Grype SARIF output is ready for upload: $sarif_file"
+
+      - name: Upload Grype SARIF report
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ steps.grype.outputs.sarif }}
+          category: security-general
+
+      - name: Fail on Grype findings
+        run: |
+          set -eu
+          sarif_file="${{ steps.grype.outputs.sarif }}"
+          findings="$(node -e "const fs=require('fs'); const s=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log((s.runs || []).reduce((n, run) => n + ((run.results || []).length), 0));" "$sarif_file")"
+          echo "Grype findings: $findings"
+          test "$findings" -eq 0

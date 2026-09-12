@@ -1,0 +1,114 @@
+name: Mutations
+run-name: Mutations (${{ github.event_name }})
+
+on:
+  pull_request:
+    branches: [develop, main]
+    paths-ignore:
+      - 'docs/**'
+      - 'plan/**'
+      - 'README.md'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: mutation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutation:
+    name: Mutation (${{ matrix.domain }}-${{ matrix.part }})
+    runs-on: ubuntu-latest
+    # Smaller PR partitions target short feedback; full scheduled runs need
+    # a separate budget because they also cover unchanged source.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 180 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {domain: cli-core, shard: 0/8, part: 0}
+          - {domain: cli-core, shard: 1/8, part: 1}
+          - {domain: cli-core, shard: 2/8, part: 2}
+          - {domain: cli-core, shard: 3/8, part: 3}
+          - {domain: cli-core, shard: 4/8, part: 4}
+          - {domain: cli-core, shard: 5/8, part: 5}
+          - {domain: cli-core, shard: 6/8, part: 6}
+          - {domain: cli-core, shard: 7/8, part: 7}
+          - {domain: cli-args, shard: 0/4, part: 0}
+          - {domain: cli-args, shard: 1/4, part: 1}
+          - {domain: cli-args, shard: 2/4, part: 2}
+          - {domain: cli-args, shard: 3/4, part: 3}
+          - {domain: cli-output, shard: 0/2, part: 0}
+          - {domain: cli-output, shard: 1/2, part: 1}
+          - {domain: diagnostics-core, shard: 0/2, part: 0}
+          - {domain: diagnostics-core, shard: 1/2, part: 1}
+          - {domain: diagnostics-report, shard: 0/2, part: 0}
+          - {domain: diagnostics-report, shard: 1/2, part: 1}
+          - {domain: catalog, shard: 0/2, part: 0}
+          - {domain: catalog, shard: 1/2, part: 1}
+          - {domain: env-aux, shard: 0/8, part: 0}
+          - {domain: env-aux, shard: 1/8, part: 1}
+          - {domain: env-aux, shard: 2/8, part: 2}
+          - {domain: env-aux, shard: 3/8, part: 3}
+          - {domain: env-aux, shard: 4/8, part: 4}
+          - {domain: env-aux, shard: 5/8, part: 5}
+          - {domain: env-aux, shard: 6/8, part: 6}
+          - {domain: env-aux, shard: 7/8, part: 7}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo tools and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/cargo-mutants
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: cargo-mutants-env-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-v1
+          restore-keys: cargo-mutants-env-${{ runner.os }}-
+
+      - name: Cache baseline debug build
+        uses: actions/cache@v6
+        with:
+          path: target/debug
+          key: cargo-mutants-debug-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-v1
+          restore-keys: cargo-mutants-debug-${{ runner.os }}-
+
+      - name: Install cargo-mutants
+        run: command -v cargo-mutants >/dev/null || cargo install cargo-mutants --locked
+
+      - name: Run mutation tests on pull request diff
+        if: github.event_name == 'pull_request'
+        run: |
+          set -eu
+          if ! git diff "origin/${{ github.base_ref }}..HEAD" > git.diff 2>/dev/null || [ ! -s git.diff ]; then
+            echo "Base ref unavailable or empty diff; running full suite instead"
+            scripts/bash/mutation/index.sh run "${{ matrix.domain }}" --shard "${{ matrix.shard }}"
+          else
+            scripts/bash/mutation/index.sh run "${{ matrix.domain }}" --shard "${{ matrix.shard }}" --in-diff git.diff
+          fi
+
+      - name: Run full mutation suite
+        if: github.event_name != 'pull_request'
+        run: scripts/bash/mutation/index.sh run "${{ matrix.domain }}" --shard "${{ matrix.shard }}"
+
+      - name: Upload mutation diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutation-${{ matrix.domain }}-${{ matrix.part }}
+          path: mutants.out/**
+          if-no-files-found: ignore

@@ -1,0 +1,45 @@
+pub(crate) use crate::cli::structs::action;
+pub(crate) use crate::cli::structs::error;
+pub(crate) use crate::cli::structs::response;
+
+pub mod args;
+pub(crate) mod cache;
+pub mod canonical;
+pub(crate) mod compat;
+pub(crate) mod compat_support;
+pub(crate) mod dispatch;
+pub(crate) mod dispatch_compat;
+pub(crate) mod dispatch_security;
+pub(crate) mod dispatch_support;
+pub(crate) mod entry;
+pub(crate) mod execute;
+pub(crate) mod gate_cmd;
+pub(crate) mod gate_skip;
+pub(crate) mod guard;
+pub(crate) mod guard_ask;
+pub(crate) mod guard_intent;
+pub(crate) mod guard_policy;
+pub(crate) mod help;
+pub(crate) mod help_command;
+pub(crate) mod help_text;
+pub(crate) mod invoke;
+pub(crate) mod invoke_live;
+pub(crate) mod json;
+pub(crate) mod output;
+pub(crate) mod output_fields;
+pub(crate) mod output_plan;
+pub mod output_truth;
+pub(crate) mod package_advisory;
+pub(crate) mod prompt_lead;
+pub mod resolve;
+pub(crate) mod self_update;
+pub(crate) mod self_update_intent;
+pub mod style;
+pub(crate) mod table;
+pub(crate) mod text_wrap;
+pub(crate) mod uninstall;
+pub(crate) mod version;
+
+#[cfg(test)]
+#[path = "../tests/test_support.rs"]
+pub(crate) mod test_support;

@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/BA-CalderonMorales/terminal-jarvis.git
+	branch = main
+	commit = 74223d304922445dff1c090487b175f9886704c3
+	parent = 8b682657acfb4b19f8e9a1f77840c625d85b7884
+	method = merge
+	cmdver = 0.4.9

@@ -1,0 +1,43 @@
+exclude_globs = ["src/cli/compat.rs"]
+
+# Mutations that cannot change observable behavior on CI runners are never
+# generated for the raw release binary; keep this list as narrow as the
+# reasoning demands. See commit history for the original reasoning behind
+# each entry.
+# Mutations that cannot change observable behavior on CI runners; each
+# entry names the mutant family and why it is unkillable. Keep narrow.
+exclude_re = [
+  "self_update\\.rs.*\\b(run|npm_update|brew_update|cargo_update)\\b",
+  "table_layout\\.rs.*replace > with >= in wrap",
+  # The cfg(not(unix)) executable_mode stub never compiles on Linux
+  # runners; the unix variant is witnessed by the execute-bit probe tests.
+  "path\\.rs.*replace executable_mode -> bool with false",
+  "runner\\.rs.*replace signal_code -> i32 with",
+  "platform\\.rs.*delete ! in wsl",
+  "execute\\.rs.*replace != with == in run",
+  "entry\\.rs.*replace \\|\\| with && in parse_failure",
+  "table_wrap\\.rs.*replace > with >= in wrap",
+  "table_alloc\\.rs.*replace > with >= in widths",
+  "probe\\.rs.*replace < with",
+  "style_diagnostics\\.rs.*decisions",
+  "args_action\\.rs.*bare_launch",
+  "args_options\\.rs.*in extract",
+  "resolve\\.rs.*replace executable_mode -> bool with false",
+  "distribution\\.rs.*delete ! in channel",
+  # The cfg(not(unix)) exit_code variant never compiles on CI runners; the
+  # unix variant is witnessed by the preflight signal tests.
+  "stream\\.rs:12.*replace exit_code -> i32 with",
+  # run_command_text's capture branch executes only inside the tui (screen
+  # active); headless runners take the inherit branch, so its two trim
+  # guards and the capture flip are unkillable there. The in-frame capture
+  # path is witnessed by the pty acceptance suite on real terminals.
+  "runner\\.rs:(2[0-9]|3[0-9]):.*delete ! in run_command_text",
+  # The cfg(windows) PATHEXT-resolved spawn target never compiles on Linux
+  # runners; the unix pass-through variant is witnessed by the spawn tests
+  # (mutating it fails the package-check fake-bin verdicts).
+  "logic/resolve\\.rs:11:5.*replace resolved -> Cow",
+  # The non-heartbeat outcome floor (prefix.len() + 1) is always shorter
+  # than the outcome text, so -1/*1 produce byte-identical lines for every
+  # real state; the same family at the pad line (91:50) is caught.
+  "runner\\.rs:89:22.*replace \\+ with",
+]

@@ -1,0 +1,100 @@
+use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static TEMP_ID: AtomicUsize = AtomicUsize::new(0);
+
+fn home() -> String {
+    std::env::temp_dir()
+        .join(format!(
+            "terminal-jarvis-presentation-{}-{}",
+            std::process::id(),
+            TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ))
+        .to_string_lossy()
+        .to_string()
+}
+
+fn tj(args: &[&str], home: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_terminal-jarvis"))
+        .args(args)
+        .env("TERMINAL_JARVIS_HOME", home)
+        .env("PATH", "")
+        .env_remove("COLUMNS")
+        .output()
+        .expect("terminal-jarvis runs")
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+fn assert_table(output: &Output, title: &str) {
+    assert!(output.status.success(), "{output:?}");
+    let body = stdout(output);
+    assert!(body.contains(title), "{body}");
+    assert!(body.contains('+') && body.contains('|'), "{body}");
+}
+
+#[test]
+fn default_output_is_structured_across_the_core_read_only_surface() {
+    let home = home();
+    for (args, title) in [
+        (&["--help"][..], "Commands"),
+        (&["list"], "Available Harnesses"),
+        (&["show", "codex"], "OpenAI coding agent CLI"),
+        (&["plan", "codex", "headless"], "Plan: codex headless"),
+        (&["version", "--verbose"], "Terminal Jarvis"),
+        (&["update", "--dry-run"], "Harness Updates"),
+        (&["auth", "help", "codex"], "Authentication"),
+        (&["config", "path"], "Configuration Paths"),
+        (&["cache", "status"], "Cache Status"),
+        (&["security", "audit"], "Security Audit"),
+    ] {
+        if args[0] == "show" {
+            let show = tj(args, &home);
+            let body = stdout(&show);
+            assert!(body.contains(title), "{body}");
+            // the identity line leads: "<display> (<name>)"
+            assert!(body.starts_with("OpenAI Codex (codex)"), "{body}");
+            assert!(!body.contains('+'), "show is line-based: {body}");
+            continue;
+        }
+        assert_table(&tj(args, &home), title);
+    }
+    // gate screens share the show human-line style: fields, never tables.
+    let gate = tj(&["gate", "status"], &home);
+    let body = stdout(&gate);
+    assert!(gate.status.success(), "{gate:?}");
+    assert!(body.contains("Security gate"), "{body}");
+    assert!(body.contains("  status     disabled"), "{body}");
+    assert!(!body.contains('+'), "gate is line-based: {body}");
+    let check = tj(&["check"], &home);
+    assert_eq!(check.status.code(), Some(4));
+    assert!(stdout(&check).contains("Terminal Jarvis Diagnostics"));
+    let removed = tj(&["templates"], &home);
+    assert_eq!(removed.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&removed.stderr).contains("removed"));
+}
+
+#[test]
+fn rich_mode_handles_selection_and_plain_mode_stays_script_friendly() {
+    let home = home();
+    assert_table(&tj(&["use", "codex"], &home), "Active Harness");
+    assert_table(&tj(&["current"], &home), "Active Harness");
+    let plain = tj(&["--plain", "list"], &home);
+    assert!(plain.status.success());
+    assert_eq!(stdout(&plain).lines().count(), 25);
+    assert!(!stdout(&plain).contains("Available Harnesses"));
+    let no_color = tj(&["--no-color", "list"], &home);
+    assert_table(&no_color, "Available Harnesses");
+    assert!(!stdout(&no_color).contains('\x1b'));
+}
+
+#[test]
+fn headless_tables_wrap_without_losing_their_frame() {
+    let output = tj(&["security", "audit"], &home());
+    assert_table(&output, "Security Audit");
+    assert!(stdout(&output)
+        .lines()
+        .all(|line| line.chars().count() <= 100));
+}
