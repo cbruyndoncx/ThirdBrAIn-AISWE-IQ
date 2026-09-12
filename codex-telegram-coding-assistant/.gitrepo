@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/coleam00/codex-telegram-coding-assistant.git
+	branch = main
+	commit = 59634201de4da6a06bb92629147eefb4081a97f4
+	parent = 79a78b2b5312b34e63315b4df36b701f1bf37c42
+	method = merge
+	cmdver = 0.4.9
