@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/chrishutchinson/claude-receipts.git
+	branch = main
+	commit = ad92d3d55087150adfad1c18f95479ef3cdc15f2
+	parent = ef162af7a06f22f18e5d5d5a83afc212b93db679
+	method = merge
+	cmdver = 0.4.9
