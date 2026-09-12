@@ -1,0 +1,28 @@
+# Source files
+src/
+tests/
+*.codx/
+
+# Config files
+tsconfig.json
+vitest.config.ts
+.gitignore
+
+# Build artifacts
+*.log
+.codumentation.log
+.codumentation-summary.log
+.codumentation-guide.md
+
+# IDE
+.vscode/
+.idea/
+
+# Git
+.git/
+.github/
+
+# Other
+node_modules/
+*.tgz
+prompt.txt

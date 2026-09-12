@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.codumentation.log
+*.log
+.DS_Store
+coverage/
+.vscode/
+.idea/
+
+# Codumentation logs
+.codumentation-summary.log

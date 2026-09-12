@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/benquemax/codumentation.git
+	branch = main
+	commit = cce3d7a29199ae89ba132d891ac3610547614804
+	parent = eee51eb70ebaa0113a51bf7430de40000d450c32
+	method = merge
+	cmdver = 0.4.9
