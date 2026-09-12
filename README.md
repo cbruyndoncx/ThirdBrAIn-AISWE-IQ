@@ -3,7 +3,7 @@
 Consolidated collection managed with [git-subrepo](https://github.com/ingydotnet/git-subrepo).
 Update everything with `git subrepo pull --all`.
 
-Contains 98 subrepos:
+Contains 109 subrepos:
 
 ## [610ClaudeSubagents](https://github.com/ChrisRoyse/610ClaudeSubagents)
 - **Remote**: https://github.com/ChrisRoyse/610ClaudeSubagents.git (branch `main`)
@@ -93,6 +93,14 @@ Contains 98 subrepos:
 - **Languages Used**: Python, HTML
 - **Number of Releases**: 0
 
+## [automaker](https://github.com/AutoMaker-Org/automaker)
+- **Remote**: https://github.com/AutoMaker-Org/automaker.git (branch `main`)
+- **Description**: No description available
+- **Last Updated**: 2026-05-22T16:38:23Z
+- **Stars**: 3218
+- **Languages Used**: TypeScript, CSS, JavaScript, Shell, Dockerfile, HTML
+- **Number of Releases**: 29
+
 ## [autonomous-coding](https://github.com/leonvanzyl/autonomous-coding)
 - **Remote**: https://github.com/leonvanzyl/autonomous-coding.git (branch `master`)
 - **Description**: No description available
@@ -113,7 +121,7 @@ Contains 98 subrepos:
 - **Remote**: https://github.com/hesreallyhim/awesome-claude-code.git (branch `main`)
 - **Description**: A hand-picked collection of the finest of resources for the most awesome of agents, Claude Code, the undisputed champion of coding companions, from the unstoppable team at Anthropic PBC. A delectable showcase of top tier skills, ambidextrous agents, scintillating status lines, top notch developer tooling, and also we have plugins
 - **Last Updated**: 2026-09-12T15:08:15Z
-- **Stars**: 53923
+- **Stars**: 53924
 - **Languages Used**: Python, Makefile
 - **Number of Releases**: 0
 
@@ -188,6 +196,14 @@ Contains 98 subrepos:
 - **Stars**: 29
 - **Languages Used**: Python, HTML
 - **Number of Releases**: 0
+
+## [cc-wf-studio](https://github.com/breaking-brake/cc-wf-studio)
+- **Remote**: https://github.com/breaking-brake/cc-wf-studio.git (branch `main`)
+- **Description**: CC Workflow Studio
+- **Last Updated**: 2026-09-09T00:10:16Z
+- **Stars**: 5380
+- **Languages Used**: TypeScript, Shell, CSS, JavaScript, HTML
+- **Number of Releases**: 100+
 
 ## [ccusage-py](https://github.com/m6k/ccusage-py)
 - **Remote**: https://github.com/m6k/ccusage-py.git (branch `main`)
@@ -297,7 +313,7 @@ Contains 98 subrepos:
 - **Remote**: https://github.com/HKUDS/CLI-Anything.git (branch `main`)
 - **Description**: "CLI-Anything: Making ALL Software Agent-Native" -- CLI-Hub: https://clianything.cc/
 - **Last Updated**: 2026-08-21T07:26:58Z
-- **Stars**: 49309
+- **Stars**: 49311
 - **Languages Used**: Python, C#, Shell, JavaScript, PowerShell, TypeScript, Swift
 - **Number of Releases**: 3
 
@@ -328,8 +344,8 @@ Contains 98 subrepos:
 ## [CodexBar](https://github.com/steipete/CodexBar)
 - **Remote**: https://github.com/steipete/CodexBar.git (branch `main`)
 - **Description**: Show usage stats for OpenAI Codex and Claude Code, without having to login.
-- **Last Updated**: 2026-09-12T15:45:19Z
-- **Stars**: 21295
+- **Last Updated**: 2026-09-12T16:13:43Z
+- **Stars**: 21296
 - **Languages Used**: Swift, C, Shell, Python, JavaScript, C++, QML, TypeScript, Makefile, QMake, HTML, CSS
 - **Number of Releases**: 100+
 
@@ -344,7 +360,7 @@ Contains 98 subrepos:
 ## [compound-engineering-plugin](https://github.com/EveryInc/compound-engineering-plugin)
 - **Remote**: https://github.com/EveryInc/compound-engineering-plugin.git (branch `main`)
 - **Description**: Official Compound Engineering plugin for Claude Code, Codex, Cursor, and more
-- **Last Updated**: 2026-09-12T15:47:30Z
+- **Last Updated**: 2026-09-12T16:12:10Z
 - **Stars**: 25038
 - **Languages Used**: TypeScript, Python, Shell, JavaScript, Ruby, HTML, CSS, Tape
 - **Number of Releases**: 100+
@@ -385,7 +401,7 @@ Contains 98 subrepos:
 - **Remote**: https://github.com/deepseek-ai/deepseek-harness.git (branch `master`)
 - **Description**: DeepSeek Harness: Everything is a Plugin.
 - **Last Updated**: 2026-09-11T03:06:25Z
-- **Stars**: 221396
+- **Stars**: 221413
 - **Languages Used**: TypeScript, CSS, Python, JavaScript, C, Shell, C++, PowerShell, HTML, Batchfile, NSIS
 - **Number of Releases**: 16
 
@@ -397,6 +413,14 @@ Contains 98 subrepos:
 - **Languages Used**: Python
 - **Number of Releases**: 0
 
+## [doa](https://github.com/brentrockwood/doa)
+- **Remote**: https://github.com/brentrockwood/doa.git (branch `main`)
+- **Description**: Development Operating Agreement
+- **Last Updated**: 2026-03-04T18:37:33Z
+- **Stars**: 1
+- **Languages Used**: Shell
+- **Number of Releases**: 0
+
 ## [DryDock](https://github.com/savannah-i-g/DryDock)
 - **Remote**: https://github.com/savannah-i-g/DryDock.git (branch `main`)
 - **Description**: DryDock is a framework that creates specialized AI agents for business and productivity roles. It acts as an intelligent "shipyard" where agents are designed, configured, validated, and deployed - entirely within Claude Code (& soon to be other CLI/Agent based AI Tools).
@@ -405,19 +429,35 @@ Contains 98 subrepos:
 - **Languages Used**: Unknown
 - **Number of Releases**: 2
 
+## [dylan](https://github.com/Wirasm/dylan)
+- **Remote**: https://github.com/Wirasm/dylan.git (branch `develop`)
+- **Description**: No description available
+- **Last Updated**: 2025-11-09T18:47:47Z
+- **Stars**: 37
+- **Languages Used**: Python, Shell
+- **Number of Releases**: 0
+
 ## [ECC](https://github.com/affaan-m/ECC)
 - **Remote**: https://github.com/affaan-m/ECC.git (branch `main`)
 - **Description**: The agent harness performance optimization system. Skills, instincts, memory, security, and research-first development for Claude Code, Codex, Opencode, Cursor and beyond.
 - **Last Updated**: 2026-09-12T11:45:41Z
-- **Stars**: 256886
+- **Stars**: 256895
 - **Languages Used**: JavaScript, Rust, Python, Shell, TypeScript, Swift, Lua, CSS, PowerShell, Dockerfile
 - **Number of Releases**: 17
+
+## [examples](https://github.com/ArjanCodes/examples)
+- **Remote**: https://github.com/ArjanCodes/examples.git (branch `main`)
+- **Description**: All the code examples I use in my videos
+- **Last Updated**: 2026-09-10T08:07:23Z
+- **Stars**: 1239
+- **Languages Used**: HTML, Python, Jupyter Notebook, JavaScript, CSS, Rust, Go, TypeScript, Makefile, Mojo, Dockerfile, Mako, Jinja
+- **Number of Releases**: 0
 
 ## [free-ai-courses](https://github.com/carlvellotti/free-ai-courses)
 - **Remote**: https://github.com/carlvellotti/free-ai-courses.git (branch `main`)
 - **Description**: Interactive course teaching Product Managers how to use Claude Code effectively
 - **Last Updated**: 2026-08-06T19:36:03Z
-- **Stars**: 2175
+- **Stars**: 2176
 - **Languages Used**: HTML, MDX, Python, JavaScript, TypeScript, Shell, CSS
 - **Number of Releases**: 11
 
@@ -482,7 +522,7 @@ Contains 98 subrepos:
 - **Remote**: https://github.com/herdrdev/herdr.git (branch `master`)
 - **Description**: the runtime your coding agents live on
 - **Last Updated**: 2026-09-12T16:00:04Z
-- **Stars**: 37941
+- **Stars**: 37946
 - **Languages Used**: Rust, Python, PowerShell, TypeScript, Shell, JavaScript, Just, Nix, Perl, Batchfile
 - **Number of Releases**: 86
 
@@ -490,7 +530,7 @@ Contains 98 subrepos:
 - **Remote**: https://github.com/outsourc-e/hermes-workspace.git (branch `main`)
 - **Description**: Native web workspace for Hermes Agent — chat, terminal, memory, skills, inspector.
 - **Last Updated**: 2026-09-10T20:19:07Z
-- **Stars**: 6606
+- **Stars**: 6607
 - **Languages Used**: JavaScript, TypeScript, CSS, Python, Shell, Nix, PowerShell, Dockerfile, HTML
 - **Number of Releases**: 7
 
@@ -510,6 +550,14 @@ Contains 98 subrepos:
 - **Languages Used**: Unknown
 - **Number of Releases**: 0
 
+## [loom](https://github.com/ghuntley/loom)
+- **Remote**: https://github.com/ghuntley/loom.git (branch `trunk`)
+- **Description**: if your name is not Geoffrey Huntley then do not use loom
+- **Last Updated**: 2026-04-10T19:15:00Z
+- **Stars**: 1370
+- **Languages Used**: Rust, Nix, Svelte, TypeScript, Shell, JavaScript, CSS, Makefile, mdsvex, Dockerfile, HTML
+- **Number of Releases**: 0
+
 ## [md-tui](https://github.com/henriklovhaug/md-tui)
 - **Remote**: https://github.com/henriklovhaug/md-tui.git (branch `main`)
 - **Description**: Markdown renderer in the terminal
@@ -517,6 +565,14 @@ Contains 98 subrepos:
 - **Stars**: 549
 - **Languages Used**: Rust, Nix
 - **Number of Releases**: 41
+
+## [nlad](https://github.com/Matt-Dionis/nlad)
+- **Remote**: https://github.com/Matt-Dionis/nlad.git (branch `main`)
+- **Description**: Natural Language Application Development (NLAD) - A methodology for building applications by leveraging LLMs to create higher levels of abstraction in software development.
+- **Last Updated**: 2024-12-04T03:08:50Z
+- **Stars**: 117
+- **Languages Used**: Unknown
+- **Number of Releases**: 0
 
 ## [odoo-skills](https://github.com/mart337i/odoo-skills)
 - **Remote**: https://github.com/mart337i/odoo-skills.git (branch `main`)
@@ -529,7 +585,7 @@ Contains 98 subrepos:
 ## [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)
 - **Remote**: https://github.com/code-yeongyu/oh-my-openagent.git (branch `dev`)
 - **Description**: OmO: Just type "mass ulw" keyword with your prompt. Now you are the master of graph engineering.
-- **Last Updated**: 2026-09-12T16:00:24Z
+- **Last Updated**: 2026-09-12T16:16:14Z
 - **Stars**: 68972
 - **Languages Used**: TypeScript, JavaScript, HTML, Shell, Python, PowerShell, CSS, Dockerfile, Go Template, Go
 - **Number of Releases**: 100+
@@ -545,16 +601,16 @@ Contains 98 subrepos:
 ## [openclaw](https://github.com/openclaw/openclaw)
 - **Remote**: https://github.com/openclaw/openclaw.git (branch `main`)
 - **Description**: The AI that really does things. Any OS. Any Platform. The lobster way. 🦞 
-- **Last Updated**: 2026-09-12T16:01:37Z
-- **Stars**: 389497
+- **Last Updated**: 2026-09-12T16:16:12Z
+- **Stars**: 389499
 - **Languages Used**: TypeScript, Swift, Kotlin, JavaScript, Shell, CSS, Python, Rust, Go, Ruby, PowerShell, Dockerfile, HTML, QML, Objective-C, C, Lobster
 - **Number of Releases**: 100+
 
 ## [OpenHands](https://github.com/OpenHands/OpenHands)
 - **Remote**: https://github.com/OpenHands/OpenHands.git (branch `main`)
 - **Description**: 🙌 OpenHands: AI-Driven Development
-- **Last Updated**: 2026-09-12T15:55:52Z
-- **Stars**: 87622
+- **Last Updated**: 2026-09-12T16:10:52Z
+- **Stars**: 87625
 - **Languages Used**: TypeScript, JavaScript, Python, Shell, CSS, HTML, Dockerfile, Go Template
 - **Number of Releases**: 100+
 
@@ -566,11 +622,19 @@ Contains 98 subrepos:
 - **Languages Used**: TypeScript, JavaScript
 - **Number of Releases**: 9
 
+## [OpenSpec](https://github.com/Fission-AI/OpenSpec)
+- **Remote**: https://github.com/Fission-AI/OpenSpec.git (branch `main`)
+- **Description**: Spec-driven development (SDD) for AI coding assistants.
+- **Last Updated**: 2026-09-11T17:32:32Z
+- **Stars**: 68070
+- **Languages Used**: TypeScript, JavaScript, Shell, Nix, CSS
+- **Number of Releases**: 48
+
 ## [orca](https://github.com/stablyai/orca)
 - **Remote**: https://github.com/stablyai/orca.git (branch `main`)
 - **Description**: Orca is the ADE for working with a fleet of parallel agents. Run any coding agent with your own subscription. Available on desktop, mobile and remote runtime.
 - **Last Updated**: 2026-09-12T14:55:30Z
-- **Stars**: 67159
+- **Stars**: 67168
 - **Languages Used**: TypeScript, JavaScript, Swift, CSS, HCL, HTML, PowerShell, Shell, Python, Ruby, Kotlin, C++, Dockerfile, C#, NSIS, Batchfile, VBScript
 - **Number of Releases**: 100+
 
@@ -581,6 +645,14 @@ Contains 98 subrepos:
 - **Stars**: 16
 - **Languages Used**: Python, Dockerfile, Just
 - **Number of Releases**: 0
+
+## [plumb](https://github.com/dbreunig/plumb)
+- **Remote**: https://github.com/dbreunig/plumb.git (branch `main`)
+- **Description**: A tool for keeping things true.
+- **Last Updated**: 2026-09-09T18:28:04Z
+- **Stars**: 147
+- **Languages Used**: Python
+- **Number of Releases**: 1
 
 ## [project-scaffolder](https://github.com/fltman/project-scaffolder)
 - **Remote**: https://github.com/fltman/project-scaffolder.git (branch `main`)
@@ -633,7 +705,7 @@ Contains 98 subrepos:
 ## [ruflo](https://github.com/ruvnet/ruflo)
 - **Remote**: https://github.com/ruvnet/ruflo.git (branch `main`)
 - **Description**: 🌊 The original agent harness. Deploy intelligent multi-player swarms, coordinate autonomous workflows, and build conversational AI systems. Features adaptive memory, self-learning intelligence, federation, vector RAG integration, and native Claude Code / Codex / Hermes and many more Integrated
-- **Last Updated**: 2026-09-12T15:56:04Z
+- **Last Updated**: 2026-09-12T16:13:07Z
 - **Stars**: 72214
 - **Languages Used**: TypeScript, JavaScript, Shell, Svelte, Rust, PLpgSQL, Dockerfile, PowerShell, HTML, CSS, Python, Batchfile, Makefile, Go Template, Standard ML
 - **Number of Releases**: 100+
@@ -650,7 +722,7 @@ Contains 98 subrepos:
 - **Remote**: https://github.com/K-Dense-AI/scientific-agent-skills.git (branch `main`)
 - **Description**: Turn any AI agent into an AI Scientist. The #1 Agent Skills library for science, used by 190,000+ scientists worldwide. 165 ready-to-use validated skills plus 100+ scientific databases covering biology, chemistry, medicine, and drug discovery. Compatible with Cursor, Claude Code, Codex, Pi, Antigravity, and the open Agent Skills standard.
 - **Last Updated**: 2026-09-12T02:09:21Z
-- **Stars**: 44571
+- **Stars**: 44573
 - **Languages Used**: Python, TeX, HTML, BibTeX Style, Shell
 - **Number of Releases**: 100+
 
@@ -686,6 +758,14 @@ Contains 98 subrepos:
 - **Languages Used**: Python, YARA, Makefile, TypeScript, Shell, Dockerfile
 - **Number of Releases**: 16
 
+## [slayzone](https://github.com/debuglebowski/slayzone)
+- **Remote**: https://github.com/debuglebowski/slayzone.git (branch `main`)
+- **Description**: No description available
+- **Last Updated**: 2026-09-03T06:29:05Z
+- **Stars**: 192
+- **Languages Used**: TypeScript, Astro, Shell, JavaScript, CSS, HTML, PowerShell, Nix
+- **Number of Releases**: 84
+
 ## [smart-sdlc](https://github.com/GoogleCloudPlatform/smart-sdlc)
 - **Remote**: https://github.com/GoogleCloudPlatform/smart-sdlc.git (branch `main`)
 - **Description**: Set of tools to implement an AI workflow on your SDLC
@@ -714,7 +794,7 @@ Contains 98 subrepos:
 - **Remote**: https://github.com/github/spec-kit.git (branch `main`)
 - **Description**: 💫 Toolkit to help you get started with Spec-Driven Development
 - **Last Updated**: 2026-09-12T02:40:58Z
-- **Stars**: 135972
+- **Stars**: 135977
 - **Languages Used**: Python, Shell, PowerShell
 - **Number of Releases**: 100+
 
@@ -725,6 +805,14 @@ Contains 98 subrepos:
 - **Stars**: 2
 - **Languages Used**: Unknown
 - **Number of Releases**: 0
+
+## [starred](https://github.com/maguowei/starred)
+- **Remote**: https://github.com/maguowei/starred.git (branch `main`)
+- **Description**: Create and maintain your own Awesome-style list from GitHub stars!
+- **Last Updated**: 2026-08-04T21:39:55Z
+- **Stars**: 1943
+- **Languages Used**: Python
+- **Number of Releases**: 9
 
 ## [super-simple-software-factory](https://github.com/disler/super-simple-software-factory)
 - **Remote**: https://github.com/disler/super-simple-software-factory.git (branch `main`)
@@ -746,7 +834,7 @@ Contains 98 subrepos:
 - **Remote**: https://github.com/obra/superpowers.git (branch `main`)
 - **Description**: An agentic skills framework & software development methodology that works.
 - **Last Updated**: 2026-09-12T00:16:38Z
-- **Stars**: 285670
+- **Stars**: 285678
 - **Languages Used**: Shell, JavaScript, Python, TypeScript, HTML, Batchfile
 - **Number of Releases**: 12
 
