@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/carlvellotti/carls-product-os.git
+	branch = main
+	commit = b20f957cf6e18c38485515c43e489b2c7d6e0e45
+	parent = 071496b6b8dacf48e087100b5186f9b6f59d89fb
+	method = merge
+	cmdver = 0.4.9
