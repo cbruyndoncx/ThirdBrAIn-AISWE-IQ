@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/dwillitzer/claude-statusline.git
+	branch = main
+	commit = 598d6f92eb7d407c75f8738997313a49810d520d
+	parent = 846a0e80e2c8339cc1469c40edd4f55bcc28852e
+	method = merge
+	cmdver = 0.4.9
