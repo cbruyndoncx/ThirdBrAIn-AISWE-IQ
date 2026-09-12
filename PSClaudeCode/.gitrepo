@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/dfinke/PSClaudeCode.git
+	branch = main
+	commit = df56460855ba5c3836a2139950b5eff3a787c7ee
+	parent = 070a685be25ab3386b9186e658287714a7d03f7c
+	method = merge
+	cmdver = 0.4.9
