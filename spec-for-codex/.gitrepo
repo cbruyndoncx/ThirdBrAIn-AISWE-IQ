@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/atman-33/spec-for-codex.git
+	branch = main
+	commit = 9188f8be3745cb325018bae228f67672be7f3db1
+	parent = dd3b4b66e5cd1d3170f214b840ff5fd3644bbe69
+	method = merge
+	cmdver = 0.4.9

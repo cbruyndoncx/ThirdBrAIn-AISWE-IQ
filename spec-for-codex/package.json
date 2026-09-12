@@ -1,0 +1,389 @@
+{
+  "name": "spec-for-codex",
+  "displayName": "Spec for Codex",
+  "description": "Spec-driven development with Codex CLI - compatible with Kiro. Not affiliated with Amazon or AWS.",
+  "version": "1.0.0",
+  "author": "atman-33",
+  "publisher": "atman-dev",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/atman-33/spec-for-codex"
+  },
+  "engines": {
+    "vscode": "^1.84.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "dist/extension.js",
+  "extensionKind": [
+    "workspace",
+    "ui"
+  ],
+  "scripts": {
+    "install:all": "npm install && cd webview-ui && npm install",
+    "build:ext": "esbuild src/extension.ts --bundle --platform=node --target=node16 --external:vscode --outfile=dist/extension.js",
+    "build": "npm run build-prompts && npm run build:ext && node scripts/copy-resources.js && npm run build:webview",
+    "vscode:prepublish": "npm run build",
+    "compile": "npm run build && npm run package",
+    "watch": "concurrently \"tsc -watch -p ./\" \"node scripts/watch-prompts.js\"",
+    "package": "vsce package",
+    "build-prompts": "node scripts/build-prompts.js",
+    "compile-web": "webpack --mode development",
+    "watch-web": "webpack --mode development --watch",
+    "package-web": "npm run build-prompts && webpack --mode production --devtool hidden-source-map",
+    "lint": "biome lint src/",
+    "lint:fix": "biome lint --write src/",
+    "format": "biome format --write src/",
+    "check": "biome check --write src/",
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "test:coverage": "vitest --coverage",
+    "prepare": "husky",
+    "--- WEBVIEW ---": "--- --- --- --- ---",
+    "build:webview": "npm --prefix webview-ui run build"
+  },
+  "contributes": {
+    "configuration": {
+      "title": "Spec for Codex",
+      "properties": {
+        "specCodex.views.specs.visible": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Specs view in the Spec for Codex activity container"
+        },
+        "specCodex.views.steering.visible": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Steering view in the Spec for Codex activity container"
+        },
+        "specCodex.views.prompts.visible": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Prompts view in the Spec for Codex activity container"
+        },
+        "specCodex.views.settings.visible": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Settings view in the Spec for Codex activity container"
+        },
+        "specCodex.codex.path": {
+          "type": "string",
+          "default": "codex",
+          "description": "Codex CLI executable name or path"
+        },
+        "specCodex.codex.defaultApprovalMode": {
+          "type": "string",
+          "enum": [
+            "full-auto",
+            "yolo"
+          ],
+          "default": "full-auto",
+          "description": "Default approval mode when invoking Codex CLI"
+        },
+        "specCodex.codex.defaultModel": {
+          "type": "string",
+          "default": "gpt-5-codex",
+          "description": "Default model identifier for Codex CLI"
+        },
+        "specCodex.codex.timeout": {
+          "type": "number",
+          "default": 30000,
+          "description": "Command timeout in milliseconds for Codex CLI"
+        },
+        "specCodex.codex.terminalDelay": {
+          "type": "number",
+          "default": 1000,
+          "description": "Delay in milliseconds before writing to terminal to improve UX"
+        },
+        "specCodex.codex.windowsShellPath": {
+          "type": "string",
+          "default": "",
+          "description": "Windows only: shell executable to launch when running Codex commands. Leave empty to inherit the VS Code default terminal."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "specCodex",
+          "title": "Spec for Codex",
+          "icon": "./icons/specCodex.svg"
+        }
+      ]
+    },
+    "views": {
+      "specCodex": [
+        {
+          "id": "specCodex.views.specExplorer",
+          "name": "Specs",
+          "icon": "symbol-structure",
+          "when": "!(workbenchState == empty || workspaceFolderCount == 0) && config.specCodex.views.specs.visible"
+        },
+        {
+          "id": "specCodex.views.steeringExplorer",
+          "name": "Steering",
+          "icon": "symbol-parameter",
+          "when": "!(workbenchState == empty || workspaceFolderCount == 0) && config.specCodex.views.steering.visible"
+        },
+        {
+          "id": "specCodex.views.promptsExplorer",
+          "name": "Prompts",
+          "icon": "terminal",
+          "when": "!(workbenchState == empty || workspaceFolderCount == 0) && config.specCodex.views.prompts.visible"
+        },
+        {
+          "id": "specCodex.views.overview",
+          "name": "Settings",
+          "icon": "gear",
+          "visibility": "collapsed",
+          "when": "!(workbenchState == empty || workspaceFolderCount == 0) && config.specCodex.views.settings.visible"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "specCodex.views.specExplorer",
+        "contents": "Plan features with Specs\n\n[$(plus) Create New Spec](command:specCodex.spec.create)"
+      },
+      {
+        "view": "specCodex.views.promptsExplorer",
+        "contents": "Create and run prompts (.md) under .codex/prompts\n\n[$(plus) Create Prompt](command:specCodex.prompts.create)\n[$(refresh) Refresh](command:specCodex.prompts.refresh)"
+      },
+      {
+        "view": "specCodex.views.overview",
+        "contents": "Configure Spec for Codex\n\n[$(gear) Open Settings](command:specCodex.settings.open)\n[$(question) Help](command:specCodex.help.open)"
+      },
+      {
+        "view": "specCodex.views.specExplorer",
+        "contents": "Build complex features with structured planning\n\n[$(plus) Create New Spec](command:specCodex.spec.create)"
+      },
+      {
+        "view": "specCodex.views.steeringExplorer",
+        "contents": "[$(globe) Create User Rule](command:specCodex.steering.createUserRule)\n\n[$(root-folder) Create Project Rule](command:specCodex.steering.createProjectRule)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "specCodex.prompts.create",
+        "title": "Create Prompt",
+        "category": "Spec for Codex",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "specCodex.prompts.refresh",
+        "title": "Refresh Prompts",
+        "category": "Spec for Codex",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "specCodex.prompts.run",
+        "title": "Run Prompt",
+        "category": "Spec for Codex",
+        "icon": "$(play)"
+      },
+      {
+        "command": "specCodex.spec.create",
+        "title": "Create New Spec",
+        "category": "Spec for Codex",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "specCodex.steering.create",
+        "title": "Create Custom Steering",
+        "category": "Spec for Codex",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "specCodex.steering.generateInitial",
+        "title": "Init Steering",
+        "category": "Spec for Codex",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "specCodex.steering.refine",
+        "title": "Refine Steering",
+        "category": "Spec for Codex",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "specCodex.spec.delete",
+        "title": "Delete Spec",
+        "category": "Spec for Codex",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "specCodex.steering.delete",
+        "title": "Delete Steering",
+        "category": "Spec for Codex",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "specCodex.steering.createUserRule",
+        "title": "Create User Rule",
+        "category": "Spec for Codex",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "specCodex.steering.createProjectRule",
+        "title": "Create Project Rule",
+        "category": "Spec for Codex",
+        "icon": "$(root-folder)"
+      },
+      {
+        "command": "specCodex.settings.open",
+        "title": "Spec for Codex Settings",
+        "category": "Spec for Codex",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "specCodex.checkForUpdates",
+        "title": "Check for Updates",
+        "category": "Spec for Codex",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "specCodex.spec.refresh",
+        "title": "Refresh Specs",
+        "category": "Spec for Codex",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "specCodex.steering.refresh",
+        "title": "Refresh Steering",
+        "category": "Spec for Codex",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "specCodex.help.open",
+        "title": "Spec for Codex Help",
+        "category": "Spec for Codex",
+        "icon": "$(question)"
+      },
+      {
+        "command": "specCodex.menu.open",
+        "title": "Spec for Codex Menu",
+        "category": "Spec for Codex",
+        "icon": "$(ellipsis)"
+      },
+      {
+        "command": "specCodex.spec.implTask",
+        "title": "Implement Task",
+        "category": "Spec for Codex"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "specCodex.menu.open",
+          "when": "view == specCodex.views.overview",
+          "group": "navigation"
+        },
+        {
+          "command": "specCodex.spec.create",
+          "when": "view == specCodex.views.specExplorer",
+          "group": "navigation@1"
+        },
+        {
+          "command": "specCodex.spec.refresh",
+          "when": "view == specCodex.views.specExplorer",
+          "group": "navigation@3"
+        },
+        {
+          "command": "specCodex.steering.generateInitial",
+          "when": "view == specCodex.views.steeringExplorer",
+          "group": "navigation@2"
+        },
+        {
+          "command": "specCodex.steering.create",
+          "when": "view == specCodex.views.steeringExplorer",
+          "group": "navigation@1"
+        },
+        {
+          "command": "specCodex.steering.refresh",
+          "when": "view == specCodex.views.steeringExplorer",
+          "group": "navigation@3"
+        },
+        {
+          "command": "specCodex.prompts.create",
+          "when": "view == specCodex.views.promptsExplorer",
+          "group": "navigation@1"
+        },
+        {
+          "command": "specCodex.prompts.refresh",
+          "when": "view == specCodex.views.promptsExplorer",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "specCodex.spec.delete",
+          "when": "view == specCodex.views.specExplorer && viewItem == spec",
+          "group": "7_modification"
+        },
+        {
+          "command": "specCodex.prompts.run",
+          "when": "view == specCodex.views.promptsExplorer && viewItem == prompt",
+          "group": "inline"
+        },
+        {
+          "command": "specCodex.steering.refine",
+          "when": "view == specCodex.views.steeringExplorer && viewItem == steering-document",
+          "group": "inline"
+        },
+        {
+          "command": "specCodex.steering.delete",
+          "when": "view == specCodex.views.steeringExplorer && viewItem == steering-document",
+          "group": "7_modification"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "specCodex.spec.create"
+        },
+        {
+          "command": "specCodex.prompts.create",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "specCodex.steering.create",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "specCodex.checkForUpdates"
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "gray-matter": "^4.0.3",
+    "handlebars": "^4.7.8",
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.2.4",
+    "@jest/globals": "^29.7.0",
+    "@types/glob": "^8.1.0",
+    "@types/handlebars": "^4.0.40",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.x",
+    "@types/vscode": "^1.84.0",
+    "@vitest/ui": "^3.2.4",
+    "concurrently": "^9.2.0",
+    "copy-webpack-plugin": "^13.0.0",
+    "esbuild": "^0.23.0",
+    "husky": "^9.1.7",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.4.0",
+    "ts-loader": "^9.5.2",
+    "typescript": "^5.3.0",
+    "vitest": "^3.2.4",
+    "vsce": "^2.15.0"
+  }
+}
