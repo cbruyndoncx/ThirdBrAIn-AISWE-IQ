@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/steipete/CodexBar.git
+	branch = main
+	commit = c9490ff8c300203a897acc4e20fbfd32a9b3b9dd
+	parent = 125c789c74eda838e92bc5a19161a4087a6a4dea
+	method = merge
+	cmdver = 0.4.9
