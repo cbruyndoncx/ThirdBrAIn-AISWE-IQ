@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/hamchowderr/braynee.git
+	branch = main
+	commit = 53a29d1d6958120264041f4bc842b6ae74134a3d
+	parent = 2d9c816c8332b0d8605379a0cd8d35f0a2ee222d
+	method = merge
+	cmdver = 0.4.9

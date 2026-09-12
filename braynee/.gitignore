@@ -1,0 +1,50 @@
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
+
+# Beads / Dolt files (added by bd init)
+.beads-credential-key
+
+# Beads proxied shared-server DB (per-machine runtime, not versioned) — cp-uif3.3
+.beads/proxieddb/
+
+# Beads Dolt backup state (per-machine runtime bookkeeping written by bd, not
+# versioned). Left untracked these also block `claude plugin tag`, which refuses
+# to tag a release with uncommitted changes present.
+.beads/dolt-backup.json
+.beads/dolt-backup-state.json
+
+# Stale bd gate lock written at the repo root by bd itself (per-machine
+# runtime, empty file). Same reason as the two above: left untracked it blocks
+# `claude plugin tag`, which refuses to tag with uncommitted changes present.
+.beads.gate.lock
+
+# Beads issues.jsonl is a disposable export (never the DB), kept fresh on disk
+# via export.auto=true for braynee's server-free read-hooks. Untracked here (root,
+# not .beads/.gitignore which bd doctor --fix rewrites) so git never conflicts on
+# it or blocks checkout. Source of truth is the Dolt DB. See cp-uif3.1.
+.beads/issues.jsonl
+
+# Claude Code's per-machine permission state. Machine-local and often names the
+# operator's own projects/secrets stores, so it must never be committed. It was
+# already ignored on the author's machine — but only via a GLOBAL excludesFile
+# pointing at a Windows path, so the protection did not travel: on Linux (and CI,
+# and any other machine) git saw it as an ordinary untracked file that `git add
+# -A` would happily commit. Caught by the section-13 owner-data scan running on
+# WSL, which is exactly the cross-platform check that catches this class.
+.claude/settings.local.json
+
+# Node modules. braynee itself ships no npm deps, but Mastra Code's local plugin
+# install links the `mastracode` package into <pluginRoot>/node_modules so the
+# adapter entry can resolve `mastracode/plugin` (see mastracode/README.md). That
+# link is per-machine runtime state and must never be committed — cp-3o3g.2.
+node_modules/
+
+# Python bytecode (skill scripts)
+__pycache__/
+*.pyc
+
+# Throwaway dashboard build/verify scratch (screenshots, preview HTML, helper scripts)
+mockups/
+skills/session-backfill/scripts/project_map.json

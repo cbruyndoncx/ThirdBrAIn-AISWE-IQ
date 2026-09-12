@@ -1,0 +1,54 @@
+name: Plugin Self-Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  braynee:
+    name: braynee / ${{ matrix.os }} / Node ${{ matrix.node }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['20', '22']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Run braynee self-test
+        shell: bash
+        run: node bin/braynee-self-test
+
+  marketplace:
+    name: marketplace.json valid
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate marketplace.json
+        shell: bash
+        run: |
+          node -e "
+          const m = require('./.claude-plugin/marketplace.json');
+          if (!m.name || !Array.isArray(m.plugins)) throw 'invalid marketplace';
+          console.log('OK:', m.name, '|', m.plugins.length, 'plugins');
+          for (const p of m.plugins) {
+            if (!p.name || !p.source) throw 'invalid plugin entry: ' + JSON.stringify(p);
+          }
+          "
+
+  version-bump:
+    name: version bumped if shipping code changed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history + tags so the gate can diff vs the last release tag
+      - name: Require a version bump for shipping changes
+        shell: bash
+        run: node scripts/check-version-bump.mjs

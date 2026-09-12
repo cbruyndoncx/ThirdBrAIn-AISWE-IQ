@@ -1,0 +1,2411 @@
+#!/usr/bin/env node
+// braynee-self-test — Validate the braynee plugin install end-to-end.
+//
+// Runs:
+//   1. JS/MJS parse check on all hooks, monitors, scripts
+//   2. JSON schema validation on hooks.json, monitors.json, plugin.json
+//   3. Frontmatter check on every SKILL.md and agents/*.md
+//   4. Mock-stdin execution of every hook (verify no crashes)
+//   5. Boot-only test of every monitor (3s timeout — checks startup, not loop)
+//   6. Bundled scripts dispatch (qmd-wrapper, vault-query, tasknotes, beads-dashboard)
+//
+// Cross-platform: works on Windows, macOS, Linux. Pure Node, no shell deps.
+// Usage:
+//   node bin/braynee-self-test                 # from plugin root
+//   braynee-self-test                          # if added to PATH
+//   braynee-self-test --json                   # machine-readable output
+//
+// Exit codes:
+//   0 — all checks passed
+//   1 — at least one check failed (CI should fail the build)
+
+'use strict';
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawnSync } = require('child_process');
+
+// Find braynee plugin root: this file lives at braynee/bin/braynee-self-test
+const PLUGIN_ROOT = path.resolve(__dirname, '..');
+
+// cp-szoa: spawnSync reports a TIMEOUT as status === null (killed with SIGTERM),
+// which is indistinguishable at the call site from a hard crash. That is how a
+// busy machine produced "CRASH: <hook> (exit null)" roughly 1 run in 6, with a
+// different victim each time — a false failure that makes the gate untrustworthy
+// exactly when it is being relied on before a release.
+//
+// Do NOT paper over it by raising the limits: that hides a genuinely slow hook.
+// Instead name it for what it is, and retry once. A real hang times out twice; a
+// load blip does not. If the retry passes, the result is reported as a pass with
+// a SLOW note, so a hook drifting toward its limit stays visible.
+function timedOut(r) {
+  return !!r && r.status === null && (r.signal === 'SIGTERM' || (r.error && r.error.code === 'ETIMEDOUT'));
+}
+
+// Returns { r, retried, stillTimedOut }.
+function spawnRetry(file, argv, opts) {
+  let r = spawnSync(file, argv, opts);
+  if (!timedOut(r)) return { r, retried: false, stillTimedOut: false };
+  const r2 = spawnSync(file, argv, opts);
+  return { r: r2, retried: true, stillTimedOut: timedOut(r2) };
+}
+
+const args = process.argv.slice(2);
+const jsonMode = args.includes('--json');
+
+const results = {
+  parse: { ok: 0, fail: 0, errors: [] },
+  configs: { ok: 0, fail: 0, errors: [] },
+  frontmatter: { ok: 0, fail: 0, errors: [] },
+  hooks: { ok: 0, fail: 0, errors: [] },
+  gating: { ok: 0, fail: 0, errors: [] },
+  monitors: { ok: 0, fail: 0, errors: [] },
+  scripts: { ok: 0, fail: 0, errors: [] },
+  unit: { ok: 0, fail: 0, errors: [] },
+};
+
+function log(line) {
+  if (!jsonMode) process.stdout.write(line + '\n');
+}
+
+function listFiles(dir, exts) {
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter(d => d.isFile() && exts.some(e => d.name.endsWith(e)))
+    .map(d => path.join(dir, d.name));
+}
+
+function listDirs(dir) {
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter(d => d.isDirectory())
+    .map(d => path.join(dir, d.name));
+}
+
+/**
+ * Remove a throwaway sandbox. Never throws.
+ *
+ * A plain `fs.rmSync(dir, {recursive, force})` in a `finally` block threw EPERM
+ * on Windows when a spawned process still held the directory, and because it ran
+ * AFTER every assertion had already passed, it crashed the whole suite and
+ * suppressed the summary — turning a leaked file handle into "the gate failed",
+ * with no result to read. Cleanup is housekeeping; it must never be able to
+ * decide the outcome of the run.
+ *
+ * force:true does not cover EPERM (that is for ENOENT), hence the retries and
+ * the catch.
+ */
+function rmSandbox(dir) {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch (e) {
+    log(`  note: could not remove sandbox ${dir} (${e.code || e.message}) — leaving it behind`);
+  }
+}
+
+// ── 1. Parse all JS/MJS files ────────────────────────────────────────────────
+log('=== 1. Parse JS/MJS files ===');
+const jsFiles = [
+  ...listFiles(path.join(PLUGIN_ROOT, 'hooks'), ['.js']),
+  ...listFiles(path.join(PLUGIN_ROOT, 'hooks', 'lib'), ['.js']),
+  ...listFiles(path.join(PLUGIN_ROOT, 'scripts'), ['.mjs', '.js']),
+  ...listFiles(path.join(PLUGIN_ROOT, 'scripts', 'lib'), ['.mjs', '.js']),
+  ...listFiles(path.join(PLUGIN_ROOT, 'monitors'), ['.mjs', '.js']),
+];
+for (const fp of jsFiles) {
+  const r = spawnSync(process.execPath, ['--check', fp], { encoding: 'utf8' });
+  if (r.status === 0) {
+    results.parse.ok++;
+  } else {
+    results.parse.fail++;
+    results.parse.errors.push({ file: path.relative(PLUGIN_ROOT, fp), error: r.stderr.trim() });
+  }
+}
+log(`  ${results.parse.ok} parsed OK | ${results.parse.fail} failed`);
+results.parse.errors.forEach(e => log(`    FAIL: ${e.file}\n      ${e.error.split('\n')[0]}`));
+
+// ── 2. JSON config validation ────────────────────────────────────────────────
+log('\n=== 2. JSON configs ===');
+const configs = [
+  { path: path.join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'),
+    label: 'plugin.json',
+    validate: (j) => {
+      if (!j.name) throw new Error('missing name');
+      if (!j.description) throw new Error('missing description');
+      return `v${j.version} | ${j.name}`;
+    } },
+  { path: path.join(PLUGIN_ROOT, 'hooks', 'hooks.json'),
+    label: 'hooks.json',
+    validate: (j) => {
+      if (!j.hooks || typeof j.hooks !== 'object') throw new Error('missing top-level "hooks" wrapper');
+      const events = Object.keys(j.hooks);
+      const total = events.reduce((s, e) => s + j.hooks[e].reduce((s2, g) => s2 + (g.hooks || []).length, 0), 0);
+      return `${events.length} events, ${total} hooks`;
+    } },
+  { path: path.join(PLUGIN_ROOT, 'monitors', 'monitors.json'),
+    label: 'monitors.json',
+    validate: (j) => {
+      if (!Array.isArray(j)) throw new Error('expected array');
+      for (const m of j) {
+        if (!m.name || !m.command) throw new Error(`monitor missing name or command: ${JSON.stringify(m)}`);
+      }
+      return `${j.length} monitors`;
+    } },
+];
+for (const cfg of configs) {
+  if (!fs.existsSync(cfg.path)) continue;
+  try {
+    const j = JSON.parse(fs.readFileSync(cfg.path, 'utf8'));
+    const summary = cfg.validate(j);
+    log(`  OK: ${cfg.label} — ${summary}`);
+    results.configs.ok++;
+  } catch (e) {
+    log(`  FAIL: ${cfg.label} — ${e.message}`);
+    results.configs.fail++;
+    results.configs.errors.push({ file: cfg.label, error: e.message });
+  }
+}
+
+// ── 3. Frontmatter check on skills + agents ──────────────────────────────────
+log('\n=== 3. Frontmatter on skills + agents ===');
+function checkFrontmatter(filePath) {
+  const src = fs.readFileSync(filePath, 'utf8');
+  const lines = src.split('\n');
+  if (lines[0].trim() !== '---') return { ok: false, error: 'no opening ---' };
+  let endIdx = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === '---') { endIdx = i; break; }
+  }
+  if (endIdx === -1) return { ok: false, error: 'no closing ---' };
+  const fm = lines.slice(1, endIdx).join('\n');
+  if (!/^description:/m.test(fm)) return { ok: false, error: 'missing description' };
+  return { ok: true };
+}
+for (const skillDir of listDirs(path.join(PLUGIN_ROOT, 'skills'))) {
+  const skillMd = path.join(skillDir, 'SKILL.md');
+  const name = `skills/${path.basename(skillDir)}`;
+  if (!fs.existsSync(skillMd)) {
+    results.frontmatter.fail++;
+    results.frontmatter.errors.push({ file: name, error: 'no SKILL.md' });
+    log(`  FAIL: ${name} — no SKILL.md`);
+    continue;
+  }
+  const r = checkFrontmatter(skillMd);
+  if (r.ok) {
+    results.frontmatter.ok++;
+  } else {
+    results.frontmatter.fail++;
+    results.frontmatter.errors.push({ file: name, error: r.error });
+    log(`  FAIL: ${name} — ${r.error}`);
+  }
+}
+for (const agentMd of listFiles(path.join(PLUGIN_ROOT, 'agents'), ['.md'])) {
+  const name = `agents/${path.basename(agentMd)}`;
+  const r = checkFrontmatter(agentMd);
+  if (r.ok) {
+    results.frontmatter.ok++;
+  } else {
+    results.frontmatter.fail++;
+    results.frontmatter.errors.push({ file: name, error: r.error });
+    log(`  FAIL: ${name} — ${r.error}`);
+  }
+}
+log(`  ${results.frontmatter.ok} OK | ${results.frontmatter.fail} failed`);
+
+// ── 4. Run each hook with mock stdin (verify no crashes) ─────────────────────
+log('\n=== 4. Run each hook with mock stdin ===');
+// cp-ww6: run against an ISOLATED temp cwd, not PLUGIN_ROOT. With PLUGIN_ROOT,
+// session-export-qmd.js resolved this repo's real ~/.claude/projects session
+// and did production work on every run — wrote a transcript into the vault and
+// ran a synchronous `qmd update -c vault` that occasionally blew the 15s timeout
+// (flaky fail) and polluted the vault during a smoke test. A throwaway cwd has
+// no projects JSONL (export skips) while a `.beads` marker still lets the
+// beads-aware hooks exercise their context-detection path.
+const smokeCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'braynee-smoke-'));
+fs.mkdirSync(path.join(smokeCwd, '.beads'), { recursive: true });
+// cp-9qq: isolate the VAULT too. Many hooks (session-auto-track, vault-changelog,
+// memory-index-sync, session-export-qmd, …) resolve getVaultRoot(); without an
+// override that is the REAL vault, so this mock run auto-created a
+// `1. Projects/Braynee Smoke <id>.md` stub in it on EVERY self-test run and never
+// cleaned it up. Point BRAYNEE_VAULT at a throwaway vault so all vault writes land
+// in a temp dir that is removed below.
+const smokeVault = fs.mkdtempSync(path.join(os.tmpdir(), 'braynee-smoke-vault-'));
+fs.mkdirSync(path.join(smokeVault, '.obsidian'), { recursive: true });
+fs.mkdirSync(path.join(smokeVault, '1. Projects'), { recursive: true });
+fs.mkdirSync(path.join(smokeVault, '2. Areas', 'Sessions'), { recursive: true });
+// cp-szoa: WARM the fixture before timing anything. `.beads` above is a fresh,
+// empty marker dir, so the first beads-aware hook to run `bd` against it pays a
+// one-off database-initialization cost — measured at ~30s here, versus ~0.6s once
+// warm. Production never pays it (a real repo's .beads is long since initialized),
+// so charging it to whichever hook happened to run first made a random hook blow
+// its 15s budget roughly 1 run in 6, with a different victim each time.
+//
+// Pay it once, up front, outside any per-hook timing. This weakens no assertion:
+// every hook still runs against a real .beads and still exercises its
+// context-detection path — it just no longer gets billed for the fixture's setup.
+// execSync (not spawnSync + shell:true) to match how every hook invokes bd, and
+// because shell:true on Windows flashes a console window on each call.
+try {
+  require('child_process').execSync('bd list --json --status in_progress', {
+    cwd: smokeCwd, encoding: 'utf8', timeout: 60_000, windowsHide: true,
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+} catch { /* bd absent or slow — hooks below must tolerate that anyway */ }
+
+const mockInput = JSON.stringify({
+  session_id: 'self-test',
+  cwd: smokeCwd,
+  source: 'self-test',
+  tool_name: 'Write',
+  tool_input: { file_path: path.join(smokeCwd, 'self-test'), command: 'echo test' },
+});
+for (const hookFile of listFiles(path.join(PLUGIN_ROOT, 'hooks'), ['.js'])) {
+  const name = path.basename(hookFile);
+  // *.test.js are unit tests (run in section 7), not hooks — don't invoke them
+  // here with mock stdin (they'd run their suite and muddy this section).
+  if (name.endsWith('.test.js') || name.endsWith('.test.mjs')) continue;
+  const HOOK_TIMEOUT_MS = 15_000;
+  const { r, retried, stillTimedOut } = spawnRetry(process.execPath, [hookFile], {
+    input: mockInput,
+    encoding: 'utf8',
+    timeout: HOOK_TIMEOUT_MS,
+    env: { ...process.env, BRAYNEE_VAULT: smokeVault },
+  });
+  // Hooks are allowed to exit 0 (success) or 2 (blocking). Anything else is a crash.
+  if (stillTimedOut) {
+    // Timed out twice — treat as a real failure, and say TIMEOUT, not CRASH,
+    // so the cause is not misread as the hook throwing (cp-szoa).
+    results.hooks.fail++;
+    results.hooks.errors.push({ file: name, error: `timed out twice at ${HOOK_TIMEOUT_MS}ms` });
+    log(`  TIMEOUT: ${name} — exceeded ${HOOK_TIMEOUT_MS}ms twice`);
+  } else if (r.status === 0 || r.status === 2) {
+    results.hooks.ok++;
+    if (retried) log(`  SLOW: ${name} — timed out once at ${HOOK_TIMEOUT_MS}ms, passed on retry`);
+  } else {
+    results.hooks.fail++;
+    const err = (r.stderr || r.stdout || '').split('\n').slice(0, 3).join(' | ');
+    results.hooks.errors.push({ file: name, status: r.status, error: err });
+    log(`  CRASH: ${name} (exit ${r.status}) — ${err}`);
+  }
+}
+try { fs.rmSync(smokeCwd, { recursive: true, force: true }); } catch {}
+try { fs.rmSync(smokeVault, { recursive: true, force: true }); } catch {}
+log(`  ${results.hooks.ok} ran cleanly | ${results.hooks.fail} crashed`);
+
+// ── 5. Boot-test each monitor (verify it can start) ──────────────────────────
+log('\n=== 5. Boot-test monitors ===');
+for (const monFile of listFiles(path.join(PLUGIN_ROOT, 'monitors'), ['.mjs', '.js'])) {
+  const name = path.basename(monFile);
+  const r = spawnSync(process.execPath, [monFile], { encoding: 'utf8', timeout: 3_000 });
+  // Monitors run forever. Timeout signal is expected; what matters is that they didn't fail to start.
+  // signal === 'SIGTERM' means we killed them after 3s — that's fine (they were still running).
+  // status 0 means they exited cleanly (likely because the watched thing wasn't found — also fine).
+  if (r.signal === 'SIGTERM' || r.status === 0) {
+    results.monitors.ok++;
+  } else {
+    results.monitors.fail++;
+    results.monitors.errors.push({ file: name, status: r.status, signal: r.signal, error: (r.stderr || '').slice(0, 200) });
+    log(`  FAIL: ${name} (exit ${r.status} signal ${r.signal})`);
+  }
+}
+log(`  ${results.monitors.ok} started OK | ${results.monitors.fail} failed`);
+
+// ── 6. Bundled scripts dispatch ──────────────────────────────────────────────
+log('\n=== 6. Bundled scripts ===');
+const scripts = [
+  { file: 'qmd-wrapper.mjs', args: ['--help'], expectExit: [0, 1, 127] },
+  { file: 'vault-query.mjs', args: ['--help'], expectExit: [0, 1] },
+  { file: 'beads-dashboard.js', args: ['--help'], expectExit: [0, 1] },
+  { file: 'install-commit-hooks.mjs', args: ['--help'], expectExit: [0] },
+  { file: 'beads-dr.mjs', args: ['--help'], expectExit: [0] },
+  { file: 'beads-dr-verify.mjs', args: ['--help'], expectExit: [0] },
+  // No target named: must refuse rather than guess a repo to restore over.
+  { file: 'beads-dr-verify.mjs', args: [], expectExit: [1] },
+  { file: 'gen-ci-workflow.mjs', args: ['--repo', os.tmpdir(), '--dry-run'], expectExit: [0] },
+];
+for (const s of scripts) {
+  const fp = path.join(PLUGIN_ROOT, 'scripts', s.file);
+  if (!fs.existsSync(fp)) {
+    results.scripts.fail++;
+    results.scripts.errors.push({ file: s.file, error: 'not found' });
+    log(`  FAIL: ${s.file} — not found`);
+    continue;
+  }
+  const r = spawnSync(process.execPath, [fp, ...s.args], { encoding: 'utf8', timeout: 10_000 });
+  if (s.expectExit.includes(r.status)) {
+    results.scripts.ok++;
+    log(`  OK: ${s.file} (exit ${r.status})`);
+  } else {
+    results.scripts.fail++;
+    results.scripts.errors.push({ file: s.file, status: r.status, error: (r.stderr || r.stdout).slice(0, 200) });
+    log(`  FAIL: ${s.file} — exit ${r.status}`);
+  }
+}
+
+// ── 7. Unit tests (lib/*.test.js under hooks/ and scripts/) ──────────────────
+log('\n=== 7. Unit tests ===');
+const testFiles = [
+  ...listFiles(path.join(PLUGIN_ROOT, 'hooks'), ['.test.js', '.test.mjs']),
+  ...listFiles(path.join(PLUGIN_ROOT, 'hooks', 'lib'), ['.test.js', '.test.mjs']),
+  // cp-pu4q: scripts/ itself was not scanned, only scripts/lib/ — so a test
+  // sitting next to the script it covers was collected by nobody and ran only
+  // when someone remembered to invoke it by hand.
+  ...listFiles(path.join(PLUGIN_ROOT, 'scripts'), ['.test.js', '.test.mjs']),
+  ...listFiles(path.join(PLUGIN_ROOT, 'scripts', 'lib'), ['.test.js', '.test.mjs']),
+];
+if (testFiles.length === 0) {
+  log('  (no unit tests found)');
+}
+for (const tf of testFiles) {
+  const name = path.relative(PLUGIN_ROOT, tf);
+  const UNIT_TIMEOUT_MS = 30_000;
+  const { r, retried, stillTimedOut } = spawnRetry(process.execPath, [tf], { encoding: 'utf8', timeout: UNIT_TIMEOUT_MS });
+  if (stillTimedOut) {
+    results.unit.fail++;
+    results.unit.errors.push({ file: name, error: `timed out twice at ${UNIT_TIMEOUT_MS}ms` });
+    log(`  TIMEOUT: ${name} — exceeded ${UNIT_TIMEOUT_MS}ms twice`);
+  } else if (r.status === 0) {
+    results.unit.ok++;
+    log(`  OK: ${name} — ${(r.stdout || '').trim().split('\n').pop()}${retried ? '  [SLOW: passed on retry]' : ''}`);
+  } else {
+    results.unit.fail++;
+    const err = ((r.stderr || '') + (r.stdout || '')).split('\n').filter(Boolean).slice(-4).join(' | ');
+    results.unit.errors.push({ file: name, status: r.status, error: err });
+    log(`  FAIL: ${name} (exit ${r.status}) — ${err}`);
+  }
+}
+
+// ── 8. Gated-hook output assertions (cp-068 / cp-cpp) ────────────────────────
+// The Claude Code hook `if` field proved version-unreliable (CC 2.1.143 never
+// fires an if-gated hook; older CC ignores `if` and fires it on every Bash). So
+// every beads/mtn Bash hook now registers WITHOUT `if` and MUST self-gate in JS.
+// Step 4 only proves "doesn't crash"; these assertions prove the gate actually
+// works — emit on a matching command, stay SILENT on a non-matching one. A
+// regression here is exactly the bug class that silently broke the task mirror.
+log('\n=== 8. Gated-hook output assertions ===');
+
+// Temp cwd containing a .beads marker so the `.beads` existsSync gate passes
+// without touching any real repo.
+const gateCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'braynee-gate-'));
+fs.mkdirSync(path.join(gateCwd, '.beads'), { recursive: true });
+
+function runHook(hookRel, command, toolResponse) {
+  const payload = {
+    session_id: 'self-test', cwd: gateCwd, source: 'self-test',
+    tool_name: 'Bash', tool_input: { command },
+  };
+  if (toolResponse) payload.tool_response = toolResponse;
+  const r = spawnSync(process.execPath, [path.join(PLUGIN_ROOT, 'hooks', hookRel)], {
+    input: JSON.stringify(payload), encoding: 'utf8', timeout: 15_000,
+  });
+  return { out: (r.stdout || ''), status: r.status };
+}
+
+function assertGate(label, cond) {
+  if (cond) { results.gating.ok++; log(`  OK: ${label}`); }
+  else { results.gating.fail++; results.gating.errors.push({ test: label }); log(`  FAIL: ${label}`); }
+}
+
+// beads-todo-reminder.js — the mirror-critical, side-effect-free hook. Must emit
+// hookSpecificOutput.additionalContext for each bd state-change, silence otherwise.
+{
+  const create = runHook('beads-todo-reminder.js', 'bd create --title="Gate test"',
+    { stdout: '✓ Created issue: tt-1 — Gate test\n' });
+  assertGate('beads-todo-reminder emits on `bd create` (additionalContext + id)',
+    create.out.includes('additionalContext') && create.out.includes('tt-1'));
+
+  const claim = runHook('beads-todo-reminder.js', 'bd update tt-1 --claim');
+  assertGate('beads-todo-reminder emits on `bd update --claim` (in_progress)',
+    claim.out.includes('additionalContext') && /in_progress/.test(claim.out));
+
+  const close = runHook('beads-todo-reminder.js', 'bd close tt-1');
+  assertGate('beads-todo-reminder emits on `bd close` (closed)',
+    close.out.includes('additionalContext') && /closed/.test(close.out));
+
+  const noise = runHook('beads-todo-reminder.js', 'echo hello world');
+  assertGate('beads-todo-reminder stays SILENT on a non-bd command',
+    noise.out.trim() === '' && (noise.status === 0 || noise.status === 2));
+}
+
+// The remaining gated Bash hooks side-effect on a match (timers, branches,
+// session notes), so only assert the property we now depend on: a non-matching
+// command produces no stdout and a clean exit (the self-gate fires first).
+for (const h of ['commit-cadence-nudge.js', 'beads-claim-to-branch.js',
+                 'beads-status-sync.js', 'beads-dashboard-refresh.js', 'mtn-to-beads-sync.js',
+                 'beads-close-gate.js', 'commit-format-check.js']) {
+  const noise = runHook(h, 'echo hello world');
+  assertGate(`${h} stays SILENT + exit 0 on a non-matching command`,
+    noise.out.trim() === '' && (noise.status === 0 || noise.status === 2));
+}
+
+// beads-close-gate.js (cp-9f2.5) — must NEVER block when it can't read the
+// target issue (bd absent/uninitialized): a `bd close` against a bare-marker
+// repo stays silent + non-blocking. The flag/block decision itself is unit-
+// tested in §7; here we lock the graceful "don't get in the way" contract.
+{
+  const r = runHook('beads-close-gate.js', 'bd close zz-000 --reason "x"');
+  assertGate('beads-close-gate stays SILENT when the target issue is unreadable (bare-marker repo)',
+    r.out.trim() === '' && (r.status === 0 || r.status === 2));
+}
+
+// prd-seed-gate.js (cp-7jd) — warns when prd-seed runs against a half-scoped PRD.
+// EMIT on a gappy PRD, SILENT on a clean PRD and on a non-prd-seed command. Uses a
+// throwaway BRAYNEE_VAULT fixture so the hook has a PRD to inspect.
+{
+  const pv = fs.mkdtempSync(path.join(os.tmpdir(), 'braynee-prdgate-'));
+  const prdDir = path.join(pv, '2. Areas', 'Product Manager', 'PRDs');
+  fs.mkdirSync(prdDir, { recursive: true });
+  fs.writeFileSync(path.join(prdDir, 'Gappy.md'),
+    '## MVP Definition\n### Auth\n<approach>\n### Core Features (3–5)\n1. ...\n', 'utf8');
+  fs.writeFileSync(path.join(prdDir, 'Clean.md'),
+    '## MVP Definition\n### Auth\nClerk, org support.\n### Core Features (3–5)\n1. Engine\n2. UI\n## Risks & Open Questions\n- **Risk:** load.\n', 'utf8');
+  const runPrdGate = (command) => spawnSync(process.execPath,
+    [path.join(PLUGIN_ROOT, 'hooks', 'prd-seed-gate.js')],
+    { input: JSON.stringify({ session_id: 'self-test', cwd: gateCwd, tool_name: 'Bash', tool_input: { command } }),
+      encoding: 'utf8', timeout: 15_000, env: { ...process.env, BRAYNEE_VAULT: pv } });
+  const gappy = runPrdGate('node prd-seed.mjs Gappy');
+  assertGate('prd-seed-gate EMITS on a gappy PRD (additionalContext + placeholder count)',
+    (gappy.stdout || '').includes('additionalContext') && /MVP Definition placeholder/.test(gappy.stdout || ''));
+  const clean = runPrdGate('node prd-seed.mjs Clean');
+  assertGate('prd-seed-gate stays SILENT on a clean PRD',
+    (clean.stdout || '').trim() === '' && clean.status === 0);
+  const noise = runPrdGate('echo hello world');
+  assertGate('prd-seed-gate stays SILENT on a non-prd-seed command',
+    (noise.stdout || '').trim() === '' && noise.status === 0);
+  try { fs.rmSync(pv, { recursive: true, force: true }); } catch {}
+}
+
+// secret-exposure-guard.js — DENY value-printing secret commands (exit 2 + stderr),
+// ALLOW injection (`infisical run`) and writes (`secrets set`), stay SILENT on a
+// non-match, and DENY real secrets written into a .env file. Locks the contract
+// that secret values never reach the transcript.
+function runGuard(payload) {
+  const r = spawnSync(process.execPath, [path.join(PLUGIN_ROOT, 'hooks', 'secret-exposure-guard.js')], {
+    input: JSON.stringify({ session_id: 'self-test', cwd: gateCwd, ...payload }),
+    encoding: 'utf8', timeout: 15_000,
+  });
+  return { out: r.stdout || '', err: r.stderr || '', status: r.status };
+}
+{
+  const bash = (command) => runGuard({ tool_name: 'Bash', tool_input: { command } });
+  const write = (file_path, content) => runGuard({ tool_name: 'Write', tool_input: { file_path, content } });
+
+  assertGate('secret-exposure-guard BLOCKS `infisical secrets get`',
+    bash('infisical secrets get OPENAI_API_KEY --plain').status === 2);
+  assertGate('secret-exposure-guard BLOCKS `infisical export`',
+    bash('infisical export --env=dev').status === 2);
+  assertGate('secret-exposure-guard BLOCKS bare `infisical secrets` (list with values)',
+    bash('infisical secrets --recursive').status === 2);
+  assertGate('secret-exposure-guard BLOCKS `vault kv get`',
+    bash('vault kv get secret/foo').status === 2);
+  assertGate('secret-exposure-guard ALLOWS `infisical run` (injection)',
+    bash('infisical run --recursive --silent -- node app.js').status === 0);
+  assertGate('secret-exposure-guard ALLOWS `infisical secrets set` (write by ref, no value printed)',
+    bash('infisical secrets set NEWKEY="$EXISTING"').status === 0);
+  assertGate('secret-exposure-guard stays SILENT + exit 0 on a non-matching command',
+    (() => { const r = bash('echo hello world'); return r.out.trim() === '' && r.err.trim() === '' && r.status === 0; })());
+  assertGate('secret-exposure-guard BLOCKS a real secret written to .env',
+    write(path.join(gateCwd, '.env'), 'OPENAI_API_KEY=sk-' + 'a'.repeat(48) + '\n').status === 2);
+  assertGate('secret-exposure-guard ALLOWS a placeholder in .env',
+    write(path.join(gateCwd, '.env'), 'OPENAI_API_KEY=YOUR_KEY_HERE\n').status === 0);
+}
+
+// vault-search-guard.js (cp-m3g) — DENY Glob/Grep/Bash-search aimed at the vault
+// (steer to QMD), ALLOW the identical search in a code repo. Locks the contract
+// that vault content is searched via QMD, never a cwd-sensitive filesystem tool.
+{
+  const vaultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'braynee-vault-'));
+  const codeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'braynee-code-'));
+  const runVG = (payload, cwd) => spawnSync(
+    process.execPath, [path.join(PLUGIN_ROOT, 'hooks', 'vault-search-guard.js')],
+    {
+      input: JSON.stringify({ session_id: 'self-test', cwd: cwd || codeDir, ...payload }),
+      encoding: 'utf8', timeout: 15_000,
+      env: { ...process.env, BRAYNEE_VAULT: vaultDir, BRAYNEE_ALLOW_VAULT_GREP: '' },
+    });
+  try {
+    assertGate('vault-search-guard BLOCKS Glob with a vault path',
+      runVG({ tool_name: 'Glob', tool_input: { pattern: '**/*.md', path: vaultDir } }).status === 2);
+    assertGate('vault-search-guard ALLOWS Glob with a code-repo path',
+      runVG({ tool_name: 'Glob', tool_input: { pattern: '**/*.ts', path: codeDir } }).status === 0);
+    assertGate('vault-search-guard BLOCKS path-less Grep when cwd is the vault',
+      runVG({ tool_name: 'Grep', tool_input: { pattern: 'foo' } }, vaultDir).status === 2);
+    assertGate('vault-search-guard ALLOWS path-less Grep when cwd is a code repo',
+      runVG({ tool_name: 'Grep', tool_input: { pattern: 'foo' } }, codeDir).status === 0);
+    assertGate('vault-search-guard BLOCKS `grep` of an explicit vault path',
+      runVG({ tool_name: 'Bash', tool_input: { command: `grep -r foo "${vaultDir}/notes"` } }).status === 2);
+    assertGate('vault-search-guard ALLOWS a stdout filter `qmd … | grep -v` (no vault path)',
+      runVG({ tool_name: 'Bash', tool_input: { command: 'node qmd-wrapper.mjs search x | grep -v transcript' } }, vaultDir).status === 0);
+    assertGate('vault-search-guard ALLOWS `grep -r` in a code repo',
+      runVG({ tool_name: 'Bash', tool_input: { command: 'grep -r foo .' } }, codeDir).status === 0);
+    assertGate('vault-search-guard stays SILENT + exit 0 on a non-search Bash command',
+      runVG({ tool_name: 'Bash', tool_input: { command: 'echo hello' } }, vaultDir).status === 0);
+  } finally {
+    try { fs.rmSync(vaultDir, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(codeDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+// beads-server-heal.js — SessionStart heal (cp-6j5). The kill path only runs
+// against a REAL initialized .beads/; against a bare marker dir (no metadata/
+// config/issues/dolt) it must stay completely silent and exit 0, so it never
+// touches a server during a smoke run. (No session_id → sessionDir uses cwd
+// directly, bypassing the cross-section anchor cache.)
+{
+  const r = spawnSync(process.execPath, [path.join(PLUGIN_ROOT, 'hooks', 'beads-server-heal.js')], {
+    input: JSON.stringify({ cwd: gateCwd, source: 'self-test' }),
+    encoding: 'utf8', timeout: 15_000,
+  });
+  assertGate('beads-server-heal stays SILENT + exit 0 on a bare-marker .beads/',
+    (r.stdout || '').trim() === '' && (r.status === 0 || r.status === 2));
+}
+
+// beads-version-check.js — SessionStart bd-upgrade announcer (cp-g4ge.4). The
+// emit path needs bd installed + a metadata.json, so we (a) unit-test the pure
+// version decision (CI-safe, no bd) and (b) assert the hook stays silent on a
+// repo with no metadata.json (bare-marker gateCwd) — it never nags mid-setup.
+{
+  const { decideVersionChange } = require(path.join(PLUGIN_ROOT, 'hooks', 'beads-version-check.js'));
+  assertGate('beads-version-check: first run (no seen version) seeds silently',
+    (() => { const d = decideVersionChange('1.0.4', undefined); return d.emit === false && d.seed === true && d.next === '1.0.4'; })());
+  assertGate('beads-version-check: unchanged version stays silent',
+    (() => { const d = decideVersionChange('1.0.4', '1.0.4'); return d.emit === false && d.seed === false; })());
+  assertGate('beads-version-check: a changed version emits (from→to)',
+    (() => { const d = decideVersionChange('1.0.5', '1.0.4'); return d.emit === true && d.from === '1.0.4' && d.to === '1.0.5'; })());
+  assertGate('beads-version-check: unreadable bd version stays silent',
+    (() => { const d = decideVersionChange(null, '1.0.4'); return d.emit === false; })());
+
+  const rv = spawnSync(process.execPath, [path.join(PLUGIN_ROOT, 'hooks', 'beads-version-check.js')], {
+    input: JSON.stringify({ cwd: gateCwd, source: 'self-test' }),
+    encoding: 'utf8', timeout: 15_000,
+  });
+  assertGate('beads-version-check stays SILENT + exit 0 on a repo with no metadata.json',
+    (rv.stdout || '').trim() === '' && (rv.status === 0 || rv.status === 2));
+}
+
+// agent-notification-check.js — Notification hook for `claude agents` background
+// sessions (cp-hdpr.1). The hooks.json matcher already filters, but the hook
+// self-gates in JS too, per this repo's rule that config-level gating is never
+// the only gate. Same contract as the Bash hooks above: emit on the two agent_*
+// kinds, stay SILENT on every other Notification kind.
+{
+  const runNotify = (payload) => {
+    const r = spawnSync(process.execPath, [path.join(PLUGIN_ROOT, 'hooks', 'agent-notification-check.js')], {
+      input: JSON.stringify({ hook_event_name: 'Notification', cwd: gateCwd, session_id: 'self-test', ...payload }),
+      encoding: 'utf8', timeout: 15_000,
+    });
+    return { out: r.stdout || '', status: r.status };
+  };
+
+  const done = runNotify({ notification_type: 'agent_completed', message: 'Agent finished' });
+  assertGate('agent-notification-check emits on agent_completed',
+    done.out.includes('additionalContext') && /background agent session finished/i.test(done.out));
+
+  const waiting = runNotify({ notification_type: 'agent_needs_input', message: 'needs your answer' });
+  assertGate('agent-notification-check emits on agent_needs_input',
+    waiting.out.includes('additionalContext') && /waiting for input/i.test(waiting.out));
+
+  // The docs list 8 valid Notification matcher values; the other 6 must be silent.
+  const others = ['permission_prompt', 'idle_prompt', 'auth_success',
+    'elicitation_dialog', 'elicitation_complete', 'elicitation_response'];
+  const noisy = others.filter(k => runNotify({ notification_type: k, message: k }).out.trim() !== '');
+  assertGate(`agent-notification-check stays SILENT on the other 6 notification kinds${noisy.length ? ' — leaked: ' + noisy.join(', ') : ''}`,
+    noisy.length === 0);
+
+  // A payload naming no kind at all must not be treated as an agent event.
+  const bare = runNotify({ message: 'something happened' });
+  assertGate('agent-notification-check stays SILENT on an unclassifiable payload',
+    bare.out.trim() === '' && (bare.status === 0 || bare.status === 2));
+}
+
+// directory-added-check.js — DirectoryAdded (CC 2.1.219), cp-hdpr.2. Informs
+// about a root registered mid-session by `/add-dir`; must never re-anchor and
+// must stay quiet for anything braynee does not track.
+{
+  const dirRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'braynee-diradd-'));
+  const codeDir = path.join(dirRoot, 'newproj');
+  fs.mkdirSync(path.join(codeDir, '.git'), { recursive: true });
+  fs.mkdirSync(path.join(codeDir, '.beads'), { recursive: true });
+  fs.writeFileSync(path.join(codeDir, 'package.json'), '{}');
+  const plainDir = path.join(dirRoot, 'plaindir');
+  fs.mkdirSync(plainDir, { recursive: true });
+
+  const runDirAdded = (payload) => {
+    const r = spawnSync(process.execPath, [path.join(PLUGIN_ROOT, 'hooks', 'directory-added-check.js')], {
+      input: JSON.stringify({ hook_event_name: 'DirectoryAdded', cwd: PLUGIN_ROOT, ...payload }),
+      encoding: 'utf8', timeout: 15_000,
+    });
+    return { out: r.stdout || '', status: r.status };
+  };
+
+  // Unique session ids so the on-disk dedup state from a previous run cannot
+  // make these assertions pass or fail spuriously.
+  const sid = `self-test-${process.pid}`;
+  const first = runDirAdded({ session_id: `${sid}-a`, directory: codeDir });
+  assertGate('directory-added-check emits when a code project is registered mid-session',
+    first.out.includes('additionalContext') && first.out.includes('newproj'));
+
+  assertGate('directory-added-check dedups the same directory within one session',
+    runDirAdded({ session_id: `${sid}-a`, directory: codeDir }).out.trim() === '');
+
+  // Strict silence, tightened when cp-9krl landed. This was previously written
+  // as the weaker "does not name the plain dir": findCodeRoot walked above the
+  // fixture and resolved any temp path to %TEMP% itself, because %TEMP% on this
+  // machine carries a stray .git and .beads — so the hook fired on a directory
+  // with no project in it and was, given its input, correct to. cp-9krl excluded
+  // the OS temp dir as a candidate root, so a plain directory now resolves to
+  // nothing and the hook must say nothing at all.
+  const plainOut = runDirAdded({ session_id: `${sid}-b`, directory: plainDir }).out;
+  assertGate('directory-added-check stays SILENT for a non-code directory',
+    plainOut.trim() === '', [plainOut.slice(0, 160)]);
+
+  assertGate('directory-added-check stays SILENT when the added dir is the anchored project',
+    runDirAdded({ session_id: `${sid}-c`, directory: PLUGIN_ROOT }).out.trim() === '');
+
+  const bare = runDirAdded({ session_id: `${sid}-d` });
+  assertGate('directory-added-check stays SILENT + exit 0 when no directory field is present',
+    bare.out.trim() === '' && (bare.status === 0 || bare.status === 2));
+
+  // The hook must inform, never silently move the session's anchor (the rule
+  // cwd-changed-check.js established and this hook inherits).
+  const src = fs.readFileSync(path.join(PLUGIN_ROOT, 'hooks', 'directory-added-check.js'), 'utf8');
+  assertGate('directory-added-check never writes a session anchor',
+    !/anchorSession|writeAnchor|setAnchor/.test(src));
+
+  try { fs.rmSync(dirRoot, { recursive: true, force: true }); } catch {}
+}
+
+// lib/session-report-state.js — the dedup memory both location hooks share
+// (extracted in cp-hdpr.2 so the two cannot drift).
+{
+  const S = require(path.join(PLUGIN_ROOT, 'hooks', 'lib', 'session-report-state.js'));
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'braynee-srs-')), 'state.json');
+
+  assertGate('session-report-state reports a value the first time',
+    S.shouldReport(f, 's1', 'C:/x/y') === true);
+  assertGate('session-report-state suppresses the same value for that session',
+    S.shouldReport(f, 's1', 'C:/x/y') === false);
+  // Trailing-slash normalization holds on every platform. Backslash separators
+  // do NOT: on POSIX a backslash is a legal filename character, so
+  // path.resolve('C:\\x\\y\\') is a different path there, not the same one.
+  // Asserting it unconditionally passed on Windows and failed the Linux CI run.
+  assertGate('session-report-state normalizes a trailing slash',
+    S.shouldReport(f, 's1', 'C:/x/y/') === false);
+  if (process.platform === 'win32') {
+    assertGate('session-report-state normalizes backslash separators (win32)',
+      S.shouldReport(f, 's1', 'C:\\x\\y') === false);
+  }
+  assertGate('session-report-state reports a different value for the same session',
+    S.shouldReport(f, 's1', 'C:/other') === true);
+  assertGate('session-report-state keeps sessions independent',
+    S.shouldReport(f, 's2', 'C:/x/y') === true);
+  assertGate('session-report-state always reports when there is no session id',
+    S.shouldReport(f, null, 'C:/x/y') === true && S.shouldReport(f, null, 'C:/x/y') === true);
+  assertGate('session-report-state ignores an empty value',
+    S.shouldReport(f, 's1', '') === false);
+  assertGate('session-report-state degrades to {} on an unreadable state file',
+    Object.keys(S.readState(path.join(os.tmpdir(), 'braynee-nope-does-not-exist.json'))).length === 0);
+  // A corrupt file must not throw — a hook dying over its own state file is the
+  // failure this whole module is written to avoid.
+  fs.writeFileSync(f, 'not json at all');
+  assertGate('session-report-state recovers from a corrupt state file',
+    S.shouldReport(f, 's3', 'C:/z') === true);
+}
+
+try { fs.rmSync(gateCwd, { recursive: true, force: true }); } catch {}
+log(`  ${results.gating.ok} passed | ${results.gating.fail} failed`);
+
+// ── 9. windowsHide on every process spawn (cp-x01) ───────────────────────────
+// Hooks/scripts run from a console-less parent; a string execSync (which wraps
+// in cmd.exe) or a child .cmd shim (npm, etc.) without windowsHide:true flashes
+// a console window on Windows. braynee's convention is windowsHide on EVERY
+// spawn — this scans for offenders so the flash class can't silently regress.
+log('\n=== 9. windowsHide on every spawn ===');
+results.winhide = { ok: 0, fail: 0, errors: [] };
+function walkCode(dir) {
+  const out = [];
+  for (const e of (fs.existsSync(dir) ? fs.readdirSync(dir, { withFileTypes: true }) : [])) {
+    if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+    const fp = path.join(dir, e.name);
+    if (e.isDirectory()) out.push(...walkCode(fp));
+    else if (/\.(js|mjs)$/.test(e.name) && !/\.test\.(js|mjs)$/.test(e.name)) out.push(fp);
+  }
+  return out;
+}
+const SPAWN_RE = /\b(execSync|spawnSync|spawn|exec)\s*\(/g;
+for (const fp of [...walkCode(path.join(PLUGIN_ROOT, 'hooks')), ...walkCode(path.join(PLUGIN_ROOT, 'scripts'))]) {
+  const text = fs.readFileSync(fp, 'utf8');
+  let m, bad = 0;
+  while ((m = SPAWN_RE.exec(text))) {
+    // Extract exactly this call — from its open paren to the matching close —
+    // via balanced-paren scan, so the check never bleeds into the next call.
+    const open = text.indexOf('(', m.index);
+    if (open === -1) continue;
+    let depth = 0, end = open;
+    for (let i = open; i < text.length && i < open + 2000; i++) {
+      const c = text[i];
+      if (c === '(') depth++;
+      else if (c === ')') { depth--; if (depth === 0) { end = i; break; } }
+    }
+    const call = text.slice(open, end + 1);
+    // Only flag calls that pass an INLINE options object literal but omit
+    // windowsHide. Calls that pass a shared const (e.g. EXEC) or spread one
+    // (`{ ...EXEC }`) inherit its windowsHide; shell:false is hook-sandbox's
+    // intentional dev spawn. Bare identifier-options calls are the const's job.
+    if (!/\{/.test(call)) continue;
+    if (/windowsHide\s*:\s*true/.test(call) || /shell\s*:\s*false/.test(call)) continue;
+    if (/\.\.\.[A-Za-z_$][\w$]*/.test(call)) continue;
+    bad++;
+  }
+  if (bad === 0) { results.winhide.ok++; }
+  else {
+    results.winhide.fail++;
+    const rel = path.relative(PLUGIN_ROOT, fp);
+    results.winhide.errors.push({ file: rel, missing: bad });
+    log(`  FAIL: ${rel} — ${bad} spawn(s) without windowsHide`);
+  }
+}
+log(`  ${results.winhide.ok} files clean | ${results.winhide.fail} with un-hidden spawns`);
+
+// ── 10. Agent definition assertions (autopilot) ──────────────────────────────
+// Locks two autopilot.md regressions:
+//  - cp-9f2.1: the model must not be re-pinned to Haiku — a build-to-ship run
+//    needs the session model (model: inherit), not the old hardcoded haiku.
+//  - cp-9f2.7: every bd command must use a flag that exists on the installed bd.
+//    `bd update --add-note` and `bd dep add ... --kind` are NOT real flags; they
+//    print help and silently no-op, so the agent's note/dep steps never persist.
+log('\n=== 10. Agent definition assertions ===');
+results.agents = { ok: 0, fail: 0, errors: [] };
+function assertAgent(label, cond) {
+  if (cond) { results.agents.ok++; log(`  OK: ${label}`); }
+  else { results.agents.fail++; results.agents.errors.push({ test: label }); log(`  FAIL: ${label}`); }
+}
+{
+  const apPath = path.join(PLUGIN_ROOT, 'agents', 'autopilot.md');
+  const ap = fs.existsSync(apPath) ? fs.readFileSync(apPath, 'utf8') : '';
+  const modelMatch = ap.match(/^model:\s*(\S+)\s*$/m);
+  assertAgent('autopilot.md declares a model', !!modelMatch);
+  assertAgent('autopilot.md model is not pinned to haiku (cp-9f2.1)',
+    !!modelMatch && modelMatch[1] !== 'haiku');
+  assertAgent('autopilot.md uses no `--add-note` flag (cp-9f2.7)',
+    !/\bbd\b[^\n]*--add-note\b/.test(ap));
+  assertAgent('autopilot.md has no `bd dep add ... --kind` on one line (cp-9f2.7)',
+    !/bd dep add[^\n]*--kind\b/.test(ap));
+  assertAgent('autopilot.md documents a local quality gate (biome + Tier-1, hard-stop on red) (cp-9f2.6)',
+    /biome check/i.test(ap) && /tier-1/i.test(ap) && /red gate is a hard stop/i.test(ap));
+  assertAgent('autopilot.md ship mode is opt-in + prod stays human-gated (cp-9f2.2)',
+    /ship mode \(opt-in/i.test(ap) && /double opt-in/i.test(ap) && /human-gated/i.test(ap));
+}
+{
+  // cp-ci9.2: the beads-auditor must hold its key contracts — tool-restricted,
+  // warns about the bd batch-write clobber, enforces supersede, gates writes on approval.
+  const baPath = path.join(PLUGIN_ROOT, 'agents', 'beads-auditor.md');
+  const ba = fs.existsSync(baPath) ? fs.readFileSync(baPath, 'utf8') : '';
+  assertAgent('beads-auditor.md exists (cp-ci9.2)', !!ba);
+  assertAgent('beads-auditor declares tools + model', /^tools:/m.test(ba) && /^model:/m.test(ba));
+  assertAgent('beads-auditor warns about the bd batch-write flush (clobber gotcha)',
+    /bd export --all --include-memories/.test(ba));
+  assertAgent('beads-auditor enforces supersede for reversed decisions',
+    /supersede/i.test(ba));
+  assertAgent('beads-auditor gates mutations on approval',
+    /only after approval|only on approval|go-ahead/i.test(ba));
+}
+log(`  ${results.agents.ok} passed | ${results.agents.fail} failed`);
+
+// ── 11. Rules-template assertions (cp-ci9.1) ─────────────────────────────────
+// The beads-conventions rule must ship in rules-templates (cmd_rules globs *.md,
+// so presence here = it installs) and carry the discipline it exists to enforce.
+log('\n=== 11. Rules-template assertions ===');
+results.rules = { ok: 0, fail: 0, errors: [] };
+function assertRule(label, cond) {
+  if (cond) { results.rules.ok++; log(`  OK: ${label}`); }
+  else { results.rules.fail++; results.rules.errors.push({ test: label }); log(`  FAIL: ${label}`); }
+}
+{
+  const rp = path.join(PLUGIN_ROOT, 'skills', 'setup', 'rules-templates', 'beads-conventions.md');
+  const r = fs.existsSync(rp) ? fs.readFileSync(rp, 'utf8') : '';
+  assertRule('beads-conventions.md ships in rules-templates (cp-ci9.1)', !!r);
+  assertRule('beads-conventions.md is a path-scoped rule (paths: frontmatter)',
+    /^---[\r\n]+paths:/.test(r));
+  assertRule('beads-conventions states the in/out boundary (bd remember + TodoWrite + vault)',
+    /bd remember/i.test(r) && /TodoWrite/i.test(r) && /vault/i.test(r));
+  assertRule('beads-conventions carries the design-vs-acceptance rule',
+    /design/i.test(r) && /acceptance/i.test(r) && /verifiable/i.test(r));
+  assertRule('beads-conventions says supersede reversed decisions (not silent-delete)',
+    /supersede/i.test(r));
+  assertRule('beads-conventions documents the create-time guard (validation.on-create)',
+    /validation\.on-create/i.test(r));
+
+  // cp-lj73.1: the commit/PR standard both hook layers (.2 Claude-side, .3
+  // git-side) enforce. It has to SHIP as a rule template — if it lives only in
+  // an issue or a vault note, the hooks enforce something no installed user can
+  // read, and the rule cannot be cited when a commit is rejected.
+  const cp = path.join(PLUGIN_ROOT, 'skills', 'setup', 'rules-templates', 'commit-pr-conventions.md');
+  const cpText = fs.existsSync(cp) ? fs.readFileSync(cp, 'utf8') : '';
+  assertRule('commit-pr-conventions.md ships in rules-templates (cp-lj73.1)', !!cpText);
+  assertRule('...is a path-scoped rule (paths: frontmatter), not always-on context',
+    /^---[\s\S]*?\npaths:\s*\n\s*-\s*"/.test(cpText));
+  assertRule('...defines the Conventional Commits subject grammar',
+    /type\(scope\)!?:\s*summary/.test(cpText));
+  assertRule('...names the breaking-change forms (! and BREAKING CHANGE footer)',
+    /BREAKING CHANGE/.test(cpText) && /feat!/.test(cpText));
+  assertRule('...carries the 50/72 rule with the imperative mood',
+    /50/.test(cpText) && /72/.test(cpText) && /imperative/i.test(cpText));
+  assertRule('...states that commit count != PR count',
+    /commit count and pr count are unrelated/i.test(cpText));
+  assertRule('...carries the "and" test for splitting a PR',
+    /without saying "and", it is two PRs/i.test(cpText));
+  assertRule('...sizes PRs with the evidence, not as taste (SmartBear/Cisco)',
+    /200[–-]400 LOC/.test(cpText) && /SmartBear|Cohen/.test(cpText));
+  assertRule('...says squash-merge is the default',
+    /squash-merge[\s\S]{0,40}default/i.test(cpText));
+  assertRule('...types a PR by its highest-impact commit',
+    /highest-impact/i.test(cpText));
+  // The rule ships to every install, so it must not name the author's own repos
+  // or businesses — section 13 scans this file too, but assert the intent here.
+  assertRule('...carries no owner-specific example',
+    !/otaku|myrp|chowderr|foreman/i.test(cpText));
+
+  // cp-lj73.3: the rule is also where "how do I turn this on for an existing
+  // repo" has to live. A hook that rejects a commit while citing a rule that
+  // documents no way to install, or to opt out, is an obstacle with a footnote.
+  assertRule('...documents the three enforcement layers and their strengths',
+    /Claude-side hook/.test(cpText) && /commit-msg. hook/.test(cpText) && /PR-title CI/.test(cpText));
+  assertRule('...points at the installer for an existing repo',
+    /install-commit-hooks\.mjs/.test(cpText));
+  assertRule('...states the git-side layers are opt-in per repo',
+    /opt-in per repo/i.test(cpText));
+  assertRule('...documents the agent-side opt-out',
+    /braynee\.allow-freeform-commits/.test(cpText));
+  assertRule('...records that beads does not own commit-msg (coexistence)',
+    /prepare-commit-msg/.test(cpText) && /never\s*\n?`?commit-msg/.test(cpText));
+
+  // The installer and the CI job must exist for the rule's instructions to work:
+  // a documented command that is not shipped is worse than no documentation.
+  const ich = path.join(PLUGIN_ROOT, 'scripts', 'install-commit-hooks.mjs');
+  assertRule('install-commit-hooks.mjs ships (cp-lj73.3)', fs.existsSync(ich));
+  const chc = path.join(PLUGIN_ROOT, 'scripts', 'lib', 'commit-hooks-core.js');
+  assertRule('commit-hooks-core.js ships', fs.existsSync(chc));
+  {
+    // One shared type list across all three layers. Three hand-maintained copies
+    // would drift, and a commit the agent accepts but CI rejects is the worst
+    // possible outcome — it fails only after the work is pushed.
+    const { TYPES } = require(path.join(PLUGIN_ROOT, 'hooks', 'lib', 'commit-format.js'));
+    const core = fs.readFileSync(chc, 'utf8');
+    const ciCore = fs.readFileSync(path.join(PLUGIN_ROOT, 'scripts', 'lib', 'ci-workflow-core.js'), 'utf8');
+    assertRule('commit-hooks-core imports the shared type list, not its own copy',
+      /require\([^)]*commit-format\.js[^)]*\)/.test(core) && !/'feat',\s*'fix'/.test(core));
+    assertRule('ci-workflow-core imports the shared type list, not its own copy',
+      /require\([^)]*commit-format\.js[^)]*\)/.test(ciCore) && !/'feat',\s*'fix'/.test(ciCore));
+    assertRule('the shared type list is non-empty and conventional',
+      TYPES.includes('feat') && TYPES.includes('fix') && TYPES.length >= 10);
+  }
+
+  // cp-ccsh.7 / B6: two divergent copies of qmd-wrapper.mjs exist on a dev box —
+  // the standalone ~/.claude/scripts/ one (stale) and the plugin's bundled one
+  // (what every hook actually invokes). A shipped asset pointing at the
+  // standalone copy teaches users to run code two months behind the hooks. The
+  // bundled path is the single source of truth.
+  const dd = path.join(PLUGIN_ROOT, 'skills', 'setup', 'rules-templates', 'dev-defaults.md');
+  const ddText = fs.existsSync(dd) ? fs.readFileSync(dd, 'utf8') : '';
+  assertRule('dev-defaults.md ships in rules-templates', !!ddText);
+  assertRule('dev-defaults.md points QMD at the bundled wrapper (cp-ccsh.7)',
+    /\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/qmd-wrapper\.mjs/.test(ddText));
+
+  // Repo-wide: nothing shipped may reference the standalone copy.
+  const STALE_QMD = /[~$]\{?HOME\}?[\\/]?\.claude[\\/]scripts[\\/]qmd-wrapper|~[\\/]\.claude[\\/]scripts[\\/]qmd-wrapper/;
+  const stale = [];
+  {
+    const skipDirs = new Set(['node_modules', 'mockups', '.git', '.beads', '.github']);
+    const walkDocs = (dir, rel = '') => {
+      for (const e of (fs.existsSync(dir) ? fs.readdirSync(dir, { withFileTypes: true }) : [])) {
+        if (skipDirs.has(e.name)) continue;
+        const fp = path.join(dir, e.name);
+        const r = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) { walkDocs(fp, r); continue; }
+        if (!/\.(md|js|mjs|json|py|toml)$/i.test(e.name)) continue;
+        let t; try { t = fs.readFileSync(fp, 'utf8'); } catch { continue; }
+        t.split(/\r?\n/).forEach((line, i) => {
+          if (STALE_QMD.test(line)) stale.push(`${r}:${i + 1}`);
+        });
+      }
+    };
+    walkDocs(PLUGIN_ROOT);
+  }
+  assertRule(`no shipped asset references the standalone ~/.claude/scripts/qmd-wrapper.mjs (cp-ccsh.7)${stale.length ? ' — ' + stale.join(', ') : ''}`,
+    stale.length === 0);
+}
+log(`  ${results.rules.ok} passed | ${results.rules.fail} failed`);
+
+// ── 12. Health beads-hygiene assertion (cp-ci9.3) ────────────────────────────
+// /health's Beads check must surface traceability drift (not just secrets):
+// missing sections, orphans, stale, and the create-time guard.
+log('\n=== 12. Health beads-hygiene assertion ===');
+results.health = { ok: 0, fail: 0, errors: [] };
+function assertHealth(label, cond) {
+  if (cond) { results.health.ok++; log(`  OK: ${label}`); }
+  else { results.health.fail++; results.health.errors.push({ test: label }); log(`  FAIL: ${label}`); }
+}
+{
+  const hpPath = path.join(PLUGIN_ROOT, 'skills', 'health', 'scripts', 'health.py');
+  const hp = fs.existsSync(hpPath) ? fs.readFileSync(hpPath, 'utf8') : '';
+  assertHealth('health.py cmd_beads emits a traceability line (cp-ci9.3)', /traceability:/.test(hp));
+  assertHealth('health.py hygiene runs lint + orphans + stale + guard',
+    /_bd\("lint"\)/.test(hp) && /_bd\("orphans"\)/.test(hp) && /_bd\("stale"\)/.test(hp) && /validation\.on-create/.test(hp));
+
+  // cp-ccsh.4 / B3: the MEMORY.md tripwire once recommended "run /health or
+  // trigger a memory resync" — /braynee:health does not resync, and pre-cp-ccsh.2
+  // a resync rebuilt the index oversized, so the remedy was the cause. The advice
+  // must name the real lever (shortening name:/description: frontmatter) and must
+  // not send the user to /health for a resync it does not perform.
+  // Bounded to the warn() branch by the `else:` that follows it. Do not anchor on
+  // `)\n` — health.py is CRLF, so that never matches and every assertion below
+  // would vacuously pass against an empty string.
+  const tripwire = (hp.match(/approaching CC's 25KB startup-load[\s\S]{0,900}?else:/) || [''])[0];
+  assertHealth('health.py MEMORY.md tripwire still fires at 22KB', /kb >= 22/.test(hp));
+  assertHealth('MEMORY.md advice names the frontmatter lever, not just a resync (cp-ccsh.4)',
+    /description:/.test(tripwire) && /name:/.test(tripwire));
+  assertHealth('MEMORY.md advice does not tell the user to run /health to resync (cp-ccsh.4)',
+    !/run \/health/.test(tripwire));
+}
+log(`  ${results.health.ok} passed | ${results.health.fail} failed`);
+
+// ── 13. No owner-specific data in shipped assets (cp-ccsh.6 / B5) ────────────
+// braynee ships to other people: a shipped asset must never name the author's
+// own businesses or repos. Formula steps are the sharpest case — they are
+// instructions a user actually follows ("UI work uses shadcn via the Otaku
+// registry" told every user to use a registry they cannot reach). Doc examples
+// and code comments are milder but the same rule.
+//
+// Legitimately excluded: LICENSE, README (install lines + published namespace),
+// and the publisher/repository metadata in plugin.json / marketplace.json — that
+// is authorship, not user data. Anywhere else, a line is allowed only if it is a
+// braynee repository URL.
+//
+// "Shipped" is defined as TRACKED, minus .gitattributes export-ignore, because
+// that is exactly what the release ships: braynee-release.yml builds the zip with
+// `git archive HEAD`. Deriving the set instead of hand-listing directories keeps
+// the boundary honest in both directions — a personal git-ignored file (e.g.
+// skills/session-backfill/scripts/project_map.json, which legitimately holds the
+// user's own project mappings) never trips the gate, while a NEWLY TRACKED file
+// carrying owner data does. Falls back to a filesystem walk outside a git
+// checkout (e.g. run from an extracted zip).
+log('\n=== 13. No owner-specific data in shipped assets ===');
+results.ownerdata = { ok: 0, fail: 0, errors: [] };
+{
+  const OWNER_RE = /otaku|myrp|foreman|chowderr/i;
+  const REPO_URL_RE = /github\.com\/hamchowderr\/braynee/i;
+  const SKIP_FILES = new Set([
+    'LICENSE', 'README.md',
+    '.claude-plugin/plugin.json',
+    '.claude-plugin/marketplace.json',
+    // The user's personal session-backfill overrides. Git-ignored, so the git
+    // path already excludes it — named here so the no-git fallback, which cannot
+    // read .gitignore, does not false-positive on it in a working checkout. What
+    // actually ships is project_map.example.json, which the scan does cover.
+    'skills/session-backfill/scripts/project_map.json',
+  ]);
+  const TEXT_RE = /\.(js|mjs|cjs|json|md|py|toml|ya?ml|txt|sh|ps1)$/i;
+
+  // Prefixes .gitattributes strips from the release zip.
+  const exportIgnored = [];
+  try {
+    for (const line of fs.readFileSync(path.join(PLUGIN_ROOT, '.gitattributes'), 'utf8').split(/\r?\n/)) {
+      if (!/export-ignore/.test(line)) continue;
+      const pat = line.trim().split(/\s+/)[0];
+      if (pat) exportIgnored.push(pat.replace(/\/$/, ''));
+    }
+  } catch { /* no .gitattributes — nothing stripped */ }
+
+  let shipped = null;
+  try {
+    const r = spawnSync('git', ['ls-files', '-z'], {
+      cwd: PLUGIN_ROOT, encoding: 'utf8', windowsHide: true,
+    });
+    if (r.status === 0 && r.stdout) {
+      const files = r.stdout.split('\0').filter(Boolean);
+      if (files.length) shipped = files;
+    }
+  } catch { /* not a git checkout — fall back below */ }
+
+  // Tracked files alone leave a hole: a file authored THIS session is untracked,
+  // so it is invisible to the scan and the gate reports green — right up until
+  // it is committed, by which point the author has already seen a pass. Include
+  // untracked-but-not-ignored files so a new asset is checked while it is being
+  // written. `--exclude-standard` keeps .gitignore'd personal files out, which is
+  // what makes the git path safer than the filesystem walk below.
+  if (shipped) {
+    try {
+      const u = spawnSync('git', ['ls-files', '-z', '--others', '--exclude-standard'], {
+        cwd: PLUGIN_ROOT, encoding: 'utf8', windowsHide: true,
+      });
+      if (u.status === 0 && u.stdout) {
+        const untracked = u.stdout.split('\0').filter(Boolean);
+        if (untracked.length) shipped = [...shipped, ...untracked];
+      }
+    } catch { /* tracked-only is still a useful scan */ }
+  }
+
+  if (!shipped) {
+    const SKIP_DIRS = new Set(['node_modules', 'mockups']);
+    const walkAll = (dir, rel = '') => {
+      const acc = [];
+      for (const e of (fs.existsSync(dir) ? fs.readdirSync(dir, { withFileTypes: true }) : [])) {
+        if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue;
+        const fp = path.join(dir, e.name);
+        const r = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) acc.push(...walkAll(fp, r));
+        else acc.push(r);
+      }
+      return acc;
+    };
+    shipped = walkAll(PLUGIN_ROOT);
+  }
+
+  const offenders = [];
+  for (const rel of shipped) {
+    if (SKIP_FILES.has(rel) || !TEXT_RE.test(rel)) continue;
+    if (exportIgnored.some(p => rel === p || rel.startsWith(p + '/'))) continue;
+    let text;
+    try { text = fs.readFileSync(path.join(PLUGIN_ROOT, rel), 'utf8'); } catch { continue; }
+    text.split(/\r?\n/).forEach((line, i) => {
+      if (!OWNER_RE.test(line) || REPO_URL_RE.test(line)) return;
+      offenders.push(`${rel}:${i + 1}: ${line.trim().slice(0, 90)}`);
+    });
+  }
+
+  const label = 'no shipped asset names the author\'s businesses or repos (cp-ccsh.6)';
+  if (offenders.length === 0) { results.ownerdata.ok++; log(`  OK: ${label}`); }
+  else {
+    results.ownerdata.fail++;
+    results.ownerdata.errors.push({ test: label, offenders });
+    log(`  FAIL: ${label}`);
+    for (const o of offenders.slice(0, 20)) log(`        ${o}`);
+    if (offenders.length > 20) log(`        ...and ${offenders.length - 20} more`);
+  }
+
+  // The formula steps are the highest-stakes case, so assert them directly too:
+  // a genericized instruction must survive even if the scan above is relaxed.
+  const engagement = path.join(PLUGIN_ROOT, 'formulas', 'engagement.formula.toml');
+  const et = fs.existsSync(engagement) ? fs.readFileSync(engagement, 'utf8') : '';
+  const engLabel = 'engagement formula steps carry no owner-specific instruction';
+  if (et && !OWNER_RE.test(et)) { results.ownerdata.ok++; log(`  OK: ${engLabel}`); }
+  else { results.ownerdata.fail++; results.ownerdata.errors.push({ test: engLabel }); log(`  FAIL: ${engLabel}`); }
+}
+log(`  ${results.ownerdata.ok} passed | ${results.ownerdata.fail} failed`);
+
+// ── 14. hooks.json policy: timeouts + no `if` gating (cp-ccsh.9 / B8) ────────
+// Every hook sits in the user's critical path. With no declared timeout a hung
+// hook stalls the turn at CC's default; measured over 50 transcripts, the
+// per-prompt event had 7 timeouts and a 143s worst case. Blocking, per-turn
+// events therefore carry tight explicit budgets.
+//
+// Also guards this repo's cardinal rule: the hooks.json `if` field is
+// version-unreliable (on CC 2.1.143 an if-bearing hook NEVER fires, which
+// silently broke the task mirror; older CC ignores `if` and fires on every
+// command). Hooks must self-gate in JS instead. Nothing asserted this before.
+log('\n=== 14. hooks.json policy (timeouts + no `if`) ===');
+results.hookpolicy = { ok: 0, fail: 0, errors: [] };
+function assertPolicy(label, cond) {
+  if (cond) { results.hookpolicy.ok++; log(`  OK: ${label}`); }
+  else { results.hookpolicy.fail++; results.hookpolicy.errors.push({ test: label }); log(`  FAIL: ${label}`); }
+}
+{
+  const hjPath = path.join(PLUGIN_ROOT, 'hooks', 'hooks.json');
+  let hj = null;
+  try { hj = JSON.parse(fs.readFileSync(hjPath, 'utf8')); } catch { /* section 2 reports the parse */ }
+  const events = (hj && hj.hooks) || {};
+  const entries = [];
+  for (const [event, groups] of Object.entries(events)) {
+    for (const g of groups || []) {
+      for (const h of g.hooks || []) {
+        entries.push({
+          event, group: g, hook: h,
+          script: String((h.args && h.args[0]) || h.command || '').split('/').pop(),
+        });
+      }
+    }
+  }
+  assertPolicy('hooks.json has hook entries to check', entries.length > 0);
+
+  // Acceptance criterion: the three per-turn events must all declare a timeout.
+  const PER_TURN = new Set(['UserPromptSubmit', 'PreToolUse', 'PostToolUse']);
+  const perTurn = entries.filter(e => PER_TURN.has(e.event));
+  const perTurnMissing = perTurn.filter(e => typeof e.hook.timeout !== 'number');
+  assertPolicy(`every UserPromptSubmit/PreToolUse/PostToolUse hook declares a timeout (${perTurn.length} entries)${perTurnMissing.length ? ' — missing: ' + perTurnMissing.map(e => `${e.event}/${e.script}`).join(', ') : ''}`,
+    perTurn.length > 0 && perTurnMissing.length === 0);
+
+  // Stronger: nothing anywhere runs unbounded.
+  const anyMissing = entries.filter(e => typeof e.hook.timeout !== 'number');
+  assertPolicy(`every hook entry declares a timeout (${entries.length} entries)${anyMissing.length ? ' — missing: ' + anyMissing.map(e => `${e.event}/${e.script}`).join(', ') : ''}`,
+    anyMissing.length === 0);
+
+  // A blocking per-turn hook must stay tightly bounded — a generous timeout here
+  // defeats the point. Async entries are exempt: they never hold up the turn.
+  const loose = perTurn.filter(e => e.hook.async !== true && typeof e.hook.timeout === 'number' && e.hook.timeout > 15);
+  assertPolicy(`no blocking per-turn hook declares a timeout over 15s${loose.length ? ' — ' + loose.map(e => `${e.event}/${e.script}=${e.hook.timeout}`).join(', ') : ''}`,
+    loose.length === 0);
+
+  // Cardinal rule (cp-068): no `if` gating, anywhere.
+  const ifGated = entries.filter(e => e.hook.if !== undefined || e.group.if !== undefined);
+  assertPolicy(`no hook is gated with the version-unreliable \`if\` field (cp-068)${ifGated.length ? ' — ' + ifGated.map(e => `${e.event}/${e.script}`).join(', ') : ''}`,
+    ifGated.length === 0);
+
+  // ...and no user-facing text may CLAIM braynee uses it. The code rule held
+  // the whole time, but plugin.json, marketplace.json, README.md and the
+  // release-notes template all told users the opposite — the marketplace
+  // description and every release note since shipped the false claim. Asserting
+  // the docs against the code so the two cannot diverge again (cp-hdpr).
+  const claimFiles = ['README.md', '.claude-plugin/plugin.json',
+    '.claude-plugin/marketplace.json', '.github/workflows/braynee-release.yml'];
+  const claiming = [];
+  for (const rel of claimFiles) {
+    let text = '';
+    try { text = fs.readFileSync(path.join(PLUGIN_ROOT, rel), 'utf8'); } catch { continue; }
+    text.split(/\r?\n/).forEach((line, i) => {
+      // "hooks use the `if` field" / "uses the if field for scoping" — a claim of
+      // use, not a mention. The negations ("do not use", "no `if`") must pass.
+      if (/\b(hooks?|plugin|braynee)\b[^.\n]{0,60}\buses?\b[^.\n]{0,20}`?if`?\s+field/i.test(line)
+          && !/\b(not|never|no|zero|without)\b/i.test(line)) {
+        claiming.push(`${rel}:${i + 1}`);
+      }
+    });
+  }
+  assertPolicy(`no shipped doc claims braynee uses the \`if\` field${claiming.length ? ' — ' + claiming.join(', ') : ''}`,
+    claiming.length === 0);
+}
+log(`  ${results.hookpolicy.ok} passed | ${results.hookpolicy.fail} failed`);
+
+// ── 15. Skill/agent frontmatter: no unquoted `[` scalars ─────────────────────
+// A frontmatter value that starts with an unquoted `[` is YAML flow-sequence
+// syntax, so `argument-hint: [a | b]` loads as a one-element ARRAY, not the
+// string the field expects. Worse, a nested bracket (`[sync X [--week W]]`)
+// fails to parse outright — and per CC 2.1.186 a malformed SKILL.md loads its
+// body with EMPTY metadata rather than erroring, so the skill silently ships
+// with no name, description, or allowed-tools. skills/comms shipped that way
+// and only surfaced when `claude plugin tag` refused to tag the release.
+// Regex, not a YAML parse, to keep this pure-Node with no dependencies.
+log('\n=== 15. Skill/agent frontmatter scalars ===');
+results.fmscalars = { ok: 0, fail: 0, errors: [] };
+{
+  const mdFiles = [];
+  const walk = (d) => {
+    let entries = [];
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith('.md')) mdFiles.push(p);
+    }
+  };
+  walk(path.join(PLUGIN_ROOT, 'skills'));
+  walk(path.join(PLUGIN_ROOT, 'agents'));
+
+  const offenders = [];
+  for (const f of mdFiles) {
+    let src = '';
+    try { src = fs.readFileSync(f, 'utf8'); } catch { continue; }
+    const m = src.match(/^(﻿?---\r?\n)([\s\S]*?)(\r?\n---)/);
+    if (!m) continue;
+    m[2].split(/\r?\n/).forEach((line, i) => {
+      // key: [....  — an unquoted flow sequence where a string is meant.
+      if (/^[A-Za-z][\w-]*:[ \t]*\[/.test(line)) {
+        offenders.push(`${path.relative(PLUGIN_ROOT, f).replace(/\\/g, '/')}:${i + 2}: ${line.trim().slice(0, 80)}`);
+      }
+    });
+  }
+  const label = 'no skill/agent frontmatter value is an unquoted `[` flow sequence';
+  if (offenders.length === 0) {
+    results.fmscalars.ok++;
+    log(`  OK: ${label} (${mdFiles.length} files scanned)`);
+  } else {
+    results.fmscalars.fail++;
+    results.fmscalars.errors.push({ test: label, offenders });
+    log(`  FAIL: ${label}`);
+    for (const o of offenders.slice(0, 20)) log(`        ${o}`);
+  }
+}
+log(`  ${results.fmscalars.ok} passed | ${results.fmscalars.fail} failed`);
+
+// ── 16. One shared vault-project lookup, no flat readdir copies ──────────────
+// cp-7kfh: the folder->project-note lookup was copy-pasted into 8 hooks plus a
+// 9th flat listing, every one reading only `1. Projects/*.md`. `1. Projects/`
+// has 17 subdirectories holding 51 notes with a `folder:` field — braynee's own
+// among them — so all 51 were unfindable, sessions never closed, and
+// session-auto-track auto-created duplicate notes.
+//
+// It had been fixed ONCE before (db558b1, "subfolder resolution") and applied to
+// exactly one call site — not even the whole file, since session-auto-track kept
+// a flat read of the same directory. So this assertion counts CALL SITES, not
+// files: a file containing a correct walker tells you nothing about the flat
+// read further down it.
+log('\n=== 16. Shared vault-project lookup ===');
+results.projlookup = { ok: 0, fail: 0, errors: [] };
+{
+  const assertLookup = (label, cond, detail) => {
+    if (cond) { results.projlookup.ok++; log(`  OK: ${label}`); }
+    else {
+      results.projlookup.fail++;
+      results.projlookup.errors.push({ test: label, detail });
+      log(`  FAIL: ${label}`);
+      for (const d of (detail || []).slice(0, 20)) log(`        ${d}`);
+    }
+  };
+
+  assertLookup('lib/vault-projects.js ships',
+    fs.existsSync(path.join(PLUGIN_ROOT, 'hooks', 'lib', 'vault-projects.js')));
+
+  // Walk every hook/script and flag a readdirSync over a *vault project* dir
+  // that is not the shared walker.
+  const jsFiles = [];
+  const walkJs = (d) => {
+    let entries = [];
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walkJs(p);
+      else if (/\.(js|mjs)$/.test(e.name)) jsFiles.push(p);
+    }
+  };
+  walkJs(path.join(PLUGIN_ROOT, 'hooks'));
+  walkJs(path.join(PLUGIN_ROOT, 'scripts'));
+
+  const offenders = [];
+  for (const f of jsFiles) {
+    let src = '';
+    try { src = fs.readFileSync(f, 'utf8'); } catch { continue; }
+    if (!/1\.\s*Projects/.test(src)) continue;      // not a vault-projects consumer
+    if (f.endsWith('vault-projects.js')) continue;  // the shared walker itself
+    const lines = src.split(/\r?\n/);
+    lines.forEach((line, i) => {
+      const m = line.match(/readdirSync\(\s*([A-Za-z_$][\w$]*)\s*\)/);
+      if (!m) return;
+      if (!/^projects?dir$/i.test(m[1])) return;
+      // Vault project notes are .md. A read filtered to another extension is a
+      // different directory entirely — hooks/session-export-qmd.js reads
+      // CLAUDE_PROJECTS_DIR (~/.claude/projects) for .jsonl transcripts, where a
+      // flat read is correct. Keyed on the filter rather than an allowlist so a
+      // genuinely new offender in that same file would still be caught.
+      const window = lines.slice(i, i + 3).join(' ');
+      if (!/\.md['"`]/.test(window)) return;
+      offenders.push(`${path.relative(PLUGIN_ROOT, f).replace(/\\/g, '/')}:${i + 1}: ${line.trim().slice(0, 70)}`);
+    });
+
+    // Second shape (cp-3hc5). The matcher above only sees a bare
+    // `readdirSync(projectsDir)`. It cannot see a GENERIC walker told not to
+    // recurse — `findMarkdownFiles(FOLDERS.projects, false)` — because the read
+    // itself lives inside the helper, where it is perfectly correct. That shape
+    // is what kept scripts/vault-query.mjs broken through all of cp-7kfh, so
+    // match any call whose first argument names the projects folder and whose
+    // second argument is an explicit falsy recursion flag.
+    lines.forEach((line, i) => {
+      const m = line.match(/\(\s*([A-Za-z_$][\w$.]*projects[\w$.]*)\s*,\s*(?:false|0)\s*\)/i);
+      if (!m) return;
+      offenders.push(`${path.relative(PLUGIN_ROOT, f).replace(/\\/g, '/')}:${i + 1}: non-recursive projects read: ${line.trim().slice(0, 60)}`);
+    });
+  }
+  assertLookup('no flat readdirSync over a vault project dir remains (count call sites, not files)',
+    offenders.length === 0, offenders);
+
+  // Every consumer must actually route through the shared module.
+  const consumers = ['hooks/beads-status-sync.js', 'hooks/lib/session-close.js',
+    'hooks/post-compact.js', 'hooks/pre-compact-snapshot.js', 'hooks/session-auto-close.js',
+    'hooks/session-note-nudge.js', 'hooks/session-stop-check.js', 'hooks/statusline-state.js',
+    'hooks/session-auto-track.js'];
+  const notWired = consumers.filter(rel => {
+    let src = '';
+    try { src = fs.readFileSync(path.join(PLUGIN_ROOT, rel), 'utf8'); } catch { return true; }
+    return !src.includes('vault-projects.js');
+  });
+  assertLookup(`all ${consumers.length} lookup consumers require the shared module`,
+    notWired.length === 0, notWired);
+
+  // Requiring the module proves nothing (cp-3hc5). session-auto-track.js
+  // required vault-projects.js for listProjectNotes while keeping its own
+  // findProjectName — so the includes() check above passed for a full release
+  // while a tenth copy sat in the tree. A consumer may still DEFINE
+  // findProjectName as a thin wrapper, but it has to delegate.
+  // A thin wrapper is fine, so resolve the alias the file actually imported
+  // (`findProjectName: lookupProjectName`) rather than hardcoding one name —
+  // hardcoding flagged all eight legitimate wrappers on the first run.
+  const ownsACopy = consumers.filter(rel => {
+    let src = '';
+    try { src = fs.readFileSync(path.join(PLUGIN_ROOT, rel), 'utf8'); } catch { return false; }
+    if (!/^\s*function\s+findProjectName\s*\(/m.test(src)) return false;
+    const alias = src.match(/findProjectName\s*:\s*([A-Za-z_$][\w$]*)/);
+    return !alias || !new RegExp(`\\b${alias[1]}\\s*\\(`).test(src);
+  });
+  assertLookup('no consumer defines its own findProjectName without delegating',
+    ownsACopy.length === 0, ownsACopy);
+
+  // Behavior, not just wiring: a nested note must resolve.
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'braynee-projfix-'));
+  try {
+    const np = path.join(fixture, '1. Projects', 'Nested');
+    fs.mkdirSync(np, { recursive: true });
+    fs.writeFileSync(path.join(np, 'Nested.md'), '---\nname: "Nested Project"\nfolder: "nested-repo"\n---\n');
+    const { findProjectName } = require(path.join(PLUGIN_ROOT, 'hooks', 'lib', 'vault-projects.js'));
+    assertLookup('a note nested in a project subfolder resolves',
+      findProjectName('nested-repo', fixture) === 'Nested Project');
+  } finally {
+    try { fs.rmSync(fixture, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+
+  // End-to-end through the entry point that actually regressed (cp-3hc5).
+  // The in-process check above exercises hooks/lib/vault-projects.js, which
+  // says nothing about scripts/vault-query.mjs — it has its own walker, and it
+  // was still flat for the whole of cp-7kfh, printing "No project note found"
+  // on every SessionStart. Assert the user-visible output, not the wiring:
+  // this stays true whether the code walks, flags, or imports.
+  const vqFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'braynee-vqfix-'));
+  try {
+    const deep = path.join(vqFixture, '1. Projects', 'Group', 'Deep Project');
+    fs.mkdirSync(deep, { recursive: true });
+    fs.writeFileSync(path.join(deep, 'Deep Project.md'),
+      '---\nname: "Deep Project"\nstatus: active\n---\n\n## Goal\nfixture\n');
+    const r = spawnSync(process.execPath,
+      [path.join(PLUGIN_ROOT, 'scripts', 'vault-query.mjs'), 'context', 'Deep Project'],
+      { encoding: 'utf8', timeout: 15_000, env: { ...process.env, BRAYNEE_VAULT: vqFixture } });
+    const out = `${r.stdout || ''}${r.stderr || ''}`;
+    assertLookup('vault-query context resolves a note two levels deep',
+      /──\s*PROJECT/.test(out) && !/No project note found/.test(out),
+      [out.replace(/\s+/g, ' ').slice(0, 200)]);
+  } finally {
+    try { fs.rmSync(vqFixture, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+log(`  ${results.projlookup.ok} passed | ${results.projlookup.fail} failed`);
+
+// ── 17. Hook CLI timeouts fit inside the hook's own budget (cp-szoa) ──────────
+// A hook gets ONE timeout from hooks.json, but these hooks shell out to bd/mtn/
+// git several times, each with its own generous per-call cap. When the caps
+// exceed the hook's allowance, Claude Code kills the hook mid-run and it emits
+// NOTHING — no error, no partial output, just a dead process. That is how
+// stop-task-verify (3 x 8s against 15s) and beads-gate-check (2 x 30s against
+// 15s) shipped broken, and it is invisible to every other section here because
+// the hooks exit 0 in the smoke run when the CLIs happen to be warm.
+//
+// Two shapes are acceptable, and this asserts whichever the hook chose:
+//   - hooks using lib/time-budget.js clamp every call, so only their BUDGET_MS
+//     needs to fit inside the hooks.json timeout;
+//   - every other hook must have each individual call cap fit.
+log('\n=== 17. Hook CLI timeouts vs hooks.json budget ===');
+results.budgets = { ok: 0, fail: 0, errors: [] };
+{
+  const assertBudget = (label, cond, detail) => {
+    if (cond) { results.budgets.ok++; log(`  OK: ${label}`); }
+    else {
+      results.budgets.fail++;
+      results.budgets.errors.push({ test: label, detail });
+      log(`  FAIL: ${label}`);
+      for (const d of (detail || []).slice(0, 20)) log(`        ${d}`);
+    }
+  };
+
+  // hook filename -> smallest hooks.json timeout it is registered with
+  const budgetFor = {};
+  (function walk(node) {
+    if (Array.isArray(node)) return node.forEach(walk);
+    if (node && typeof node === 'object') {
+      if (Array.isArray(node.args) && node.timeout) {
+        const m = String(node.args[0]).match(/hooks\/([\w.-]+\.js)/);
+        if (m) budgetFor[m[1]] = Math.min(budgetFor[m[1]] ?? Infinity, node.timeout);
+      }
+      Object.values(node).forEach(walk);
+    }
+  })(JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8')));
+
+  const offenders = [];
+  let checked = 0;
+  for (const [file, secs] of Object.entries(budgetFor)) {
+    let src = '';
+    try { src = fs.readFileSync(path.join(PLUGIN_ROOT, 'hooks', file), 'utf8'); } catch { continue; }
+    const budgetMs = secs * 1000;
+    checked++;
+
+    if (src.includes('time-budget.js')) {
+      // Budgeted: every call is clamped, so only the budget itself must fit.
+      for (const m of src.matchAll(/BUDGET_MS\s*=\s*([0-9_]+)/g)) {
+        const declared = parseInt(m[1].replace(/_/g, ''), 10);
+        if (declared >= budgetMs) {
+          offenders.push(`${file}: BUDGET_MS ${declared}ms >= hooks.json ${budgetMs}ms`);
+        }
+      }
+      continue;
+    }
+
+    // Unbudgeted: each individual per-call cap must fit on its own. Sub-second
+    // values are not CLI caps (debounce/poll intervals), so ignore those.
+    for (const m of src.matchAll(/timeout:\s*([0-9_]+)/g)) {
+      const ms = parseInt(m[1].replace(/_/g, ''), 10);
+      if (ms >= 1000 && ms > budgetMs) {
+        offenders.push(`${file}: a single call allows ${ms}ms but the hook only gets ${budgetMs}ms`);
+      }
+    }
+  }
+
+  assertBudget(`no hook allows a CLI call more time than the hook itself gets (${checked} hooks checked)`,
+    offenders.length === 0, offenders);
+  assertBudget('the timeout scan actually found hooks to check', checked >= 10, [`checked=${checked}`]);
+}
+log(`  ${results.budgets.ok} passed | ${results.budgets.fail} failed`);
+
+// ── 18. qmd-wrapper zero-result diagnosis (cp-ee67) ──────────────────────────
+// `qmd search` is AND-based and its query tokenizer cannot match some dotted
+// terms (`llms.txt`, `hooks.json`) that ARE present in indexed notes — so a good
+// query silently returns nothing and an agent concludes the knowledge is absent.
+// The QMD hook mandates this search every turn, so a silent zero is expensive.
+//
+// The live behavior needs a populated qmd index, which CI does not have, so this
+// asserts wiring + the one regression that actually bit during implementation,
+// and upgrades to a real behavioral check when an index is present.
+log('\n=== 18. qmd-wrapper zero-result diagnosis ===');
+results.qmdwrap = { ok: 0, fail: 0, errors: [] };
+{
+  const assertQ = (label, cond, detail) => {
+    if (cond) { results.qmdwrap.ok++; log(`  OK: ${label}`); }
+    else {
+      results.qmdwrap.fail++;
+      results.qmdwrap.errors.push({ test: label, detail });
+      log(`  FAIL: ${label}`);
+      for (const d of (detail || []).slice(0, 6)) log(`        ${d}`);
+    }
+  };
+
+  const wrapPath = path.join(PLUGIN_ROOT, 'scripts', 'qmd-wrapper.mjs');
+  let src = '';
+  try { src = fs.readFileSync(wrapPath, 'utf8'); } catch { /* asserted below */ }
+
+  assertQ('qmd-wrapper.mjs ships', src.length > 0);
+  assertQ('a zero-result search is diagnosed rather than passed through bare',
+    /diagnoseZeroResults/.test(src) && /args\[0\] === 'search' && !hasHits\(/.test(src));
+
+  // The regression that actually happened: counting hits by the `Path:` line,
+  // which annotate() ADDS. A raw qmd probe never has it, so every retry read as
+  // zero hits and the whole diagnosis silently no-oped.
+  assertQ('hit counting keys on qmd\'s own marker, not the annotated Path: line',
+    /match\(\/qmd:\\\/\\\//.test(src) && !/match\(\/\^Path:\/gm\)/.test(src));
+
+  assertQ('dotted terms are retried space-split before giving up',
+    /isDotted/.test(src) && /replace\(\/\\\.\/g, ' '\)/.test(src));
+
+  // Live check — only meaningful with a populated index.
+  const probe = spawnSync(process.execPath, [wrapPath, 'search', 'hooks.json'], {
+    encoding: 'utf8', timeout: 90_000, windowsHide: true,
+  });
+  const out = `${probe.stdout || ''}`;
+  const haveIndex = /qmd:\/\//.test(out) || /No results found/.test(out);
+  if (!haveIndex) {
+    log('  SKIP: live dotted-term probe (no qmd index available here)');
+  } else {
+    assertQ('a dotted term either finds hits or explains why it found none',
+      /qmd:\/\//.test(out) || /\[qmd-wrapper\]/.test(out),
+      [out.replace(/\s+/g, ' ').slice(0, 180)]);
+  }
+}
+log(`  ${results.qmdwrap.ok} passed | ${results.qmdwrap.fail} failed`);
+
+// ── 19. main-branch guard: the opt-out must actually be reachable (cp-ar0c) ───
+// The guard documents BRAYNEE_ALLOW_MAIN_COMMITS / _PUSH, but a PreToolUse hook
+// reads its OWN environment, which no in-session `export` or inline `VAR=1`
+// prefix can reach — the hook has run and exited before any shell applies them.
+// That made the documented hatch settable only from a shell profile before CC
+// launched, and hard-blocked repos that ship direct-to-main by design.
+//
+// Behavioral, not a source scan: run the real hook against two throwaway repos
+// that differ ONLY by the git config, and assert both directions. A test that
+// only checked the allow path would pass just as well with the guard removed.
+log('\n=== 19. main-branch guard opt-out (cp-ar0c) ===');
+results.mainguard = { ok: 0, fail: 0, errors: [] };
+{
+  const assertG = (label, cond, detail) => {
+    if (cond) { results.mainguard.ok++; log(`  OK: ${label}`); }
+    else {
+      results.mainguard.fail++;
+      results.mainguard.errors.push({ test: label, detail });
+      log(`  FAIL: ${label}${detail ? ` — ${detail}` : ''}`);
+    }
+  };
+
+  const hook = path.join(PLUGIN_ROOT, 'hooks', 'check-no-main-push.js');
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'ar0c-'));
+  try {
+    const repo = path.join(sandbox, 'repo');
+    fs.mkdirSync(repo, { recursive: true });
+    const git = (...args) =>
+      spawnSync('git', args, { cwd: repo, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    git('init', '-q', '.');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'selftest');
+    git('commit', '-q', '--allow-empty', '-m', 'init');
+
+    // The guard keys off the CURRENT branch, so make sure we are on one it
+    // protects regardless of the machine's init.defaultBranch.
+    git('checkout', '-q', '-B', 'main');
+
+    const fire = (command) => {
+      const r = spawnSync(process.execPath, [hook], {
+        input: JSON.stringify({ tool_input: { command }, cwd: repo }),
+        encoding: 'utf8',
+        timeout: 20000,
+        windowsHide: true,
+        // Explicitly cleared: an operator who exported these before launching
+        // the self-test would otherwise make the BLOCK assertions pass vacuously.
+        env: {
+          ...process.env,
+          BRAYNEE_ALLOW_MAIN_COMMITS: '',
+          BRAYNEE_ALLOW_MAIN_PUSH: '',
+        },
+      });
+      return r.status;
+    };
+
+    assertG('a commit on main is blocked with no opt-out', fire('git commit -m x') === 2);
+    assertG('a push from main is blocked with no opt-out', fire('git push') === 2);
+    assertG('an explicit push to main is blocked with no opt-out',
+            fire('git push origin main') === 2);
+
+    // cp-fznk: compound commands. Every one of these was ALLOWED by the shipped
+    // 2.1.21 hook, because the guards anchored at the start of the whole string
+    // and `git` merely had to not be the first word. `cd . && git push origin
+    // main` defeating the headline guard is the case that matters.
+    assertG('`cd . && git commit` is blocked (was a bypass)',
+            fire('cd . && git commit -m x') === 2);
+    assertG('`true; git commit` is blocked (was a bypass)',
+            fire('true; git commit -m x') === 2);
+    assertG('`cd . && git push origin main` is blocked (was a bypass)',
+            fire('cd . && git push origin main') === 2);
+    assertG('`cd . && git checkout --orphan main` is blocked (was a bypass)',
+            fire('cd . && git checkout --orphan main') === 2);
+
+    // The in-session forms the message used to advertise. Both must STILL be
+    // blocked: the env prefix never reaches the hook, so honoring it would mean
+    // the hook is trusting command TEXT as a permission grant.
+    assertG('`export VAR=1 && git commit` does not defeat the guard',
+            fire('export BRAYNEE_ALLOW_MAIN_COMMITS=1 && git commit -m x') === 2);
+    assertG('an inline `VAR=1 git commit` prefix does not defeat the guard',
+            fire('BRAYNEE_ALLOW_MAIN_COMMITS=1 git commit -m x') === 2);
+
+    // The other direction. Segment matching must not turn into a substring
+    // search: a guard that blocks a command merely MENTIONING git is one that
+    // gets switched off, which costs more than the hole it closes.
+    assertG('a command that only quotes a git command is allowed',
+            fire('echo "git push origin main"') === 0);
+    assertG('an unrelated command is allowed', fire('ls -la') === 0);
+    assertG('a commit MESSAGE mentioning the phrase is allowed on a feature branch',
+            (() => { git('checkout', '-q', '-B', 'feature/x');
+                     const s = fire('git commit -m "document git push origin main"');
+                     git('checkout', '-q', '-B', 'main');
+                     return s === 0; })());
+
+    git('config', '--local', 'braynee.allow-main-commits', 'true');
+    assertG('the per-repo commit opt-out allows a commit on main',
+            fire('git commit -m x') === 0);
+    assertG('...and does NOT also unlock the push guard',
+            fire('git push origin main') === 2);
+
+    git('config', '--local', 'braynee.allow-main-push', 'true');
+    assertG('the per-repo push opt-out allows a push from main', fire('git push') === 0);
+
+    // A neighbouring repo must be unaffected — .git/config is per-repo, which is
+    // the whole reason it was chosen over an exported variable.
+    const other = path.join(sandbox, 'other');
+    fs.mkdirSync(other, { recursive: true });
+    const git2 = (...args) =>
+      spawnSync('git', args, { cwd: other, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    git2('init', '-q', '.');
+    git2('config', 'user.email', 'selftest@example.invalid');
+    git2('config', 'user.name', 'selftest');
+    // An empty repo has no resolvable HEAD, so the commit guard would fall into
+    // its "not a git repo" path and allow — passing this assertion for the wrong
+    // reason. The repo needs a real commit to be a valid control.
+    git2('commit', '-q', '--allow-empty', '-m', 'init');
+    git2('checkout', '-q', '-B', 'main');
+    const rOther = spawnSync(process.execPath, [hook], {
+      input: JSON.stringify({ tool_input: { command: 'git commit -m x' }, cwd: other }),
+      encoding: 'utf8', timeout: 20000, windowsHide: true,
+      env: { ...process.env, BRAYNEE_ALLOW_MAIN_COMMITS: '', BRAYNEE_ALLOW_MAIN_PUSH: '' },
+    });
+    assertG('the opt-out does not leak to a different repo', rOther.status === 2);
+  } catch (e) {
+    assertG('main-guard sandbox ran', false, e && e.message);
+  } finally {
+    rmSandbox(sandbox);
+  }
+}
+log(`  ${results.mainguard.ok} passed | ${results.mainguard.fail} failed`);
+
+// ── 20. version-bump gate: warn mid-batch, fail on release (cp-0gs2) ─────────
+// The gate used to FAIL on any unreleased shipping change, which contradicted the
+// batched-release rule (commits accumulate; ONE release per batch). Main was red
+// by design between releases, so a REAL failure had nowhere to show.
+//
+// Behavioral, against throwaway repos: the four states differ only by context, so
+// asserting them any other way would just restate the implementation.
+log('\n=== 20. version-bump gate modes (cp-0gs2) ===');
+results.versiongate = { ok: 0, fail: 0, errors: [] };
+{
+  const assertV = (label, cond, detail) => {
+    if (cond) { results.versiongate.ok++; log(`  OK: ${label}`); }
+    else {
+      results.versiongate.fail++;
+      results.versiongate.errors.push({ test: label, detail });
+      log(`  FAIL: ${label}${detail ? ` — ${detail}` : ''}`);
+    }
+  };
+
+  const script = path.join(PLUGIN_ROOT, 'scripts', 'check-version-bump.mjs');
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'cp0gs2-'));
+  try {
+    const repo = path.join(sandbox, 'repo');
+    fs.mkdirSync(path.join(repo, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(repo, 'hooks'), { recursive: true });
+
+    const git = (...args) => spawnSync('git', args, {
+      cwd: repo, encoding: 'utf8', windowsHide: true, timeout: 20000,
+      // A backdated tag needs both dates; set them per-call where needed.
+      env: { ...process.env, GIT_AUTHOR_NAME: 'selftest', GIT_AUTHOR_EMAIL: 's@e.invalid',
+             GIT_COMMITTER_NAME: 'selftest', GIT_COMMITTER_EMAIL: 's@e.invalid' },
+    });
+    const setVersion = (v) =>
+      fs.writeFileSync(path.join(repo, '.claude-plugin', 'plugin.json'),
+        JSON.stringify({ name: 'braynee', version: v }, null, 2) + '\n');
+
+    git('init', '-q', '.');
+    git('config', 'user.email', 's@e.invalid');
+    git('config', 'user.name', 'selftest');
+    setVersion('1.0.0');
+    git('add', '-A'); git('commit', '-q', '-m', 'release 1.0.0');
+    git('tag', 'braynee--v1.0.0');
+
+    const run = (...extra) => {
+      const r = spawnSync(process.execPath, [script, ...extra], {
+        cwd: repo, encoding: 'utf8', windowsHide: true, timeout: 30000,
+      });
+      return { status: r.status, out: (r.stdout || '') + (r.stderr || '') };
+    };
+
+    // 1. No shipping changes since the tag — clean either way.
+    assertV('a clean tree passes', run().status === 0);
+    assertV('...and passes on the release path too', run('--strict').status === 0);
+
+    // 2. Unreleased shipping change, still on the old version.
+    fs.writeFileSync(path.join(repo, 'hooks', 'x.js'), '// shipped change\n');
+    git('add', '-A'); git('commit', '-q', '-m', 'phase-1 fix');
+
+    const warn = run();
+    assertV('an unreleased batch does NOT fail on main', warn.status === 0, warn.out.slice(0, 160));
+    assertV('...and says so, rather than passing silently',
+            /unreleased batch/i.test(warn.out), warn.out.slice(0, 160));
+    assertV('...naming the file that is unreleased',
+            /hooks\/x\.js/.test(warn.out), warn.out.slice(0, 160));
+
+    const strict = run('--strict');
+    assertV('the same tree FAILS on the release path', strict.status === 1, strict.out.slice(0, 160));
+
+    // 3. Tagging a release WITHOUT bumping the version must fail.
+    //    This is the case that exposed a vacuous gate: the baseline used to be
+    //    "newest tag", which at release time is HEAD's own tag, so the gate
+    //    diffed HEAD against itself, saw nothing, and passed unconditionally.
+    //    The baseline now skips tags on HEAD, so the comparison is against the
+    //    PREVIOUS release and the missing bump is caught.
+    git('tag', 'braynee--v1.0.1');   // tagged, but plugin.json still says 1.0.0
+    const taggedNoBump = run();
+    assertV('tagging a release without bumping the version FAILS, no flag needed',
+            taggedNoBump.status === 1, taggedNoBump.out.slice(0, 200));
+    assertV('...and the baseline is the PREVIOUS release, not HEAD itself',
+            /braynee--v1\.0\.0/.test(taggedNoBump.out), taggedNoBump.out.slice(0, 200));
+    git('tag', '-d', 'braynee--v1.0.1');
+
+    // 4. Bumping the version clears it everywhere.
+    setVersion('1.0.1');
+    git('add', '-A'); git('commit', '-q', '-m', 'bump');
+    assertV('a bumped version passes on main', run().status === 0);
+    assertV('a bumped version passes on the release path', run('--strict').status === 0);
+
+    // 5. Staleness escalation — the cp-e2s protection the warn mode must not lose.
+    //    A batch left unreleased past the limit fails even on main.
+    const repo2 = path.join(sandbox, 'stale');
+    fs.mkdirSync(path.join(repo2, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(repo2, 'hooks'), { recursive: true });
+    const OLD = '2020-01-01T00:00:00';
+    const git2 = (...args) => spawnSync('git', args, {
+      cwd: repo2, encoding: 'utf8', windowsHide: true, timeout: 20000,
+      env: { ...process.env, GIT_AUTHOR_NAME: 'selftest', GIT_AUTHOR_EMAIL: 's@e.invalid',
+             GIT_COMMITTER_NAME: 'selftest', GIT_COMMITTER_EMAIL: 's@e.invalid',
+             GIT_AUTHOR_DATE: OLD, GIT_COMMITTER_DATE: OLD },
+    });
+    fs.writeFileSync(path.join(repo2, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'braynee', version: '1.0.0' }, null, 2) + '\n');
+    git2('init', '-q', '.');
+    git2('config', 'user.email', 's@e.invalid');
+    git2('config', 'user.name', 'selftest');
+    git2('add', '-A'); git2('commit', '-q', '-m', 'ancient release');
+    git2('tag', 'braynee--v1.0.0');
+    fs.writeFileSync(path.join(repo2, 'hooks', 'y.js'), '// long-unreleased\n');
+    git2('add', '-A'); git2('commit', '-q', '-m', 'unreleased for years');
+
+    const runStale = (...extra) => spawnSync(process.execPath, [script, ...extra], {
+      cwd: repo2, encoding: 'utf8', windowsHide: true, timeout: 30000,
+    });
+    const aged = runStale();
+    assertV('a batch unreleased past the age limit FAILS even on main',
+            aged.status === 1, ((aged.stdout || '') + (aged.stderr || '')).slice(0, 200));
+    assertV('...and explains it is an age escalation, not a normal bump demand',
+            /unreleased for \d+ days/i.test((aged.stdout || '') + (aged.stderr || '')));
+    assertV('--max-age-days 0 disables the escalation',
+            runStale('--max-age-days', '0').status === 0);
+  } catch (e) {
+    assertV('version-gate sandbox ran', false, e && e.message);
+  } finally {
+    rmSandbox(sandbox);
+  }
+}
+log(`  ${results.versiongate.ok} passed | ${results.versiongate.fail} failed`);
+
+// ── 21. vault-search-guard: block searches, allow precise reads (cp-0oqe) ────
+// The guard is correct to exist — a no-path Glob/Grep follows the shell cwd and
+// can silently search the wrong tree. But it gated on the WORDS grep/find
+// appearing anywhere near a vault path, so it also blocked:
+//   • a read-only `node` script merely containing a `.find(` call (\bfind\b
+//     matches inside `.find(`, so a word boundary is not enough)
+//   • `git log --diff-filter=D … | grep` for a DELETED note's content, which QMD
+//     structurally cannot answer — it indexes the working tree only
+//   • filing the bug report about the guard, because the report quotes the command
+// A guard that fires on correct usage teaches the override as a reflex, which
+// erodes it for the cases that matter. Both directions are asserted here.
+log('\n=== 21. vault-search-guard precision (cp-0oqe) ===');
+results.vaultguard = { ok: 0, fail: 0, errors: [] };
+{
+  const assertG = (label, cond, detail) => {
+    if (cond) { results.vaultguard.ok++; log(`  OK: ${label}`); }
+    else {
+      results.vaultguard.fail++;
+      results.vaultguard.errors.push({ test: label, detail });
+      log(`  FAIL: ${label}${detail ? ` — ${detail}` : ''}`);
+    }
+  };
+
+  const hook = path.join(PLUGIN_ROOT, 'hooks', 'vault-search-guard.js');
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'cp0oqe-'));
+  try {
+    // A throwaway vault so the real one is never touched, and a code repo cwd.
+    const vault = path.join(sandbox, 'vault');
+    for (const d of ['1. Projects', '2. Areas', '3. Resources', '4. Archives']) {
+      fs.mkdirSync(path.join(vault, d), { recursive: true });
+    }
+    const repo = path.join(sandbox, 'code', 'proj');
+    fs.mkdirSync(path.join(repo, 'src'), { recursive: true });
+    const home = path.join(sandbox, 'home');
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+
+    const fire = (command, cwd = repo) => {
+      const r = spawnSync(process.execPath, [hook], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd }),
+        encoding: 'utf8', timeout: 20000, windowsHide: true,
+        env: { ...process.env, BRAYNEE_VAULT: vault, HOME: home, USERPROFILE: home,
+               BRAYNEE_ALLOW_VAULT_GREP: '' },
+      });
+      return r.status;
+    };
+    const V = vault.replace(/\\/g, '/');
+
+    // ── still blocked: real filesystem searches of the vault ────────────────
+    assertG('grep -r into the vault is blocked', fire(`grep -r pattern "${V}"`) === 2);
+    assertG('find over the vault is blocked', fire(`find "${V}" -name "*.md"`) === 2);
+    assertG('rg into the vault is blocked', fire(`rg pattern "${V}"`) === 2);
+    assertG('a relative path escaping into the vault is blocked',
+            fire('grep -r x ../../vault') === 2);
+    assertG('a no-path grep while cwd IS the vault is blocked',
+            fire('grep -rn TODO', vault) === 2);
+
+    // ── no longer blocked: the false positives ──────────────────────────────
+    // The exact shape that failed: a precise read of ONE known file, in a script
+    // that happens to contain a .find( call.
+    assertG('a node script containing .find( plus a vault path is ALLOWED',
+            fire(`node -e "const m=t.split(/\\n/).find(l=>re.test(l)); read('${V}/note.md')"`) === 0);
+    // QMD indexes the working tree, so deleted content has no compliant path.
+    assertG('git-history search for a DELETED note is ALLOWED',
+            fire(`git -C "${V}" log --all --diff-filter=D --name-only | grep old-note`) === 0);
+    assertG('a command that merely MENTIONS grep and the vault is ALLOWED',
+            fire(`echo "do not grep ${V} directly"`) === 0);
+    // Filing the bug report about the guard must not be blocked by the guard.
+    assertG('quoting a blocked command inside another command is ALLOWED',
+            fire(`bd create --title="grep -r x ${V} is blocked"`) === 0);
+
+    // ── code work is untouched ──────────────────────────────────────────────
+    assertG('grep in a code repo is allowed', fire('grep -rn TODO ./src') === 0);
+    assertG('find in a code repo is allowed', fire('find ./src -name "*.js"') === 0);
+    assertG('a qmd stdout filter is allowed', fire('qmd search foo | grep -v bar') === 0);
+
+    // ── the override must be usable IN-session (it was not) ─────────────────
+    // The env var is read from the hook's own process, so no `export …&&` or
+    // inline `VAR=1` prefix can reach it — the hook has already run.
+    assertG('an in-command export does NOT defeat the guard',
+            fire(`export BRAYNEE_ALLOW_VAULT_GREP=1 && grep -r x "${V}"`) === 2);
+    const ticket = path.join(home, '.claude', 'braynee-allow-vault-grep');
+    fs.writeFileSync(ticket, '');
+    assertG('a fresh override ticket allows the search', fire(`grep -r x "${V}"`) === 0);
+    // Time-limited: an override that stays on is how a guard stops guarding.
+    const old = Date.now() - 10 * 60 * 1000;
+    fs.utimesSync(ticket, new Date(old), new Date(old));
+    assertG('an expired ticket does NOT allow the search', fire(`grep -r x "${V}"`) === 2);
+    fs.rmSync(ticket);
+    assertG('with the ticket gone the guard is back on', fire(`grep -r x "${V}"`) === 2);
+  } catch (e) {
+    assertG('vault-guard sandbox ran', false, e && e.message);
+  } finally {
+    rmSandbox(sandbox);
+  }
+}
+log(`  ${results.vaultguard.ok} passed | ${results.vaultguard.fail} failed`);
+
+// ── 22. commit/PR format guard: block form, warn on judgement (cp-lj73.2) ────
+// This guard BLOCKS commits, so the cost of a wrong verdict is asymmetric: a
+// missed bad commit is a style nit, a blocked GOOD commit is an obstacle that
+// gets the guard turned off permanently (the cp-0oqe failure mode). So the
+// allow-path assertions below matter more than the block-path ones, and both
+// are driven through the real hook over stdin rather than unit-testing regexes.
+//
+// The escape hatch is asserted the same way as cp-ar0c: it must be reachable
+// from INSIDE a session (git config), and the in-command `export` form must
+// still fail, because a PreToolUse hook cannot see an env var set by the very
+// command it is checking.
+log('\n=== 22. commit/PR format guard (cp-lj73.2) ===');
+results.commitformat = { ok: 0, fail: 0, errors: [] };
+{
+  const assertG = (label, cond, detail) => {
+    if (cond) { results.commitformat.ok++; log(`  OK: ${label}`); }
+    else {
+      results.commitformat.fail++;
+      results.commitformat.errors.push({ test: label, detail });
+      log(`  FAIL: ${label}${detail ? ` — ${detail}` : ''}`);
+    }
+  };
+
+  const hook = path.join(PLUGIN_ROOT, 'hooks', 'commit-format-check.js');
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'lj732-'));
+  try {
+    const repo = path.join(sandbox, 'repo');
+    fs.mkdirSync(repo, { recursive: true });
+    const git = (...args) =>
+      spawnSync('git', args, { cwd: repo, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    git('init', '-q', '.');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'selftest');
+    fs.writeFileSync(path.join(repo, 'README.md'), 'base\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'init');
+    git('checkout', '-q', '-B', 'main');
+
+    const fire = (command, cwd = repo) => {
+      const r = spawnSync(process.execPath, [hook], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd }),
+        encoding: 'utf8', timeout: 20000, windowsHide: true,
+        // Cleared explicitly: an operator who exported this before launching the
+        // self-test would otherwise make every BLOCK assertion pass vacuously.
+        env: { ...process.env, BRAYNEE_ALLOW_FREEFORM_COMMITS: '' },
+      });
+      return { status: r.status, out: r.stdout || '', err: r.stderr || '' };
+    };
+    const ctx = (command) => {
+      const r = fire(command);
+      if (r.status !== 0 || !r.out.trim()) return '';
+      try { return JSON.parse(r.out).hookSpecificOutput.additionalContext || ''; }
+      catch { return ''; }
+    };
+
+    // ── BLOCK: the subject is not Conventional Commits form ─────────────────
+    assertG('a bare sentence subject is blocked',
+            fire('git commit -m "added the login page"').status === 2);
+    assertG('a missing colon is blocked',
+            fire('git commit -m "feat add login"').status === 2);
+    assertG('an invented type is blocked',
+            fire('git commit -m "feature: add login"').status === 2);
+    assertG('a PR title in prose is blocked',
+            fire('gh pr create --title "My changes" --body x').status === 2);
+    // cp-fznk: the compound form that defeated the main-branch guard entirely.
+    assertG('`cd . && git commit` is still checked (was the cp-fznk bypass)',
+            fire('cd . && git commit -m "some stuff"').status === 2);
+    assertG('`true; git commit` is still checked',
+            fire('true; git commit -m "some stuff"').status === 2);
+
+    // The block message must be actionable on its own: name the required form
+    // and where the full rule is, or the agent is left guessing.
+    {
+      const e = fire('git commit -m "added the login page"').err;
+      assertG('the block names the required form', /type\(scope\).*summary/.test(e), e.slice(0, 120));
+      assertG('the block cites the installed rule',
+              /rules\/commit-pr-conventions\.md/.test(e), e.slice(0, 200));
+      assertG('the block names the opt-out', /allow-freeform-commits/.test(e), e.slice(0, 200));
+    }
+
+    // ── ALLOW: conforming, or unreadable and therefore unjudgeable ──────────
+    assertG('a conventional subject passes', fire('git commit -m "feat: add login"').status === 0);
+    assertG('a scoped conventional subject passes',
+            fire('git commit -m "fix(hooks): stop the crash"').status === 0);
+    // The message form Claude Code documents. A segment-only read truncates the
+    // subject to `"$(cat` and would block this valid commit.
+    assertG('a heredoc commit message passes',
+            fire('git commit -m "$(cat <<\'EOF\'\nfeat(hooks): add the guard\n\nBody; with | punctuation.\nEOF\n)"').status === 0);
+    // Nothing on the command line to judge — guessing would block valid work.
+    assertG('an editor commit passes', fire('git commit').status === 0);
+    assertG('--amend --no-edit passes', fire('git commit --amend --no-edit').status === 0);
+    assertG('-F message-from-file passes', fire('git commit -F msg.txt').status === 0);
+    assertG('--fixup passes', fire('git commit --fixup HEAD').status === 0);
+    assertG('gh pr create --fill passes', fire('gh pr create --fill').status === 0);
+    // Mentioning a command is not running it (the cp-0oqe lesson).
+    assertG('echoing a bad commit message is allowed',
+            fire('echo "git commit -m added stuff"').status === 0);
+    assertG('filing an issue that quotes a bad message is allowed',
+            fire('bd create --title="git commit -m added stuff is blocked"').status === 0);
+    // The decoy case: an earlier quoted -m must not be judged as THIS message.
+    assertG('a quoted decoy -m does not block the real commit',
+            fire('echo "git commit -m \'oops\'" && git commit -m "feat: real subject"').status === 0);
+    assertG('a non-git command is ignored', fire('npm test').status === 0);
+
+    // ── WARN: judgement calls report but never block ────────────────────────
+    assertG('past tense warns without blocking',
+            /imperative/.test(ctx('git commit -m "feat: added the login page"')));
+    {
+      const long = 'feat(hooks): ' + 'x'.repeat(70);
+      assertG('an over-long subject warns without blocking', /50/.test(ctx(`git commit -m "${long}"`)));
+    }
+    assertG('wip noise warns without blocking', /noise/.test(ctx('git commit -m "chore: wip"')));
+    assertG('a clean conventional commit emits NOTHING',
+            ctx('git commit -m "feat: add login"') === '');
+
+    // ── traceability: warn only where beads actually tracks the work ────────
+    assertG('no beads dir means no traceability warning',
+            !/beads/.test(ctx('git commit -m "feat: add login"')));
+    fs.mkdirSync(path.join(repo, '.beads'), { recursive: true });
+    assertG('a beads repo warns when the message has no issue id',
+            /beads/.test(ctx('git commit -m "feat: add login"')));
+    assertG('an id in the subject satisfies traceability',
+            !/beads/.test(ctx('git commit -m "feat: add login (cp-lj73.2)"')));
+    assertG('a Refs: footer satisfies traceability',
+            !/beads/.test(ctx('git commit -m "feat: add login" -m "Refs: cp-lj73.2"')));
+    // Traceability must never BLOCK: an agent that cannot satisfy a block
+    // legitimately will invent an id, turning the control into false evidence.
+    assertG('missing traceability does not block',
+            fire('git commit -m "feat: add login"').status === 0);
+    fs.rmSync(path.join(repo, '.beads'), { recursive: true, force: true });
+
+    // ── PR size: warn past the rule's reviewable ceiling ────────────────────
+    git('checkout', '-q', '-b', 'feature/small');
+    fs.writeFileSync(path.join(repo, 'small.txt'), 'a\nb\nc\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'feat: small');
+    assertG('a small branch does not warn about size',
+            !/reviewable/.test(ctx('gh pr create --title "feat: add a thing" --body "Refs: cp-1"')));
+    git('checkout', '-q', 'main');
+    git('checkout', '-q', '-b', 'feature/big');
+    fs.writeFileSync(path.join(repo, 'big.txt'), Array.from({ length: 600 }, (_, i) => `line ${i}`).join('\n') + '\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'feat: big');
+    assertG('an oversized branch warns about size',
+            /reviewable/.test(ctx('gh pr create --title "feat: add a thing" --body "Refs: cp-1"')));
+    assertG('an oversized branch is still ALLOWED (size is judgement, not law)',
+            fire('gh pr create --title "feat: add a thing"').status === 0);
+    git('checkout', '-q', 'main');
+
+    // ── the opt-out must be reachable IN-session (cp-ar0c) ──────────────────
+    assertG('an in-command export does NOT defeat the guard',
+            fire('export BRAYNEE_ALLOW_FREEFORM_COMMITS=1 && git commit -m "added stuff"').status === 2);
+    assertG('an inline VAR=1 prefix does NOT defeat the guard',
+            fire('BRAYNEE_ALLOW_FREEFORM_COMMITS=1 git commit -m "added stuff"').status === 2);
+    git('config', '--local', 'braynee.allow-freeform-commits', 'true');
+    assertG('the per-repo git config opt-out works',
+            fire('git commit -m "added stuff"').status === 0);
+    git('config', '--local', '--unset', 'braynee.allow-freeform-commits');
+    assertG('with the opt-out removed the guard is back on',
+            fire('git commit -m "added stuff"').status === 2);
+  } catch (e) {
+    assertG('commit-format sandbox ran', false, e && e.message);
+  } finally {
+    rmSandbox(sandbox);
+  }
+}
+log(`  ${results.commitformat.ok} passed | ${results.commitformat.fail} failed`);
+
+// ── 23. commit/PR ↔ beads traceability (cp-lj73.4) ───────────────────────────
+// Two halves of one loop, enforced at different times because they have to be:
+//
+//   commit -> issue   BEFORE the fact, in commit-format-check. cp-lj73.2 only
+//                     WARNED here, because an agent that cannot legitimately
+//                     satisfy a block will invent an id — false traceability is
+//                     worse than none. That objection vanishes exactly when work
+//                     is CLAIMED: there is then a real id to cite. So the block
+//                     is conditional on claimed work, and the assertions below
+//                     pin BOTH directions of that condition.
+//
+//   issue -> PR       AFTER the fact, in beads-pr-external-ref, because the PR
+//                     number does not exist until `gh pr create` has run.
+log('\n=== 23. commit/PR ↔ beads traceability (cp-lj73.4) ===');
+results.traceability = { ok: 0, fail: 0, errors: [] };
+{
+  const assertT = (label, cond, detail) => {
+    if (cond) { results.traceability.ok++; log(`  OK: ${label}`); }
+    else {
+      results.traceability.fail++;
+      results.traceability.errors.push({ test: label, detail });
+      log(`  FAIL: ${label}${detail ? ` — ${detail}` : ''}`);
+    }
+  };
+
+  const fmtHook = path.join(PLUGIN_ROOT, 'hooks', 'commit-format-check.js');
+  const refHook = path.join(PLUGIN_ROOT, 'hooks', 'beads-pr-external-ref.js');
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'lj734-'));
+  try {
+    const repo = path.join(sandbox, 'repo');
+    fs.mkdirSync(path.join(repo, '.beads'), { recursive: true });
+    const git = (...args) =>
+      spawnSync('git', args, { cwd: repo, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    git('init', '-q', '.');
+    git('config', 'user.email', 'selftest@example.invalid');
+    git('config', 'user.name', 'selftest');
+
+    const jsonl = path.join(repo, '.beads', 'issues.jsonl');
+    const writeIssues = (rows) =>
+      fs.writeFileSync(jsonl, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+
+    const fireFmt = (command) => spawnSync(process.execPath, [fmtHook], {
+      input: JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd: repo }),
+      encoding: 'utf8', timeout: 20000, windowsHide: true,
+      env: { ...process.env, BRAYNEE_ALLOW_FREEFORM_COMMITS: '' },
+    });
+
+    // ── nothing claimed: warn, never block (the cp-lj73.2 contract holds) ────
+    writeIssues([{ id: 'tt-1', title: 'open work', status: 'open', priority: 2 }]);
+    assertT('with nothing claimed an untraceable commit is ALLOWED',
+      fireFmt('git commit -m "feat: add login"').status === 0);
+
+    // ── work claimed: the id demonstrably exists, so cite it ─────────────────
+    writeIssues([
+      { id: 'tt-1', title: 'open work', status: 'open', priority: 2 },
+      { id: 'tt-42', title: 'claimed work', status: 'in_progress', priority: 1 },
+    ]);
+    {
+      const r = fireFmt('git commit -m "feat: add login"');
+      assertT('with work claimed an untraceable commit is BLOCKED', r.status === 2);
+      assertT('the block names the claimed id so the fix is copy-pasteable',
+        /tt-42/.test(r.stderr || ''), (r.stderr || '').slice(0, 160));
+      assertT('the block offers both the subject and footer forms',
+        /Refs:/.test(r.stderr || '') && /Closes:/.test(r.stderr || ''));
+    }
+    assertT('an id in the subject satisfies it',
+      fireFmt('git commit -m "feat: add login (tt-42)"').status === 0);
+    assertT('a Refs: footer satisfies it',
+      fireFmt('git commit -m "feat: add login" -m "Refs: tt-42"').status === 0);
+    assertT('a Closes: footer satisfies it',
+      fireFmt('git commit -m "feat: add login" -m "Closes: tt-42"').status === 0);
+    // Citing a DIFFERENT tracked issue is still traceable — the hook must not
+    // demand the claimed one specifically.
+    assertT('citing another issue is also accepted',
+      fireFmt('git commit -m "fix: tidy up (tt-1)"').status === 0);
+    // `tt-1` is the case that caught the shape-guessing bug: findIssueRefs
+    // requires a 2+ char suffix (tuned to skip "utf-8"), so it MISSES short real
+    // ids. Once a missing ref can block, that miss blocks correct work — hence
+    // the exact match against the repo's own ids.
+    assertT('a short id like tt-1 is recognised (shape-guessing missed it)',
+      fireFmt('git commit -m "fix: tidy up" -m "Refs: tt-1"').status === 0);
+    // ...while a near-miss must NOT count as a reference.
+    assertT('a near-miss id is not accepted as a reference',
+      fireFmt('git commit -m "fix: tidy up (tt-123)"').status === 2);
+    assertT('an unrelated hyphenated token is not accepted as a reference',
+      fireFmt('git commit -m "build: move to utf-8 encoding"').status === 2);
+    // Format errors must still win: a traceable commit with a bad subject is
+    // still a bad subject.
+    assertT('a malformed subject is still blocked even when traceable',
+      fireFmt('git commit -m "did some stuff (tt-42)"').status === 2);
+
+    // ── the narrow opt-out, reachable in-session (cp-ar0c) ───────────────────
+    git('config', '--local', 'braynee.allow-untracked-commits', 'true');
+    assertT('the untracked-commits opt-out unblocks it',
+      fireFmt('git commit -m "feat: add login"').status === 0);
+    assertT('...but format is STILL enforced (it is a narrow opt-out)',
+      fireFmt('git commit -m "added the login page"').status === 2);
+    git('config', '--local', '--unset', 'braynee.allow-untracked-commits');
+    assertT('with the opt-out removed the block is back',
+      fireFmt('git commit -m "feat: add login"').status === 2);
+
+    // A repo with no beads at all must be untouched by any of this.
+    {
+      const bare = path.join(sandbox, 'bare');
+      fs.mkdirSync(bare, { recursive: true });
+      spawnSync('git', ['init', '-q', '.'], { cwd: bare, windowsHide: true, timeout: 15000 });
+      const r = spawnSync(process.execPath, [fmtHook], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'git commit -m "feat: add login"' }, cwd: bare }),
+        encoding: 'utf8', timeout: 20000, windowsHide: true,
+        env: { ...process.env, BRAYNEE_ALLOW_FREEFORM_COMMITS: '' },
+      });
+      assertT('a repo without beads is unaffected', r.status === 0 && !(r.stdout || '').includes('beads'));
+    }
+
+    // ── issue -> PR: external-ref stamping ──────────────────────────────────
+    writeIssues([
+      { id: 'tt-1', title: 'open work', status: 'open', priority: 2 },
+      { id: 'tt-42', title: 'claimed work', status: 'in_progress', priority: 1 },
+    ]);
+    const fireRef = (command, stdout, cwd = repo) => spawnSync(process.execPath, [refHook], {
+      input: JSON.stringify({
+        tool_name: 'Bash', tool_input: { command }, tool_response: { stdout }, cwd,
+      }),
+      encoding: 'utf8', timeout: 25000, windowsHide: true,
+    });
+    const ctxOf = (r) => {
+      if (!(r.stdout || '').trim()) return '';
+      try { return JSON.parse(r.stdout).hookSpecificOutput.additionalContext || ''; }
+      catch { return ''; }
+    };
+    const PR_URL = 'https://github.com/o/r/pull/77';
+
+    assertT('a non-PR command is ignored',
+      fireRef('npm test', '').stdout.trim() === '');
+    // The PR number comes from the OUTPUT: a failed create has no URL, so there
+    // is nothing to stamp and nothing to announce (the cp-snh2 lesson).
+    assertT('a FAILED gh pr create stamps nothing',
+      fireRef('gh pr create --title "feat: x (tt-42)"', 'error: pull request create failed').stdout.trim() === '');
+    assertT('a PR naming no known issue reports the gap',
+      /references no beads issue/.test(ctxOf(fireRef('gh pr create --title "feat: x"', PR_URL))));
+    // An id that does not exist in THIS repo must not be stamped.
+    assertT('an unknown id is not treated as a link',
+      /references no beads issue/.test(ctxOf(fireRef('gh pr create --title "feat: x (zz-999)"', PR_URL))));
+    // cp-fznk: the compound form must still be seen.
+    {
+      const r = fireRef('cd . && gh pr create --title "feat: x (tt-42)" --body "Closes: tt-42"', PR_URL);
+      const ctx = ctxOf(r);
+      assertT('`cd . && gh pr create` is still seen', ctx !== '');
+      assertT('the stamp names the PR number', /gh-77/.test(ctx), ctx.slice(0, 160));
+      assertT('it names the issue it linked or could not link', /tt-42/.test(ctx), ctx.slice(0, 200));
+      assertT('the hook never fails the PR', r.status === 0);
+      // This sandbox's .beads holds only a jsonl — NOT an initialized repo. The
+      // hook must refuse to shell out to bd here. Writing anyway is what left a
+      // stray bd process holding this directory, and what made bd resolve a
+      // DIFFERENT project's database (observed: `gastownhall/beads`). So this
+      // assertion is the regression guard for both, and it keeps the self-test
+      // hermetic: no bd write ever runs from the suite.
+      assertT('an uninitialized .beads is NOT written through bd',
+        /not initialized/.test(ctx), ctx.slice(0, 200));
+    }
+    // Scope: the Executed-By trailer belongs to cp-uif3.5, not here.
+    assertT('this hook writes no Executed-By trailer (cp-uif3.5 owns it)',
+      !fs.readFileSync(refHook, 'utf8').includes('Executed-By:'));
+  } catch (e) {
+    assertT('traceability sandbox ran', false, e && e.message);
+  } finally {
+    rmSandbox(sandbox);
+  }
+}
+log(`  ${results.traceability.ok} passed | ${results.traceability.fail} failed`);
+
+// ── 24. beads DR: the sync must be SCHEDULED, not merely configured (cp-uif3.2) ─
+// The failure this guards against is not a missing backup — it is a backup that
+// stops. Measured on the one repo that HAD a destination:
+//
+//   Last backup: 8h ago      <- bd's internal auto-backup, reassuring
+//   Last sync:   35h43m ago  <- the destination, and the one that protects you
+//
+// Two different fields, and the reassuring one is not the one that matters. So
+// these assert the SCHEDULING contract: the hook spawns a sync, throttles to one
+// a day, and never configures anything on its own.
+log('\n=== 24. beads DR scheduled sync (cp-uif3.2) ===');
+results.beadsdr = { ok: 0, fail: 0, errors: [] };
+{
+  const assertD = (label, cond, detail) => {
+    if (cond) { results.beadsdr.ok++; log(`  OK: ${label}`); }
+    else {
+      results.beadsdr.fail++;
+      results.beadsdr.errors.push({ test: label, detail });
+      log(`  FAIL: ${label}${detail ? ` — ${detail}` : ''}`);
+    }
+  };
+
+  const hook = path.join(PLUGIN_ROOT, 'hooks', 'beads-dr-sync.js');
+  const script = path.join(PLUGIN_ROOT, 'scripts', 'beads-dr.mjs');
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'uif32-'));
+  try {
+    assertD('beads-dr.mjs ships', fs.existsSync(script));
+    assertD('the scheduled-sync hook ships', fs.existsSync(hook));
+
+    const hookSrc = fs.readFileSync(hook, 'utf8');
+    // The hook must never roll out configuration behind the user's back:
+    // configuring backup destinations fleet-wide is a deliberate, reviewable act.
+    assertD('the hook syncs but never runs --init',
+      hookSrc.includes("'--sync'") && !hookSrc.includes("'--init'"));
+    // A detached child: the sweep walks ~36 repos shelling out to bd, far too
+    // heavy to run inline on a hook that fires whenever a session opens.
+    assertD('the sweep is spawned DETACHED, not run inline',
+      /detached:\s*true/.test(hookSrc) && /stdio:\s*'ignore'/.test(hookSrc));
+    assertD('the hook is registered on SessionStart', (() => {
+      const j = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8'));
+      const all = JSON.stringify(j.hooks.SessionStart || []);
+      return all.includes('beads-dr-sync.js');
+    })());
+
+    // Throttle: first run spawns, immediate second run stays silent. Without
+    // this the sweep would fire on every session open.
+    const home = path.join(sandbox, 'home');
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    const fire = () => spawnSync(process.execPath, [hook], {
+      input: JSON.stringify({ session_id: 'self-test', cwd: sandbox, source: 'startup' }),
+      encoding: 'utf8', timeout: 20000, windowsHide: true,
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+    });
+    const stamp = path.join(home, '.claude', 'braynee-beads-dr-sync');
+    const first = fire();
+    assertD('the first run exits cleanly', first.status === 0);
+    assertD('the first run writes a throttle stamp', fs.existsSync(stamp));
+    const t1 = fs.existsSync(stamp) ? fs.readFileSync(stamp, 'utf8') : '';
+    fire();
+    const t2 = fs.existsSync(stamp) ? fs.readFileSync(stamp, 'utf8') : '';
+    assertD('an immediate second run is throttled (stamp unchanged)', t1 === t2 && t1 !== '');
+
+    // ...and an aged stamp lets it run again, or the sweep would fire once ever.
+    const old = Date.now() - 25 * 60 * 60 * 1000;
+    fs.writeFileSync(stamp, String(old));
+    fire();
+    const t3 = fs.readFileSync(stamp, 'utf8');
+    assertD('a day-old stamp allows the next sweep', Number(t3) > old);
+
+    // The hook must never emit on a normal session: SessionStart output becomes
+    // context, and a daily housekeeping job has nothing to tell the model.
+    assertD('the hook stays SILENT on stdout', (first.stdout || '').trim() === '');
+
+    // The tool's own contract: read-only unless asked. An audit that could
+    // configure something by default would be unsafe to run for information.
+    const drSrc = fs.readFileSync(script, 'utf8');
+    assertD('beads-dr only acts under --init/--sync',
+      /const INIT = flag\('--init'\)/.test(drSrc) && /const SYNC = flag\('--sync'\)/.test(drSrc)
+      && /if \(INIT && row\.inScope/.test(drSrc) && /if \(SYNC && row\.inScope/.test(drSrc));
+    assertD('beads-dr scopes by measured history, not a hand-kept list',
+      /MIN_ISSUES/.test(drSrc) && /issueCount/.test(drSrc));
+    // Reading 124 repos via `bd` would hammer the shared Dolt server and leave
+    // orphan processes (cp-6j5) — the issue counting must come from the jsonl.
+    assertD('the issue count is read from jsonl, not by shelling out to bd',
+      /issues\.jsonl/.test(drSrc) && !/bd\(\['list'/.test(drSrc));
+    assertD('the disk-loss limit is stated in the output, not just the source',
+      /NOT disk loss/.test(drSrc));
+
+    // ── the restore verifier must not be able to destroy what it verifies ────
+    // `bd backup restore --force` with no path reads .beads/backup and
+    // OVERWRITES THE LIVE DATABASE of the repo it runs in. These pin the two
+    // properties that keep the check safe and meaningful.
+    const vPath = path.join(PLUGIN_ROOT, 'scripts', 'beads-dr-verify.mjs');
+    assertD('the restore verifier ships', fs.existsSync(vPath));
+    const vSrc = fs.existsSync(vPath) ? fs.readFileSync(vPath, 'utf8') : '';
+    assertD('every restore is scoped with -C and an explicit source path',
+      /'backup',\s*'restore',\s*source,\s*'--force',\s*'-C',\s*probe/.test(vSrc), 'restore call shape');
+    assertD('the probe lives under the OS temp dir, never inside a project',
+      /mkdtempSync\(path\.join\(os\.tmpdir\(\)/.test(vSrc));
+    // An earlier attempt restored 1 issue instead of 214 because the probe was
+    // reading the shared server. A probe that does not start empty makes every
+    // later count meaningless, so it must abort rather than report a pass.
+    assertD('a probe that does not start EMPTY aborts instead of passing',
+      /before\.n !== 0/.test(vSrc) && /not isolated/.test(vSrc));
+    assertD('the verdict compares restored vs expected counts',
+      /after\.n === expected/.test(vSrc));
+    // bd v2.0 moves list payloads under .data; a parser that only knows the
+    // legacy shape would silently read null and report a failed restore.
+    assertD('bd stats parsing tolerates both legacy and v2 envelope shapes',
+      /j\.data/.test(vSrc));
+  } catch (e) {
+    assertD('beads-dr sandbox ran', false, e && e.message);
+  } finally {
+    rmSandbox(sandbox);
+  }
+}
+log(`  ${results.beadsdr.ok} passed | ${results.beadsdr.fail} failed`);
+
+// ── Cross-host hook protocol (cp-3o3g.9) ─────────────────────────────────────
+// braynee's hooks run under more than one host. Two protocol rules keep them
+// portable, and breaking either fails SILENTLY — no error, no warning, the hook
+// simply stops denying or its text is dropped. So they are asserted, not assumed.
+log('\n=== Cross-host hook protocol ===');
+results.hostproto = { ok: 0, fail: 0, errors: [] };
+function assertProto(label, cond, detail) {
+  if (cond) { results.hostproto.ok++; log(`  OK: ${label}`); }
+  else { results.hostproto.fail++; results.hostproto.errors.push({ test: label, detail }); log(`  FAIL: ${label}${detail ? ' — ' + detail : ''}`); }
+}
+{
+  const hookFiles = listFiles(path.join(PLUGIN_ROOT, 'hooks'), ['.js'])
+    .filter(f => !f.endsWith('.test.js'));
+
+  // Rule 1: deny with exit 2 + stderr. Both hosts honour it. Claude Code also
+  // accepts a permissionDecision object, but Mastra Code blocks ONLY on exit 2
+  // and discards JSON it cannot use — a hook denying that way would block on one
+  // host and quietly permit on the other.
+  const jsonDeny = hookFiles.filter(f => /permissionDecision/.test(fs.readFileSync(f, 'utf8')));
+  assertProto('no hook denies via the Claude-Code-only permissionDecision object',
+    jsonDeny.length === 0, jsonDeny.map(f => path.basename(f)).join(', '));
+
+  // Rule 2: a denial must say why. exit 2 with no stderr gives the user a bare
+  // block with no reason on either host.
+  const silentDeny = hookFiles.filter(f => {
+    const src = fs.readFileSync(f, 'utf8');
+    return /process\.exit\(2\)/.test(src) && !/stderr\.write|payload\.block|payload\.deny/.test(src);
+  });
+  assertProto('every denying hook writes a reason to stderr',
+    silentDeny.length === 0, silentDeny.map(f => path.basename(f)).join(', '));
+
+  // Rule 3: the shared payload module is what encodes those rules.
+  const lib = path.join(PLUGIN_ROOT, 'hooks', 'lib', 'hook-payload.js');
+  assertProto('the host-neutral payload module ships', fs.existsSync(lib));
+}
+log(`  ${results.hostproto.ok} passed | ${results.hostproto.fail} failed`);
+
+// ── Mastra Code generated commands (cp-3o3g.7) ───────────────────────────────
+// commands/braynee/*.md are generated from agents/*.md. If someone adds, renames
+// or removes an agent without regenerating, Mastra Code silently offers a stale
+// or missing /braynee:* entry point — nothing errors, the command is just wrong.
+log('\n=== Mastra Code commands ===');
+results.mccommands = { ok: 0, fail: 0, errors: [] };
+function assertMcCmd(label, cond, detail) {
+  if (cond) { results.mccommands.ok++; log(`  OK: ${label}`); }
+  else { results.mccommands.fail++; results.mccommands.errors.push({ test: label, detail }); log(`  FAIL: ${label}${detail ? ' — ' + detail : ''}`); }
+}
+{
+  const gen = path.join(PLUGIN_ROOT, 'scripts', 'gen-mastracode-commands.mjs');
+  assertMcCmd('the command generator ships', fs.existsSync(gen));
+  if (fs.existsSync(gen)) {
+    const r = spawnSync(process.execPath, [gen, '--check'], { encoding: 'utf8', timeout: 30_000 });
+    assertMcCmd('commands/braynee is in sync with agents/', r.status === 0,
+      (r.stdout || r.stderr || '').trim().split('\n')[0]);
+  }
+  const cmdDir = path.join(PLUGIN_ROOT, 'commands', 'braynee');
+  const cmds = fs.existsSync(cmdDir) ? fs.readdirSync(cmdDir).filter(f => f.endsWith('.md')) : [];
+  const agents = listFiles(path.join(PLUGIN_ROOT, 'agents'), ['.md']).length;
+  assertMcCmd('one command per agent', cmds.length === agents, `${cmds.length} commands vs ${agents} agents`);
+  // The built-in subagent tool rejects anything outside its fixed enum, so a
+  // typo here fails at the schema rather than doing the wrong thing quietly.
+  const badType = cmds.filter(f => {
+    const m = fs.readFileSync(path.join(cmdDir, f), 'utf8').match(/agentType`: `"([a-z]+)"/);
+    return !m || !['explore', 'plan', 'execute'].includes(m[1]);
+  });
+  assertMcCmd('every command targets a valid built-in subagent type', badType.length === 0, badType.join(', '));
+}
+log(`  ${results.mccommands.ok} passed | ${results.mccommands.fail} failed`);
+
+// ── Summary ──────────────────────────────────────────────────────────────────
+const totalOk = Object.values(results).reduce((s, r) => s + r.ok, 0);
+const totalFail = Object.values(results).reduce((s, r) => s + r.fail, 0);
+
+log('\n=== Summary ===');
+log(`  Plugin root: ${PLUGIN_ROOT}`);
+log(`  Platform: ${process.platform} | Node: ${process.version}`);
+log(`  Results: ${totalOk} passed, ${totalFail} failed`);
+
+if (jsonMode) {
+  process.stdout.write(JSON.stringify({
+    ok: totalFail === 0,
+    pluginRoot: PLUGIN_ROOT,
+    platform: process.platform,
+    node: process.version,
+    totals: { ok: totalOk, fail: totalFail },
+    results,
+  }, null, 2) + '\n');
+}
+
+process.exit(totalFail === 0 ? 0 : 1);
