@@ -1,0 +1,434 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import connectionReducer, {
+  setStatus,
+  setError,
+  setErrorCode,
+  setPlatform,
+  setAvailableClis,
+  setFeatureFlags,
+  setBootId,
+  setServerRestarted,
+  setLiveTerminalIds,
+  ConnectionState,
+  ConnectionStatus,
+} from '../../../../src/store/connectionSlice'
+
+describe('connectionSlice', () => {
+  describe('initial state', () => {
+    it('has correct default values', () => {
+      const state = connectionReducer(undefined, { type: 'unknown' })
+
+      expect(state.status).toBe('disconnected')
+      expect(state.lastError).toBeUndefined()
+      expect(state.lastErrorCode).toBeUndefined()
+      expect(state.lastReadyAt).toBeUndefined()
+    })
+  })
+
+  describe('setStatus', () => {
+    it('updates connection status to connecting', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+      }
+
+      const state = connectionReducer(initialState, setStatus('connecting'))
+
+      expect(state.status).toBe('connecting')
+    })
+
+    it('updates connection status to connected', () => {
+      const initialState: ConnectionState = {
+        status: 'connecting',
+      }
+
+      const state = connectionReducer(initialState, setStatus('connected'))
+
+      expect(state.status).toBe('connected')
+    })
+
+    it('updates connection status to ready', () => {
+      const initialState: ConnectionState = {
+        status: 'connected',
+      }
+
+      const now = Date.now()
+      vi.spyOn(Date, 'now').mockReturnValue(now)
+
+      const state = connectionReducer(initialState, setStatus('ready'))
+
+      expect(state.status).toBe('ready')
+      expect(state.lastReadyAt).toBe(now)
+
+      vi.restoreAllMocks()
+    })
+
+    it('updates connection status to disconnected', () => {
+      const initialState: ConnectionState = {
+        status: 'ready',
+        lastReadyAt: 1234567890,
+      }
+
+      const state = connectionReducer(initialState, setStatus('disconnected'))
+
+      expect(state.status).toBe('disconnected')
+      // lastReadyAt should be preserved
+      expect(state.lastReadyAt).toBe(1234567890)
+    })
+
+    it('sets lastReadyAt only when status is ready', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+      }
+
+      // Test that connecting does not set lastReadyAt
+      let state = connectionReducer(initialState, setStatus('connecting'))
+      expect(state.lastReadyAt).toBeUndefined()
+
+      // Test that connected does not set lastReadyAt
+      state = connectionReducer(state, setStatus('connected'))
+      expect(state.lastReadyAt).toBeUndefined()
+
+      // Test that ready sets lastReadyAt
+      const now = Date.now()
+      vi.spyOn(Date, 'now').mockReturnValue(now)
+      state = connectionReducer(state, setStatus('ready'))
+      expect(state.lastReadyAt).toBe(now)
+
+      vi.restoreAllMocks()
+    })
+
+    it('updates lastReadyAt each time status is set to ready', () => {
+      const firstTime = 1000000
+      const secondTime = 2000000
+
+      vi.spyOn(Date, 'now').mockReturnValue(firstTime)
+      let state = connectionReducer(undefined, setStatus('ready'))
+      expect(state.lastReadyAt).toBe(firstTime)
+
+      // Disconnect and reconnect
+      state = connectionReducer(state, setStatus('disconnected'))
+      state = connectionReducer(state, setStatus('connecting'))
+      state = connectionReducer(state, setStatus('connected'))
+
+      vi.spyOn(Date, 'now').mockReturnValue(secondTime)
+      state = connectionReducer(state, setStatus('ready'))
+      expect(state.lastReadyAt).toBe(secondTime)
+
+      vi.restoreAllMocks()
+    })
+  })
+
+  describe('setError', () => {
+    it('stores error message', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+      }
+
+      const state = connectionReducer(initialState, setError('Connection failed'))
+
+      expect(state.lastError).toBe('Connection failed')
+    })
+
+    it('replaces existing error message', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+        lastError: 'Previous error',
+      }
+
+      const state = connectionReducer(initialState, setError('New error'))
+
+      expect(state.lastError).toBe('New error')
+    })
+
+    it('clears error when passed undefined', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+        lastError: 'Some error',
+      }
+
+      const state = connectionReducer(initialState, setError(undefined))
+
+      expect(state.lastError).toBeUndefined()
+    })
+
+    it('preserves connection status when setting error', () => {
+      const initialState: ConnectionState = {
+        status: 'connecting',
+      }
+
+      const state = connectionReducer(initialState, setError('Connection timeout'))
+
+      expect(state.status).toBe('connecting')
+      expect(state.lastError).toBe('Connection timeout')
+    })
+
+    it('preserves lastReadyAt when setting error', () => {
+      const initialState: ConnectionState = {
+        status: 'ready',
+        lastReadyAt: 1234567890,
+      }
+
+      const state = connectionReducer(initialState, setError('Temporary error'))
+
+      expect(state.lastReadyAt).toBe(1234567890)
+      expect(state.lastError).toBe('Temporary error')
+    })
+  })
+
+  describe('platform state', () => {
+    it('has null platform in initial state', () => {
+      const state = connectionReducer(undefined, { type: 'unknown' })
+      expect(state.platform).toBeNull()
+    })
+
+    it('sets platform with setPlatform action', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+        platform: null,
+      }
+      const state = connectionReducer(initialState, setPlatform('win32'))
+      expect(state.platform).toBe('win32')
+    })
+
+    it('accepts darwin platform', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+        platform: null,
+      }
+      const state = connectionReducer(initialState, setPlatform('darwin'))
+      expect(state.platform).toBe('darwin')
+    })
+
+    it('accepts linux platform', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+        platform: null,
+      }
+      const state = connectionReducer(initialState, setPlatform('linux'))
+      expect(state.platform).toBe('linux')
+    })
+  })
+
+  describe('availableClis state', () => {
+    it('has empty availableClis in initial state', () => {
+      const state = connectionReducer(undefined, { type: 'unknown' })
+      expect(state.availableClis).toEqual({})
+    })
+
+    it('stores availableClis via setAvailableClis', () => {
+      const state = connectionReducer(undefined, setAvailableClis({ claude: true, codex: false }))
+      expect(state.availableClis).toEqual({ claude: true, codex: false })
+    })
+
+    it('replaces availableClis entirely on update', () => {
+      let state = connectionReducer(undefined, setAvailableClis({ claude: true, codex: false }))
+      state = connectionReducer(state, setAvailableClis({ claude: false }))
+      expect(state.availableClis).toEqual({ claude: false })
+    })
+
+    it('does not interfere with other state', () => {
+      let state = connectionReducer(undefined, setAvailableClis({ claude: true }))
+      state = connectionReducer(state, setPlatform('linux'))
+      expect(state.platform).toBe('linux')
+      expect(state.availableClis).toEqual({ claude: true })
+    })
+  })
+
+  describe('setErrorCode', () => {
+    it('stores lastErrorCode via setErrorCode', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+      }
+
+      const state = connectionReducer(initialState, setErrorCode(4003))
+
+      expect(state.lastErrorCode).toBe(4003)
+    })
+
+    it('clears lastErrorCode when set to undefined', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+        lastErrorCode: 4003,
+      }
+
+      const state = connectionReducer(initialState, setErrorCode(undefined))
+
+      expect(state.lastErrorCode).toBeUndefined()
+    })
+
+    it('replaces existing error code', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+        lastErrorCode: 4001,
+      }
+
+      const state = connectionReducer(initialState, setErrorCode(4003))
+
+      expect(state.lastErrorCode).toBe(4003)
+    })
+
+    it('preserves connection status when setting error code', () => {
+      const initialState: ConnectionState = {
+        status: 'connecting',
+      }
+
+      const state = connectionReducer(initialState, setErrorCode(4003))
+
+      expect(state.status).toBe('connecting')
+      expect(state.lastErrorCode).toBe(4003)
+    })
+
+    it('preserves lastError when setting error code', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+        lastError: 'Too many connections',
+      }
+
+      const state = connectionReducer(initialState, setErrorCode(4003))
+
+      expect(state.lastError).toBe('Too many connections')
+      expect(state.lastErrorCode).toBe(4003)
+    })
+  })
+
+  describe('setStatus clears error state on ready', () => {
+    it('clears lastErrorCode when status becomes ready', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+        lastErrorCode: 4003,
+      }
+
+      const state = connectionReducer(initialState, setStatus('ready'))
+
+      expect(state.lastErrorCode).toBeUndefined()
+    })
+
+    it('clears lastError when status becomes ready', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+        lastError: 'Too many connections',
+      }
+
+      const state = connectionReducer(initialState, setStatus('ready'))
+
+      expect(state.lastError).toBeUndefined()
+    })
+
+    it('clears both lastError and lastErrorCode when status becomes ready', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+        lastError: 'Too many connections',
+        lastErrorCode: 4003,
+      }
+
+      const state = connectionReducer(initialState, setStatus('ready'))
+
+      expect(state.lastError).toBeUndefined()
+      expect(state.lastErrorCode).toBeUndefined()
+    })
+
+    it('does not clear error state on non-ready status', () => {
+      const initialState: ConnectionState = {
+        status: 'disconnected',
+        lastError: 'Too many connections',
+        lastErrorCode: 4003,
+      }
+
+      const state = connectionReducer(initialState, setStatus('connecting'))
+
+      expect(state.lastError).toBe('Too many connections')
+      expect(state.lastErrorCode).toBe(4003)
+    })
+  })
+
+  describe('featureFlags state', () => {
+    it('has empty featureFlags in initial state', () => {
+      const state = connectionReducer(undefined, { type: 'unknown' })
+      expect(state.featureFlags).toEqual({})
+    })
+
+    it('stores featureFlags via setFeatureFlags', () => {
+      const state = connectionReducer(undefined, setFeatureFlags({ kilroy: true }))
+      expect(state.featureFlags).toEqual({ kilroy: true })
+    })
+
+    it('replaces featureFlags entirely on update', () => {
+      let state = connectionReducer(undefined, setFeatureFlags({ kilroy: true }))
+      state = connectionReducer(state, setFeatureFlags({ kilroy: false }))
+      expect(state.featureFlags).toEqual({ kilroy: false })
+    })
+
+    it('does not interfere with other state', () => {
+      let state = connectionReducer(undefined, setFeatureFlags({ kilroy: true }))
+      state = connectionReducer(state, setPlatform('linux'))
+      expect(state.platform).toBe('linux')
+      expect(state.featureFlags).toEqual({ kilroy: true })
+    })
+  })
+
+  describe('bootId and server restart detection', () => {
+    it('stores bootId via setBootId', () => {
+      const state = connectionReducer(undefined, setBootId('boot-abc'))
+      expect(state.bootId).toBe('boot-abc')
+    })
+
+    it('tracks server restart flag', () => {
+      let state = connectionReducer(undefined, setServerRestarted(true))
+      expect(state.serverRestarted).toBe(true)
+
+      state = connectionReducer(state, setServerRestarted(false))
+      expect(state.serverRestarted).toBe(false)
+    })
+
+    it('stores live terminal IDs', () => {
+      const state = connectionReducer(undefined, setLiveTerminalIds(['t1', 't2']))
+      expect(state.liveTerminalIds).toEqual(['t1', 't2'])
+    })
+
+    it('clears live terminal IDs', () => {
+      let state = connectionReducer(undefined, setLiveTerminalIds(['t1']))
+      state = connectionReducer(state, setLiveTerminalIds(undefined))
+      expect(state.liveTerminalIds).toBeUndefined()
+    })
+  })
+
+  describe('state transitions', () => {
+    it('handles typical connection lifecycle', () => {
+      const now = Date.now()
+      vi.spyOn(Date, 'now').mockReturnValue(now)
+
+      // Start disconnected
+      let state = connectionReducer(undefined, { type: 'unknown' })
+      expect(state.status).toBe('disconnected')
+
+      // Begin connecting
+      state = connectionReducer(state, setStatus('connecting'))
+      expect(state.status).toBe('connecting')
+
+      // Connected
+      state = connectionReducer(state, setStatus('connected'))
+      expect(state.status).toBe('connected')
+
+      // Ready
+      state = connectionReducer(state, setStatus('ready'))
+      expect(state.status).toBe('ready')
+      expect(state.lastReadyAt).toBe(now)
+
+      // Error occurs
+      state = connectionReducer(state, setError('Network error'))
+      expect(state.lastError).toBe('Network error')
+
+      // Disconnect
+      state = connectionReducer(state, setStatus('disconnected'))
+      expect(state.status).toBe('disconnected')
+      expect(state.lastError).toBe('Network error') // Error persists
+      expect(state.lastReadyAt).toBe(now) // lastReadyAt persists
+
+      // Clear error before reconnect
+      state = connectionReducer(state, setError(undefined))
+      expect(state.lastError).toBeUndefined()
+
+      vi.restoreAllMocks()
+    })
+  })
+})

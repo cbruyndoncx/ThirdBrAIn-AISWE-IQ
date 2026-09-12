@@ -1,0 +1,171 @@
+export type TerminalStatus = 'creating' | 'running' | 'recovering' | 'exited' | 'error'
+
+import type {
+  AttentionDismiss,
+  ClaudePermissionMode,
+  CodingCliSettings,
+  CodexSandboxMode,
+  DefaultNewPane,
+  LocalSettings,
+  LocalSettingsPatch,
+  Osc52ClipboardPolicy,
+  ResolvedSettings,
+  SessionOpenMode,
+  ServerSettings,
+  ServerSettingsPatch,
+  SidebarSortMode,
+  TerminalRendererMode,
+  TerminalTheme,
+  TabAttentionStyle,
+  WorktreeGrouping,
+} from '@shared/settings'
+import type { CodingCliProviderName, TokenSummary, SessionLocator } from '@shared/ws-protocol'
+import type { CodexDurabilityRef } from '@shared/codex-durability'
+import type { TitleSource } from '../../shared/title-source'
+export type { CodingCliProviderName }
+
+// TabMode includes 'shell' for regular terminals, plus all coding CLI providers
+// This allows future providers (opencode, gemini, kimi) to work as tab modes
+export type TabMode = 'shell' | CodingCliProviderName
+
+/**
+ * Shell type for terminal creation.
+ * - 'system': Use the platform's default shell ($SHELL on macOS/Linux, cmd on Windows)
+ * - 'cmd': Windows Command Prompt (Windows only)
+ * - 'powershell': Windows PowerShell (Windows only)
+ * - 'wsl': Windows Subsystem for Linux (Windows only)
+ *
+ * On macOS/Linux, all values normalize to 'system' (uses $SHELL or fallback).
+ */
+export type ShellType = 'system' | 'cmd' | 'powershell' | 'wsl'
+
+export interface SessionListMetadata {
+  sessionType?: string
+  firstUserMessage?: string
+  isSubagent?: boolean
+  isNonInteractive?: boolean
+}
+
+export interface Tab {
+  id: string
+  createRequestId: string
+  title: string
+  description?: string
+  codingCliProvider?: CodingCliProviderName
+  status: TerminalStatus
+  mode: TabMode
+  shell?: ShellType
+  initialCwd?: string
+  sessionRef?: SessionLocator
+  codexDurability?: CodexDurabilityRef
+  serverInstanceId?: string
+  resumeSessionId?: string     // Legacy migration field; canonical durable identity lives in sessionRef
+  sessionMetadataByKey?: Record<string, SessionListMetadata>
+  createdAt: number
+  updatedAt?: number
+  titleSetByUser?: boolean     // If true, don't auto-update title
+  lastInputAt?: number
+}
+
+export interface BackgroundTerminal {
+  terminalId: string
+  title: string
+  createdAt: number
+  lastActivityAt: number
+  cwd?: string
+  status: 'running' | 'exited'
+  runtimeStatus?: 'running' | 'recovering'
+  hasClients: boolean
+  mode?: TabMode
+  sessionRef?: SessionLocator
+  codexDurability?: CodexDurabilityRef
+  /**
+   * Server-computed: this terminal's resume target is an opencode
+   * SUBAGENT (child) session. Manufactured rail entries and tab/pane
+   * fallback rows copy it into SidebarSessionItem.isSubagent so
+   * showSubagents filtering applies.
+   */
+  resumeTargetIsSubagent?: boolean
+}
+
+export interface CodingCliSession {
+  provider: CodingCliProviderName
+  sessionType?: string
+  sessionId: string
+  projectPath: string
+  checkoutPath?: string
+  createdAt?: number
+  lastActivityAt: number
+  messageCount?: number
+  title?: string
+  summary?: string
+  firstUserMessage?: string
+  cwd?: string
+  archived?: boolean
+  sourceFile?: string
+  isSubagent?: boolean
+  isNonInteractive?: boolean
+  isRunning?: boolean
+  runningTerminalId?: string
+  liveTerminalOnly?: boolean
+  gitBranch?: string
+  isDirty?: boolean
+  tokenUsage?: TokenSummary
+  /**
+   * b5fb provenance exposure for the reviewed reset flow: true exactly when a
+   * stored titleOverride currently applies to this row; `providerTitle` is the
+   * parsed pre-override title (absent when none was parsed);
+   * `titleOverrideSource` is the applied override's recorded titleSource
+   * (absent when the override never recorded one).
+   */
+  titleOverridden?: boolean
+  providerTitle?: string
+  titleOverrideSource?: TitleSource
+}
+
+export interface ProjectGroup {
+  projectPath: string
+  sessions: CodingCliSession[]
+  color?: string
+}
+
+export interface SessionOverride {
+  titleOverride?: string
+  summaryOverride?: string
+  deleted?: boolean
+  archived?: boolean
+  createdAtOverride?: number
+}
+
+export interface TerminalOverride {
+  titleOverride?: string
+  descriptionOverride?: string
+  deleted?: boolean
+}
+
+export type {
+  AttentionDismiss,
+  ClaudePermissionMode,
+  CodingCliSettings,
+  CodexSandboxMode,
+  DefaultNewPane,
+  LocalSettings,
+  LocalSettingsPatch,
+  Osc52ClipboardPolicy,
+  SessionOpenMode,
+  ServerSettings,
+  ServerSettingsPatch,
+  SidebarSortMode,
+  TabAttentionStyle,
+  TerminalRendererMode,
+  TerminalTheme,
+  WorktreeGrouping,
+}
+
+export type AppSettings = ResolvedSettings
+
+export type {
+  RegistryPaneSnapshot,
+  RegistryTabRecord,
+  RegistryTabStatus,
+} from './tabRegistryTypes'

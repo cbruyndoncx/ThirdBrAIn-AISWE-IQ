@@ -1,0 +1,306 @@
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { useAppDispatch, useAppStore } from '@/store/hooks'
+import type { RootState } from '@/store/store'
+import { getRecoveryInventory } from '@/lib/api'
+import { hadPersistedLayoutAtBoot, bootCapturedAtMs } from '@/lib/recovery/boot-state'
+import {
+  getPendingOffer,
+  setPendingOffer,
+  clearPendingOffer,
+  isDismissed,
+  recordDismissal,
+} from '@/lib/recovery/dismissal'
+import { buildRecoveryPlan, countRecoverablePanes, isRestorablePane, placeLedgerEntries } from '@/lib/recovery/build-recovery-plan'
+import type { RecoveryInventory } from '@/lib/recovery/types'
+import { getCurrentTabRegistryClientInstanceId } from '@/store/tabRegistrySync'
+import { addTab } from '@/store/tabsSlice'
+import { restoreLayout } from '@/store/panesSlice'
+import { addTerminalRestoreRequestId, armRecoveredLiveTerminalTarget } from '@/lib/terminal-restore'
+import type { PaneNode } from '@/store/paneTypes'
+import { OVERLAY_Z } from '@/components/ui/overlay'
+import { Button } from '@/components/ui/button'
+
+const HEADING_ID = 'recovery-offer-heading'
+
+// Focus pattern shared with src/components/ui/confirm-modal.tsx
+function getFocusable(container: HTMLElement): HTMLElement[] {
+  const selectors = [
+    'button',
+    '[href]',
+    'input',
+    'select',
+    'textarea',
+    '[tabindex]:not([tabindex="-1"])',
+  ]
+  return Array.from(container.querySelectorAll<HTMLElement>(selectors.join(',')))
+    .filter((el) => !el.hasAttribute('disabled') && !el.getAttribute('aria-hidden'))
+}
+
+function walkArmingRestores(node: PaneNode | undefined): void {
+  if (!node) return
+  if (node.type === 'leaf') {
+    const content = node.content
+    if (content.kind === 'terminal' && content.sessionRef && content.createRequestId) {
+      // Post-normalization id — restoreLayout's reducer re-minted it (App.tsx:1069 pattern).
+      addTerminalRestoreRequestId(content.createRequestId)
+    }
+    return
+  }
+  for (const child of node.children) walkArmingRestores(child)
+}
+
+/**
+ * Arms terminal restore for every terminal leaf carrying a sessionRef in the
+ * given tabs' post-normalization layouts. Live panes arm too (round-5 F1: the
+ * plan keeps their effective ref) — a live leaf ALSO carries a one-shot
+ * reattach arm that TerminalView consults first, so this restore arm only
+ * ever fires when the live handle died before attach (the resumed-honestly
+ * fallback the D7 live-owner refusal then converts to a reattach).
+ */
+export function armRecoveredTerminalRestores(state: Pick<RootState, 'panes'>, tabIds: string[]): void {
+  for (const tabId of tabIds) {
+    walkArmingRestores(state.panes.layouts[tabId])
+  }
+}
+
+/**
+ * Self-gating recover-my-panes offer (D1/D3): rendered unconditionally from App,
+ * decides its own eligibility, fetches the recovery inventory once, and offers
+ * to recreate the lost tabs from server memory.
+ */
+export function RecoveryOfferPanel(): JSX.Element | null {
+  const dispatch = useAppDispatch()
+  const store = useAppStore()
+  const [inventory, setInventory] = useState<RecoveryInventory | null>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const acceptRef = useRef<HTMLButtonElement>(null)
+  const previousFocusRef = useRef<HTMLElement | null>(null)
+  const previousOverflowRef = useRef<string | null>(null)
+  const open = inventory !== null
+
+  useEffect(() => {
+    const pending = getPendingOffer()
+    // D1: a boot that found a persisted layout lost nothing — unless a pending
+    // offer from an earlier (empty) boot is still awaiting an answer.
+    if (hadPersistedLayoutAtBoot && !pending) return
+    // D2: anchor the server's concurrent-client cutoff to the ORIGINAL
+    // pre-junk boot, also across pending re-offers.
+    const bootAt = pending?.bootAt ?? bootCapturedAtMs
+    let cancelled = false
+    getRecoveryInventory(getCurrentTabRegistryClientInstanceId(), Date.now() - bootAt)
+      .then((inv) => {
+        if (cancelled) return
+        // Focused-ep4-r2 Finding 4 (vacuous-offer suppression): the
+        // offerability check consumes the SAME placeable-row predicate as the
+        // plan — countRecoverablePanes sums device-tab panes plus
+        // `placeLedgerEntries`'s joined rows. Against an older server (or any
+        // inventory whose ledger rows are all unplaceable with no device
+        // tabs) that count is 0, and the panel used to render "Restore 0
+        // panes", record the pending offer, and accept vacuously. Zero
+        // placeable panes is not recoverable: do not render, and clear the
+        // pending record like any other dead offer.
+        if (!inv.recoverable || isDismissed(inv.contentId) || countRecoverablePanes(inv) === 0) {
+          // A dead offer (nothing recoverable / already dismissed) must not
+          // leave a stale pending record causing pointless fetches every boot.
+          // Fetch ERRORS deliberately keep the flag set (retry next boot).
+          clearPendingOffer()
+          return
+        }
+        setPendingOffer(inv.contentId, bootAt)
+        setInventory(inv)
+      })
+      .catch(() => {
+        // Recovery is best-effort: on fetch failure, stay quiet.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Focus management + body scroll-lock while the dialog is open
+  // (confirm-modal.tsx pattern).
+  useEffect(() => {
+    if (!open) return
+    previousFocusRef.current = document.activeElement as HTMLElement | null
+    previousOverflowRef.current = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+
+    const focusTimer = window.setTimeout(() => {
+      acceptRef.current?.focus()
+    }, 0)
+
+    return () => {
+      window.clearTimeout(focusTimer)
+      document.body.style.overflow = previousOverflowRef.current || ''
+      previousFocusRef.current?.focus()
+    }
+  }, [open])
+
+  // Escape closes WITHOUT deciding: unlike decline (which permanently records
+  // dismissal), an undecided close keeps the pending flag set so the offer
+  // re-appears next boot (D3) — matching confirm-modal's "cancel" semantics.
+  useEffect(() => {
+    if (!open) return
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setInventory(null)
+      }
+    }
+    document.addEventListener('keydown', handleKey)
+    return () => document.removeEventListener('keydown', handleKey)
+  }, [open])
+
+  const closeWithoutDecision = () => {
+    setInventory(null)
+  }
+
+  const accept = () => {
+    if (!inventory) return
+    clearPendingOffer()
+    const plans = buildRecoveryPlan(inventory)
+    for (const plan of plans) {
+      dispatch(addTab({ id: plan.tabId, title: plan.title }))
+      dispatch(restoreLayout({ tabId: plan.tabId, layout: plan.layout, paneTitles: plan.paneTitles }))
+      // Focused-episode-6 round 5 (Finding F1): live terminal panes reattach
+      // to their still-running terminals — arm the plan's one-shot
+      // paneId→terminalId targets (pane node ids survive restoreLayout
+      // normalization, so the store leaf's own TerminalView mount consults
+      // this exact key before any create).
+      for (const target of plan.liveTerminalReattach ?? []) {
+        armRecoveredLiveTerminalTarget(plan.tabId, target.paneId, target.terminalId)
+      }
+    }
+    armRecoveredTerminalRestores(store.getState(), plans.map((p) => p.tabId))
+    setInventory(null)
+  }
+
+  const decline = () => {
+    if (inventory) recordDismissal(inventory.contentId)
+    clearPendingOffer()
+    setInventory(null)
+  }
+
+  if (!inventory) return null
+
+  const paneCount = countRecoverablePanes(inventory)
+  const device = inventory.device
+  // Focused-episode-6 round 5 (Finding F1): the live note now explains the
+  // REATTACH — every live pane (any kind) IS counted, listed, and restored
+  // (it reattaches/adopts the still-running server session; no new process
+  // spawns). The note's condition stays predicate-independent on purpose:
+  // live panes pass the restorability predicate, so the note cannot key off
+  // it without vacuity.
+  // D8 placement: the listing must match the plan's physical destination, so
+  // both consume the same partition — a kept ledger row whose stamped tabKey
+  // names a restorable tab renders under THAT tab in the same line format as
+  // its snapshot panes. Rows without a restorable tab match are not restored
+  // (delta-r2 Finding 3) and are not listed. The heading's count flows through
+  // `countRecoverablePanes`, which consumes the SAME partition (delta-r4
+  // Finding 2) — count, list, and plan can never disagree.
+  const restorableTabs = (device?.tabs ?? []).filter((tab) => tab.panes.length > 0)
+  const placement = placeLedgerEntries(inventory)
+  // Delta-round-7 (Finding F1): the note also covers live LEDGER rows — an
+  // unsnapshotted live row offered as a reattach candidate is exactly a
+  // session "still running on the server". Only JOINED entries count (the
+  // note must describe what the offer actually restores, like the count).
+  const anyLive =
+    (device?.tabs.some((tab) => tab.panes.some((pane) => pane.live)) ?? false) ||
+    [...placement.joinedByTabKey.values()].some((entries) => entries.some((e) => e.live === true))
+
+  return createPortal(
+    <div
+      className={`fixed inset-0 flex items-center justify-center bg-black/50 ${OVERLAY_Z.modal}`}
+      onClick={closeWithoutDecision}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          closeWithoutDecision()
+        }
+      }}
+      role="presentation"
+      tabIndex={-1}
+    >
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={HEADING_ID}
+        data-testid="recovery-offer-panel"
+        className="bg-background border border-border rounded-lg shadow-lg w-full max-w-md mx-4 p-5 max-h-[80vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key !== 'Tab') return
+          const dialog = dialogRef.current
+          if (!dialog) return
+          const focusables = getFocusable(dialog)
+          if (focusables.length === 0) {
+            e.preventDefault()
+            return
+          }
+          const first = focusables[0]
+          const last = focusables[focusables.length - 1]
+          const active = document.activeElement as HTMLElement | null
+          if (e.shiftKey) {
+            if (active === first || !dialog.contains(active)) {
+              e.preventDefault()
+              last.focus()
+            }
+          } else if (active === last) {
+            e.preventDefault()
+            first.focus()
+          }
+        }}
+      >
+        <h2 id={HEADING_ID} className="text-lg font-semibold">
+          Restore {paneCount} {paneCount === 1 ? 'pane' : 'panes'} from server memory?
+        </h2>
+        {device && <p className="mt-1 text-xs text-muted-foreground">{device.deviceLabel}</p>}
+        {/* Sole scroll region (R1): keeps heading, notes, and buttons out of the scrollable area. */}
+        <ul className="mt-3 text-sm text-muted-foreground list-disc pl-5 space-y-1 overflow-y-auto flex-1 min-h-0">
+          {restorableTabs.flatMap((tab) => [
+            // Delta-r6 F1/F2: the listing consumes the SAME restorability
+            // predicate as the count and the plan — a closed-verdict pane is
+            // never listed (live panes ARE listed: they restore by reattach,
+            // round-5 F1).
+            ...tab.panes.filter(isRestorablePane).map((pane) => (
+              <li key={`${tab.tabKey}:${pane.paneId}`}>
+                {tab.tabName}: {pane.mode ?? pane.kind}
+                {pane.cwd ? ` — ${pane.cwd}` : ''}
+              </li>
+            )),
+            ...(placement.joinedByTabKey.get(tab.tabKey) ?? []).map((entry) => (
+              <li key={`${entry.provider}:${entry.sessionId}`}>
+                {tab.tabName}: {entry.mode}
+                {entry.cwd ? ` — ${entry.cwd}` : ''}
+              </li>
+            )),
+          ])}
+        </ul>
+        {anyLive && (
+          <p data-testid="recovery-live-note" className="mt-3 text-xs text-muted-foreground">
+            Some sessions are still running on the server — restoring reattaches to them in place
+            (no new process is started).
+          </p>
+        )}
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" size="sm" data-testid="recovery-decline" onClick={decline}>
+            Not now
+          </Button>
+          <Button
+            ref={acceptRef}
+            variant="default"
+            size="sm"
+            data-testid="recovery-accept"
+            onClick={accept}
+          >
+            Restore
+          </Button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  )
+}

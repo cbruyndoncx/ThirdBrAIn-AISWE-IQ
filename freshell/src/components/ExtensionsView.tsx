@@ -1,0 +1,484 @@
+// Extension management page — shows extensions with expandable config cards.
+
+import { useCallback, useMemo, useRef, useState } from 'react'
+import { useAppSelector, useAppDispatch } from '@/store/hooks'
+import { useEnsureExtensionsRegistry } from '@/hooks/useEnsureExtensionsRegistry'
+import { saveServerSettingsPatch } from '@/store/settingsThunks'
+import {
+  stageServerSettingsPatchPreview,
+} from '@/store/settingsThunks'
+import { selectManagedItems, type ManagedItem, type ManagedItemConfig } from '@/store/managed-items'
+import type { AppView } from '@/components/Sidebar'
+import type { ServerSettingsPatch } from '@/store/types'
+import { api } from '@/lib/api'
+import { cn } from '@/lib/utils'
+import { ArrowLeft, Puzzle, Server, Monitor, Terminal, ChevronDown, Settings2 } from 'lucide-react'
+
+const SERVER_TEXT_SETTINGS_DEBOUNCE_MS = 500
+
+interface ExtensionsViewProps {
+  onNavigate: (view: AppView) => void
+}
+
+interface ExtensionsManagerProps {
+  className?: string
+  includeCli?: boolean
+}
+
+function categoryIcon(category: 'cli' | 'server' | 'client') {
+  switch (category) {
+    case 'server': return <Server className="w-4 h-4" />
+    case 'client': return <Monitor className="w-4 h-4" />
+    case 'cli': return <Terminal className="w-4 h-4" />
+  }
+}
+
+function categoryLabel(category: 'cli' | 'server' | 'client') {
+  switch (category) {
+    case 'server': return 'Server'
+    case 'client': return 'Client'
+    case 'cli': return 'CLI'
+  }
+}
+
+function groupLabel(kind: 'cli' | 'server' | 'client') {
+  switch (kind) {
+    case 'cli': return 'CLI Agents'
+    case 'server': return 'Server Extensions'
+    case 'client': return 'Client Extensions'
+  }
+}
+
+interface ConfigFieldProps {
+  item: ManagedItem
+  field: ManagedItemConfig
+  onConfigChange: (item: ManagedItem, key: string, value: unknown) => void
+  cwdDrafts: Record<string, string>
+  cwdErrors: Record<string, string | null>
+}
+
+function ConfigField({ item, field, onConfigChange, cwdDrafts, cwdErrors }: ConfigFieldProps) {
+  const fieldId = `${item.id}-${field.key}`
+
+  if (field.type === 'select') {
+    return (
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+        <label htmlFor={fieldId} className="text-xs text-muted-foreground">{field.label}</label>
+        <select
+          id={fieldId}
+          value={field.value as string}
+          onChange={(e) => onConfigChange(item, field.key, e.target.value)}
+          className="h-8 w-full px-2 text-xs bg-muted border-0 rounded-md focus:outline-none focus:ring-1 focus:ring-border sm:w-auto sm:min-w-[10rem]"
+        >
+          {field.options?.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+      </div>
+    )
+  }
+
+  if (field.type === 'toggle') {
+    return (
+      <div className="flex items-center justify-between">
+        <label htmlFor={fieldId} className="text-xs text-muted-foreground">{field.label}</label>
+        <button
+          id={fieldId}
+          role="switch"
+          aria-checked={field.value as boolean}
+          onClick={() => onConfigChange(item, field.key, !(field.value as boolean))}
+          className={cn(
+            'relative w-8 h-4 rounded-full transition-colors',
+            field.value ? 'bg-foreground' : 'bg-muted',
+          )}
+        >
+          <div
+            className={cn(
+              'absolute top-0.5 h-3 w-3 rounded-full transition-all',
+              field.value ? 'left-[1rem] bg-background' : 'left-0.5 bg-muted-foreground',
+            )}
+            aria-hidden="true"
+          />
+        </button>
+      </div>
+    )
+  }
+
+  if (field.type === 'path') {
+    const cwdKey = `${item.id}.${field.key}`
+    const error = cwdErrors[cwdKey]
+    const draftValue = cwdDrafts[cwdKey] ?? (field.value as string)
+    return (
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+        <label htmlFor={fieldId} className="text-xs text-muted-foreground">{field.label}</label>
+        <div className="relative w-full sm:max-w-[14rem]">
+          <input
+            id={fieldId}
+            type="text"
+            value={draftValue}
+            placeholder="e.g. ~/projects/my-app"
+            aria-label={field.label}
+            aria-invalid={error ? true : undefined}
+            onChange={(e) => onConfigChange(item, field.key, e.target.value)}
+            className="h-8 w-full px-2 text-xs bg-muted border-0 rounded-md placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-border"
+          />
+          {error && (
+            <span className="pointer-events-none absolute right-1 -bottom-3.5 text-[10px] text-destructive">
+              {error}
+            </span>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  // text type
+  return (
+    <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+      <label htmlFor={fieldId} className="text-xs text-muted-foreground">{field.label}</label>
+      <input
+        id={fieldId}
+        type="text"
+        value={field.value as string}
+        placeholder={field.key === 'model' ? (item.id === 'codex' ? 'e.g. gpt-6-astra' : 'e.g. claude-3-5-sonnet') : undefined}
+        aria-label={field.label}
+        onChange={(e) => onConfigChange(item, field.key, e.target.value)}
+        className="h-8 w-full px-2 text-xs bg-muted border-0 rounded-md placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-border sm:max-w-[14rem]"
+      />
+    </div>
+  )
+}
+
+interface ExtensionCardProps {
+  item: ManagedItem
+  expanded: boolean
+  onToggleExpand: () => void
+  onToggleEnabled: (item: ManagedItem, enabled: boolean) => void
+  onConfigChange: (item: ManagedItem, key: string, value: unknown) => void
+  cwdDrafts: Record<string, string>
+  cwdErrors: Record<string, string | null>
+}
+
+function ExtensionCard({ item, expanded, onToggleExpand, onToggleEnabled, onConfigChange, cwdDrafts, cwdErrors }: ExtensionCardProps) {
+  const isRunning = item.kind === 'server' && item.status?.running
+
+  return (
+    <div
+      className={cn(
+        'rounded-lg border border-border/40 bg-card flex flex-col',
+        !item.enabled && 'opacity-50',
+      )}
+      data-testid={`extension-card-${item.id}`}
+    >
+      {/* Card header */}
+      <div className="p-4 flex flex-col gap-3">
+        <div className="flex items-start gap-3">
+          {item.iconUrl ? (
+            <img src={item.iconUrl} alt="" className="w-10 h-10 rounded" />
+          ) : (
+            <div className="w-10 h-10 rounded bg-muted flex items-center justify-center text-muted-foreground">
+              <Puzzle className="w-5 h-5" />
+            </div>
+          )}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <h3 className="font-medium text-sm truncate">{item.name}</h3>
+              <span className="text-xs text-muted-foreground shrink-0">v{item.version}</span>
+            </div>
+            <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{item.description}</p>
+          </div>
+        </div>
+
+        {/* Footer: category badge + status + toggle */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+              {categoryIcon(item.kind)}
+              {categoryLabel(item.kind)}
+            </span>
+            {item.enabled && isRunning && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-400">
+                Running
+              </span>
+            )}
+            {item.picker?.shortcut && (
+              <span className="text-xs text-muted-foreground" title="Keyboard shortcut in pane picker">
+                <kbd className="rounded border border-border/40 px-1 py-0.5 text-[10px] font-mono">{item.picker.shortcut}</kbd>
+              </span>
+            )}
+          </div>
+          <button
+            role="switch"
+            aria-checked={item.enabled}
+            aria-label={`${item.enabled ? 'Disable' : 'Enable'} ${item.name}`}
+            onClick={() => onToggleEnabled(item, !item.enabled)}
+            className={cn(
+              'relative inline-flex h-6 w-11 items-center rounded-full transition-colors',
+              item.enabled ? 'bg-emerald-500' : 'bg-zinc-600',
+            )}
+          >
+            <span
+              className={cn(
+                'inline-block h-4 w-4 rounded-full bg-white shadow transition-transform',
+                item.enabled ? 'translate-x-[22px]' : 'translate-x-[3px]',
+              )}
+            />
+          </button>
+        </div>
+
+        {/* Configure button — prominent, full-width */}
+        {item.config.length > 0 && (
+          <button
+            onClick={onToggleExpand}
+            aria-expanded={expanded}
+            aria-label={`${expanded ? 'Hide' : 'Show'} ${item.name} configuration`}
+            className={cn(
+              'w-full flex items-center justify-center gap-1.5 rounded-md border px-3 py-1.5 text-xs transition-colors',
+              expanded
+                ? 'border-border bg-muted text-foreground'
+                : 'border-border/40 text-muted-foreground hover:text-foreground hover:bg-muted/50',
+            )}
+          >
+            <Settings2 className="w-3.5 h-3.5" />
+            {expanded ? 'Hide Configuration' : 'Configure'}
+            <ChevronDown className={cn('w-3 h-3 ml-0.5 transition-transform', expanded && 'rotate-180')} />
+          </button>
+        )}
+      </div>
+
+      {/* Expanded config */}
+      {expanded && item.config.length > 0 && (
+        <div className="border-t border-border/30 px-4 py-3 space-y-3">
+          {item.config.map((field) => (
+            <ConfigField
+              key={field.key}
+              item={item}
+              field={field}
+              onConfigChange={onConfigChange}
+              cwdDrafts={cwdDrafts}
+              cwdErrors={cwdErrors}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function ExtensionsManager({ className, includeCli = true }: ExtensionsManagerProps = {}) {
+  useEnsureExtensionsRegistry()
+
+  const dispatch = useAppDispatch()
+  const items = useAppSelector(selectManagedItems)
+  const disabledList = useAppSelector((s) => s.settings?.settings?.extensions?.disabled ?? [])
+  const enabledProviders = useAppSelector((s) => s.settings?.settings?.codingCli?.enabledProviders ?? [])
+  const serverConfigDir = useAppSelector((s) => s.settings?.serverConfigDir ?? null)
+  const extensionsDirHint = `${serverConfigDir ?? '~/.freshell'}/extensions/`
+
+  const [expandedCards, setExpandedCards] = useState<Set<string>>(new Set())
+  const [cwdDrafts, setCwdDrafts] = useState<Record<string, string>>({})
+  const [cwdErrors, setCwdErrors] = useState<Record<string, string | null>>({})
+  const cwdTimerRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+  const cwdValidationRef = useRef<Record<string, number>>({})
+  const textSaveTimerRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+
+  const toggleExpand = useCallback((id: string) => {
+    setExpandedCards((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  const handleToggleEnabled = useCallback((item: ManagedItem, enabled: boolean) => {
+    if (item.kind === 'cli') {
+      const nextProviders = enabled
+        ? Array.from(new Set([...enabledProviders, item.id]))
+        : enabledProviders.filter((p) => p !== item.id)
+      // When enabling, also clear extensions.disabled so PanePicker doesn't hide it
+      const patch: Record<string, unknown> = { codingCli: { enabledProviders: nextProviders } }
+      if (enabled && disabledList.includes(item.id)) {
+        patch.extensions = { disabled: disabledList.filter((n) => n !== item.id) }
+      }
+      void dispatch(saveServerSettingsPatch(patch))
+    } else {
+      const next = enabled
+        ? disabledList.filter((n) => n !== item.id)
+        : [...new Set([...disabledList, item.id])]
+      void dispatch(saveServerSettingsPatch({ extensions: { disabled: next } }))
+    }
+  }, [dispatch, disabledList, enabledProviders])
+
+  const scheduleTextSave = useCallback((key: string, patch: ServerSettingsPatch) => {
+    dispatch(stageServerSettingsPatchPreview({ key, patch }))
+    if (textSaveTimerRef.current[key]) {
+      clearTimeout(textSaveTimerRef.current[key])
+    }
+    textSaveTimerRef.current[key] = setTimeout(() => {
+      delete textSaveTimerRef.current[key]
+      void dispatch(saveServerSettingsPatch({ patch, stagedKey: key }))
+    }, SERVER_TEXT_SETTINGS_DEBOUNCE_MS)
+  }, [dispatch])
+
+  const scheduleCwdValidation = useCallback((itemId: string, key: string, value: string) => {
+    const cwdKey = `${itemId}.${key}`
+    if (!cwdValidationRef.current[cwdKey]) cwdValidationRef.current[cwdKey] = 0
+    cwdValidationRef.current[cwdKey] += 1
+    const validationId = cwdValidationRef.current[cwdKey]
+    if (cwdTimerRef.current[cwdKey]) clearTimeout(cwdTimerRef.current[cwdKey])
+
+    cwdTimerRef.current[cwdKey] = setTimeout(() => {
+      if (cwdValidationRef.current[cwdKey] !== validationId) return
+      const trimmed = value.trim()
+      if (!trimmed) {
+        setCwdErrors((prev) => ({ ...prev, [cwdKey]: null }))
+        void dispatch(saveServerSettingsPatch({
+          codingCli: { providers: { [itemId]: { cwd: undefined } } },
+        }))
+        return
+      }
+
+      api.post<{ valid: boolean }>('/api/files/validate-dir', { path: trimmed })
+        .then((result) => {
+          if (cwdValidationRef.current[cwdKey] !== validationId) return
+          if (result.valid) {
+            setCwdErrors((prev) => ({ ...prev, [cwdKey]: null }))
+            void dispatch(saveServerSettingsPatch({
+              codingCli: { providers: { [itemId]: { cwd: trimmed } } },
+            }))
+          } else {
+            setCwdErrors((prev) => ({ ...prev, [cwdKey]: 'directory not found' }))
+          }
+        })
+        .catch(() => {
+          if (cwdValidationRef.current[cwdKey] !== validationId) return
+          setCwdErrors((prev) => ({ ...prev, [cwdKey]: 'directory not found' }))
+        })
+    }, 500)
+  }, [dispatch])
+
+  const handleConfigChange = useCallback((item: ManagedItem, key: string, value: unknown) => {
+    if (item.kind === 'cli') {
+      if (key === 'cwd') {
+        setCwdDrafts((prev) => ({ ...prev, [`${item.id}.cwd`]: value as string }))
+        scheduleCwdValidation(item.id, key, value as string)
+        return
+      }
+      if (key === 'model') {
+        const model = (value as string).trim()
+        scheduleTextSave(`codingCli.providers.${item.id}.model`, {
+          codingCli: { providers: { [item.id]: { model: model || undefined } } },
+        })
+        return
+      }
+      // Immediate saves for select fields
+      const settingValue = (value === '' || value === 'default') ? undefined : value
+      void dispatch(saveServerSettingsPatch({
+        codingCli: { providers: { [item.id]: { [key]: settingValue } } },
+      }))
+    } else {
+      // Non-CLI extensions with contentSchema — persist via extension-scoped storage
+      const storeKey = `extensions.${item.id}.${key}`
+      if (typeof value === 'string') {
+        scheduleTextSave(storeKey, {
+          extensions: { contentDefaults: { [item.id]: { [key]: value || undefined } } },
+        } as any)
+      } else {
+        void dispatch(saveServerSettingsPatch({
+          extensions: { contentDefaults: { [item.id]: { [key]: value } } },
+        } as any))
+      }
+    }
+  }, [dispatch, scheduleCwdValidation, scheduleTextSave])
+
+  const visibleItems = useMemo(
+    () => includeCli ? items : items.filter((item) => item.kind !== 'cli'),
+    [includeCli, items],
+  )
+
+  const groups = useMemo(() => {
+    const cli = visibleItems.filter((i) => i.kind === 'cli')
+    const server = visibleItems.filter((i) => i.kind === 'server')
+    const client = visibleItems.filter((i) => i.kind === 'client')
+    return [
+      { kind: 'cli' as const, items: cli },
+      { kind: 'server' as const, items: server },
+      { kind: 'client' as const, items: client },
+    ].filter((g) => g.items.length > 0)
+  }, [visibleItems])
+
+  return (
+    <div className={cn('space-y-6', className)}>
+      {visibleItems.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
+          <Puzzle className="w-12 h-12 mb-4 opacity-50" />
+          <p className="text-lg font-medium">No extensions installed</p>
+          {includeCli && (
+            <p className="text-sm mt-1">
+              Drop a directory with a <code className="rounded bg-muted px-1 py-0.5 text-xs">freshell.json</code> into <code className="rounded bg-muted px-1 py-0.5 text-xs">{extensionsDirHint}</code> and restart.
+            </p>
+          )}
+        </div>
+      ) : (
+        groups.map((group) => (
+          <div key={group.kind}>
+            <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3">
+              {groupLabel(group.kind)}
+            </h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {group.items.map((item) => (
+                <ExtensionCard
+                  key={item.id}
+                  item={item}
+                  expanded={expandedCards.has(item.id)}
+                  onToggleExpand={() => toggleExpand(item.id)}
+                  onToggleEnabled={handleToggleEnabled}
+                  onConfigChange={handleConfigChange}
+                  cwdDrafts={cwdDrafts}
+                  cwdErrors={cwdErrors}
+                />
+              ))}
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  )
+}
+
+export default function ExtensionsView({ onNavigate }: ExtensionsViewProps) {
+  useEnsureExtensionsRegistry()
+
+  const items = useAppSelector(selectManagedItems)
+
+  return (
+    <div className="h-full flex flex-col">
+      {/* Header */}
+      <div className="border-b border-border/30 px-3 py-4 md:px-6 md:py-5">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => onNavigate('settings')}
+            className="rounded-md p-1.5 hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+            aria-label="Back to settings"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight">Extensions</h1>
+            <p className="text-sm text-muted-foreground">
+              {items.length} extension{items.length !== 1 ? 's' : ''} installed
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-3xl px-3 py-4 md:px-6 md:py-6">
+          <ExtensionsManager />
+        </div>
+      </div>
+    </div>
+  )
+}

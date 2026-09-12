@@ -1,0 +1,48 @@
+import { Terminal, Globe, FileText, LayoutGrid, Gauge } from 'lucide-react'
+import { ProviderIcon } from '@/components/icons/provider-icons'
+import { isNonShellMode } from '@/lib/coding-cli-utils'
+import { resolveFreshAgentType } from '@/lib/fresh-agent-registry'
+import type { PaneContent } from '@/store/paneTypes'
+
+interface PaneIconProps {
+  content: PaneContent
+  className?: string
+}
+
+export default function PaneIcon({ content, className }: PaneIconProps) {
+  if (content.kind === 'terminal') {
+    if (isNonShellMode(content.mode)) {
+      return <ProviderIcon provider={content.mode} className={className} />
+    }
+    return <Terminal className={className} />
+  }
+
+  if (content.kind === 'browser') {
+    return <Globe className={className} />
+  }
+
+  if (content.kind === 'editor') {
+    return <FileText className={className} />
+  }
+
+  if (content.kind === 'fresh-agent') {
+    const config = resolveFreshAgentType(content.sessionType)
+    if (config) {
+      const Icon = config.icon
+      return <Icon className={className} />
+    }
+    return <LayoutGrid className={className} />
+  }
+
+  if (content.kind === 'extension') {
+    // V1: LayoutGrid fallback. Future: load SVG from iconUrl
+    return <LayoutGrid className={className} />
+  }
+
+  if (content.kind === 'host-stats') {
+    return <Gauge className={className} />
+  }
+
+  // Picker
+  return <LayoutGrid className={className} />
+}

@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/danshapiro/freshell.git
+	branch = main
+	commit = eb5eb739dc43c862adf9463302c1f4d6c4a56e42
+	parent = e95068230ea7705eb82aeb8dd371b82fc03a07d3
+	method = merge
+	cmdver = 0.4.9

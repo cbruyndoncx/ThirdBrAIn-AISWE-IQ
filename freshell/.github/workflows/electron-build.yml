@@ -1,0 +1,46 @@
+name: Electron Build
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'electron/**'
+      - 'config/electron-builder.yml'
+      - 'scripts/prepare-bundled-node.ts'
+      - 'scripts/bundled-node-version.json'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-latest, ubuntu-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Electron tests
+        run: npm run test:electron
+
+      - name: Build Electron app
+        run: npm run electron:build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-${{ matrix.os }}
+          path: release/*
+          retention-days: 14

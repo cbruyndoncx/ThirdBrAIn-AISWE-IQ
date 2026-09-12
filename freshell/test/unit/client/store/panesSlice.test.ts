@@ -1,0 +1,5039 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import panesReducer, {
+  initLayout,
+  restoreLayout,
+  splitPane,
+  swapPanes,
+  addPane,
+  closePane,
+  setActivePane,
+  nudgePaneFocus,
+  resizePanes,
+  resizeMultipleSplits,
+  updatePaneContent,
+  mergePaneContent,
+  requestPaneRefresh,
+  requestTabRefresh,
+  replacePane,
+  removeLayout,
+  hydratePanes,
+  updatePaneTitle,
+  updatePaneTitleByTerminalId,
+  requestPaneRename,
+  clearPaneRenameRequest,
+  toggleZoom,
+  clearDeadTerminals,
+  clearTerminalLiveHandles,
+  restartFreshAgentCreate,
+  repairCodexIdentityMismatch,
+  PanesState,
+} from '../../../../src/store/panesSlice'
+import type { PaneNode, PaneContent, TerminalPaneContent, BrowserPaneContent, EditorPaneContent, ExtensionPaneContent, FreshAgentPaneContent } from '../../../../src/store/paneTypes'
+import { preservedDurableFreshAgentIdentity } from '../../../../shared/fresh-agent.js'
+
+const VALID_CLAUDE_SESSION_ID = '550e8400-e29b-41d4-a716-446655440000'
+
+// Mock nanoid to return predictable IDs for testing
+let mockIdCounter = 0
+vi.mock('nanoid', () => ({
+  nanoid: vi.fn(() => `pane-${++mockIdCounter}`),
+}))
+
+describe('panesSlice', () => {
+  let initialState: PanesState
+  const localClaudeSessionId = '550e8400-e29b-41d4-a716-446655440000'
+  const remoteClaudeSessionId = '550e8400-e29b-41d4-a716-446655440001'
+
+  beforeEach(() => {
+    initialState = {
+      layouts: {},
+      activePane: {},
+      paneTitles: {},
+      paneTitleSetByUser: {},
+      renameRequestTabId: null,
+      renameRequestPaneId: null,
+      zoomedPane: {},
+      refreshRequestsByPane: {},
+    }
+    mockIdCounter = 0
+    vi.clearAllMocks()
+  })
+
+  function refreshLeaf(id: string, content: PaneContent): PaneNode {
+    return { type: 'leaf', id, content }
+  }
+
+  function refreshSplit(children: [PaneNode, PaneNode]): PaneNode {
+    return {
+      type: 'split',
+      id: 'split-refresh',
+      direction: 'horizontal',
+      children,
+      sizes: [50, 50],
+    }
+  }
+
+  function firstLeafId(node: PaneNode): string {
+    if (node.type === 'leaf') return node.id
+    return firstLeafId(node.children[0])
+  }
+
+  function stateWithLayout(layouts: Record<string, PaneNode>): PanesState {
+    const activePane = Object.fromEntries(
+      Object.entries(layouts).map(([tabId, layout]) => [tabId, firstLeafId(layout)]),
+    )
+    return {
+      layouts,
+      activePane,
+      paneTitles: {},
+      paneTitleSetByUser: {},
+      renameRequestTabId: null,
+      renameRequestPaneId: null,
+      zoomedPane: {},
+      refreshRequestsByPane: {},
+    }
+  }
+
+  function stateWithLeaf(paneId: string, content: PaneContent): PanesState {
+    return stateWithLayout({ 'tab-1': refreshLeaf(paneId, content) })
+  }
+
+  function stateWithLayoutAndZoom({
+    layout,
+    zoomedPaneId,
+  }: {
+    layout: PaneNode
+    zoomedPaneId: string
+  }): PanesState {
+    return {
+      ...stateWithLayout({ 'tab-1': layout }),
+      zoomedPane: { 'tab-1': zoomedPaneId },
+    }
+  }
+
+  const refreshEditorContent: EditorPaneContent = {
+    kind: 'editor',
+    filePath: '/tmp/example.ts',
+    language: 'typescript',
+    readOnly: false,
+    content: 'export const x = 1',
+    viewMode: 'source',
+  }
+
+  describe('initLayout', () => {
+    it('creates a single-pane layout for a tab', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'shell' } })
+      )
+
+      expect(state.layouts['tab-1']).toBeDefined()
+      expect(state.layouts['tab-1'].type).toBe('leaf')
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.content.kind).toBe('terminal')
+      if (leaf.content.kind === 'terminal') {
+        expect(leaf.content.mode).toBe('shell')
+        expect(leaf.content.createRequestId).toBeDefined()
+        expect(leaf.content.status).toBe('creating')
+      }
+      expect(leaf.id).toBeDefined()
+    })
+
+    it('sets the new pane as active', () => {
+      const content: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content })
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(state.activePane['tab-1']).toBe(leaf.id)
+    })
+
+    it('seeds paneTitles from the initialized pane content', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'codex', status: 'running' } })
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(state.paneTitles['tab-1'][leaf.id]).toBe('Codex')
+    })
+
+    it('uses the provided paneId when supplied', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', paneId: 'pane-fixed', content: { kind: 'terminal', mode: 'shell' } })
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.id).toBe('pane-fixed')
+      expect(state.activePane['tab-1']).toBe('pane-fixed')
+    })
+
+    it('does not overwrite existing layout for a tab', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', mode: 'claude' }
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const originalLayout = state.layouts['tab-1']
+      const originalActivePane = state.activePane['tab-1']
+
+      state = panesReducer(
+        state,
+        initLayout({ tabId: 'tab-1', content: content2 })
+      )
+
+      expect(state.layouts['tab-1']).toBe(originalLayout)
+      expect(state.activePane['tab-1']).toBe(originalActivePane)
+    })
+
+    it('creates layouts for different tabs independently', () => {
+      const content1 = { kind: 'terminal' as const, mode: 'shell' as const }
+      const content2 = { kind: 'browser', url: 'https://example.com', devToolsOpen: false } as any
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      state = panesReducer(
+        state,
+        initLayout({ tabId: 'tab-2', content: content2 })
+      )
+
+      expect(state.layouts['tab-1']).toBeDefined()
+      expect(state.layouts['tab-2']).toBeDefined()
+      const leaf1 = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      const leaf2 = state.layouts['tab-2'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf1.content.kind).toBe('terminal')
+      expect(leaf2.content).toMatchObject(content2)
+      expect((leaf2.content as any).browserInstanceId).toBeDefined()
+    })
+
+    it('generates createRequestId and status for terminal content', () => {
+      // Initialize with minimal terminal input
+      const state = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          content: { kind: 'terminal', mode: 'shell' },
+        })
+      )
+
+      const layout = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+
+      expect(layout.content.kind).toBe('terminal')
+      if (layout.content.kind === 'terminal') {
+        expect(layout.content.createRequestId).toBeDefined()
+        expect(layout.content.createRequestId.length).toBeGreaterThan(0)
+        expect(layout.content.status).toBe('creating')
+        expect(layout.content.shell).toBe('system')
+      }
+    })
+
+    it('generates browserInstanceId for browser pane input', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          content: { kind: 'browser', url: 'https://example.com', devToolsOpen: false } as any,
+        }),
+      )
+
+      const layout = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(layout.content.kind).toBe('browser')
+      if (layout.content.kind === 'browser') {
+        expect((layout.content as any).browserInstanceId).toBeDefined()
+      }
+    })
+
+    it('preserves provided browserInstanceId when normalizing browser input', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          content: {
+            kind: 'browser',
+            url: 'https://example.com',
+            devToolsOpen: false,
+            browserInstanceId: 'browser-1',
+          } as any,
+        }),
+      )
+
+      const layout = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(layout.content).toMatchObject({
+        kind: 'browser',
+        browserInstanceId: 'browser-1',
+      })
+    })
+
+    it('preserves provided createRequestId and status', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          content: { kind: 'terminal', createRequestId: 'custom-req', status: 'running', mode: 'claude' },
+        })
+      )
+
+      const layout = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+
+      if (layout.content.kind === 'terminal') {
+        expect(layout.content.createRequestId).toBe('custom-req')
+        expect(layout.content.status).toBe('running')
+        expect(layout.content.mode).toBe('claude')
+      }
+    })
+
+    it('does not auto-assign resumeSessionId for claude panes', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'claude' } })
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      if (leaf.content.kind === 'terminal') {
+        expect(leaf.content.resumeSessionId).toBeUndefined()
+      }
+    })
+
+    it('preserves existing resumeSessionId for claude panes', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          content: { kind: 'terminal', mode: 'claude', resumeSessionId: VALID_CLAUDE_SESSION_ID },
+        })
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      if (leaf.content.kind === 'terminal') {
+        expect(leaf.content.resumeSessionId).toBe(VALID_CLAUDE_SESSION_ID)
+      }
+    })
+
+    it('does not synthesize canonical sessionRef from raw terminal resumeSessionId', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          content: { kind: 'terminal', mode: 'claude', resumeSessionId: VALID_CLAUDE_SESSION_ID },
+        }),
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      if (leaf.content.kind !== 'terminal') throw new Error('expected terminal')
+
+      expect(leaf.content.resumeSessionId).toBe(VALID_CLAUDE_SESSION_ID)
+      expect(leaf.content.sessionRef).toBeUndefined()
+    })
+
+    it('does not assign resumeSessionId for shell panes', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'shell' } })
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      if (leaf.content.kind === 'terminal') {
+        expect(leaf.content.resumeSessionId).toBeUndefined()
+      }
+    })
+
+    it('preserves non-UUID resumeSessionId for claude panes (named resume)', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          content: { kind: 'terminal', mode: 'claude', resumeSessionId: 'not-a-uuid' },
+        })
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      if (leaf.content.kind === 'terminal') {
+        // Non-UUID resume names are valid for Claude (named resume support)
+        expect(leaf.content.resumeSessionId).toBe('not-a-uuid')
+      }
+    })
+
+    it('normalizes legacy agent-chat freshclaude input with a canonical Claude id to fresh-agent', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          content: {
+            kind: 'agent-chat',
+            provider: 'freshclaude',
+            resumeSessionId: VALID_CLAUDE_SESSION_ID,
+          },
+        }),
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.content).toMatchObject({
+        kind: 'fresh-agent',
+        sessionType: 'freshclaude',
+        provider: 'claude',
+        resumeSessionId: VALID_CLAUDE_SESSION_ID,
+        sessionRef: {
+          provider: 'claude',
+          sessionId: VALID_CLAUDE_SESSION_ID,
+        },
+      })
+    })
+
+    it('turns a named legacy resume alias into a fresh-agent restore error', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          content: {
+            kind: 'agent-chat',
+            provider: 'freshclaude',
+            resumeSessionId: 'named-resume',
+          },
+        }),
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.content).toMatchObject({
+        kind: 'fresh-agent',
+        sessionType: 'freshclaude',
+        provider: 'claude',
+        restoreError: { code: 'RESTORE_UNAVAILABLE', reason: 'invalid_legacy_restore_target' },
+      })
+      expect(leaf.content.sessionRef).toBeUndefined()
+      expect(leaf.content.resumeSessionId).toBeUndefined()
+    })
+
+    it('does not recompute sessionRef for a bad legacy alias with a canonical resumeSessionId', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          content: {
+            kind: 'agent-chat',
+            provider: 'freshclaude',
+            sessionRef: { provider: 'claude', sessionId: 'named-alias' },
+            resumeSessionId: VALID_CLAUDE_SESSION_ID,
+          },
+        }),
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.content).toMatchObject({
+        kind: 'fresh-agent',
+        sessionType: 'freshclaude',
+        provider: 'claude',
+        restoreError: { code: 'RESTORE_UNAVAILABLE', reason: 'invalid_legacy_restore_target' },
+      })
+      expect(leaf.content.sessionRef).toBeUndefined()
+      expect(leaf.content.resumeSessionId).toBeUndefined()
+    })
+
+    it('turns an existing fresh-agent bad Claude sessionRef into a restore error', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          content: {
+            kind: 'fresh-agent',
+            sessionType: 'freshclaude',
+            provider: 'claude',
+            sessionRef: { provider: 'claude', sessionId: 'named-alias' },
+            resumeSessionId: VALID_CLAUDE_SESSION_ID,
+            initialCwd: '/repo',
+            showTools: true,
+          },
+        }),
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.content).toMatchObject({
+        kind: 'fresh-agent',
+        sessionType: 'freshclaude',
+        provider: 'claude',
+        restoreError: { code: 'RESTORE_UNAVAILABLE', reason: 'invalid_legacy_restore_target' },
+        initialCwd: '/repo',
+        showTools: true,
+      })
+      expect(leaf.content.sessionRef).toBeUndefined()
+      expect(leaf.content.resumeSessionId).toBeUndefined()
+    })
+
+    it('preserves fresh-agent style through content initialization and merge updates', () => {
+      const state = panesReducer(undefined, initLayout({
+        tabId: 'tab-style',
+        paneId: 'pane-style',
+        content: {
+          kind: 'fresh-agent',
+          sessionType: 'freshcodex',
+          provider: 'codex',
+          createRequestId: 'req-style',
+          status: 'idle',
+          style: 'serif',
+        },
+      }))
+
+      const initialized = state.layouts['tab-style']
+      expect(initialized.type).toBe('leaf')
+      expect(initialized.type === 'leaf' && initialized.content.kind === 'fresh-agent'
+        ? initialized.content.style
+        : null).toBe('serif')
+
+      const updated = panesReducer(state, mergePaneContent({
+        tabId: 'tab-style',
+        paneId: 'pane-style',
+        updates: { style: 'sans' },
+      }))
+      const updatedNode = updated.layouts['tab-style']
+      expect(updatedNode.type === 'leaf' && updatedNode.content.kind === 'fresh-agent'
+        ? updatedNode.content.style
+        : null).toBe('sans')
+    })
+
+    it('does not force a style override onto legacy fresh-agent panes', () => {
+      const state = panesReducer(undefined, initLayout({
+        tabId: 'tab-legacy-style',
+        paneId: 'pane-legacy-style',
+        content: {
+          kind: 'fresh-agent',
+          sessionType: 'freshcodex',
+          provider: 'codex',
+          createRequestId: 'req-legacy-style',
+          status: 'idle',
+        },
+      }))
+
+      const initialized = state.layouts['tab-legacy-style']
+      expect(initialized.type === 'leaf' && initialized.content.kind === 'fresh-agent'
+        ? initialized.content.style
+        : 'unexpected').toBeUndefined()
+    })
+
+    it('keeps a fresh-agent pane’s stamped modelEffortLevels through init and merge normalization', () => {
+      const state = panesReducer(undefined, initLayout({
+        tabId: 'tab-stamp',
+        paneId: 'pane-stamp',
+        content: {
+          kind: 'fresh-agent',
+          sessionType: 'freshclaude',
+          provider: 'claude',
+          createRequestId: 'req-stamp',
+          status: 'idle',
+          model: 'sonnet',
+          effort: 'alpha',
+          modelEffortLevels: ['alpha', 'beta'],
+        },
+      }))
+
+      const initialized = state.layouts['tab-stamp']
+      expect(initialized.type === 'leaf' && initialized.content.kind === 'fresh-agent'
+        ? initialized.content.modelEffortLevels
+        : null).toEqual(['alpha', 'beta'])
+
+      const updated = panesReducer(state, mergePaneContent({
+        tabId: 'tab-stamp',
+        paneId: 'pane-stamp',
+        updates: { effort: 'beta' },
+      }))
+      const updatedNode = updated.layouts['tab-stamp']
+      expect(updatedNode.type === 'leaf' && updatedNode.content.kind === 'fresh-agent'
+        ? updatedNode.content.modelEffortLevels
+        : null).toEqual(['alpha', 'beta'])
+    })
+
+    it('drops malformed modelEffortLevels values during fresh-agent content normalization', () => {
+      const junkState = panesReducer(undefined, initLayout({
+        tabId: 'tab-junk',
+        content: {
+          kind: 'fresh-agent',
+          sessionType: 'freshclaude',
+          provider: 'claude',
+          status: 'idle',
+          modelEffortLevels: 'bogus',
+        } as any,
+      }))
+      const junkLeaf = junkState.layouts['tab-junk']
+      expect(junkLeaf.type === 'leaf' && junkLeaf.content.kind === 'fresh-agent'
+        ? junkLeaf.content.modelEffortLevels
+        : 'unexpected').toBeUndefined()
+
+      const mixedState = panesReducer(undefined, initLayout({
+        tabId: 'tab-mixed',
+        content: {
+          kind: 'fresh-agent',
+          sessionType: 'freshclaude',
+          provider: 'claude',
+          status: 'idle',
+          modelEffortLevels: ['low', 42, 'high'],
+        } as any,
+      }))
+      const mixedLeaf = mixedState.layouts['tab-mixed']
+      expect(mixedLeaf.type === 'leaf' && mixedLeaf.content.kind === 'fresh-agent'
+        ? mixedLeaf.content.modelEffortLevels
+        : null).toEqual(['low', 'high'])
+    })
+  })
+
+  describe('restartFreshAgentCreate', () => {
+    it('moves a fresh-agent pane into stable create-failed state until an explicit retry restarts it', () => {
+      const state = panesReducer(
+        stateWithLeaf('pane-agent', {
+          kind: 'fresh-agent',
+          sessionType: 'freshclaude',
+          provider: 'claude',
+          createRequestId: 'req-1',
+          status: 'create-failed' as any,
+          createError: {
+            code: 'RESTORE_INTERNAL',
+            message: 'boom',
+            retryable: true,
+          },
+        } as any),
+        restartFreshAgentCreate({ tabId: 'tab-1', paneId: 'pane-agent' }),
+      )
+
+      const layout = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(layout.content).toMatchObject({
+        kind: 'fresh-agent',
+        status: 'creating',
+      })
+      if (layout.content.kind === 'fresh-agent') {
+        expect((layout.content as any).createError).toBeUndefined()
+        expect(layout.content.createRequestId).not.toBe('req-1')
+      }
+    })
+  })
+
+  describe('splitPane', () => {
+    it('converts a leaf pane into a horizontal split with two children', () => {
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'shell' } })
+      )
+      const originalPaneId = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: originalPaneId,
+          direction: 'horizontal',
+          newContent: { kind: 'terminal', mode: 'claude' },
+        })
+      )
+
+      const root = state.layouts['tab-1']
+      expect(root.type).toBe('split')
+      const split = root as Extract<PaneNode, { type: 'split' }>
+      expect(split.direction).toBe('horizontal')
+      expect(split.children).toHaveLength(2)
+      expect(split.sizes).toEqual([50, 50])
+
+      const [first, second] = split.children
+      expect(first.type).toBe('leaf')
+      expect(second.type).toBe('leaf')
+      const firstContent = (first as Extract<PaneNode, { type: 'leaf' }>).content
+      const secondContent = (second as Extract<PaneNode, { type: 'leaf' }>).content
+      expect(firstContent.kind).toBe('terminal')
+      expect(secondContent.kind).toBe('terminal')
+      if (firstContent.kind === 'terminal') {
+        expect(firstContent.mode).toBe('shell')
+      }
+      if (secondContent.kind === 'terminal') {
+        expect(secondContent.mode).toBe('claude')
+      }
+    })
+
+    it('uses the provided newPaneId when supplied', () => {
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'shell' } })
+      )
+      const originalPaneId = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: originalPaneId,
+          direction: 'horizontal',
+          newPaneId: 'pane-fixed',
+          newContent: { kind: 'terminal', mode: 'claude' },
+        })
+      )
+
+      const split = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const claudeLeaf = split.children[1] as Extract<PaneNode, { type: 'leaf' }>
+      expect(claudeLeaf.id).toBe('pane-fixed')
+      expect(state.activePane['tab-1']).toBe('pane-fixed')
+      if (claudeLeaf.content.kind === 'terminal') {
+        expect(claudeLeaf.content.resumeSessionId).toBeUndefined()
+      }
+    })
+
+    it('converts a leaf pane into a vertical split', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'browser', url: 'https://test.com', devToolsOpen: true }
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const originalPaneId = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: originalPaneId,
+          direction: 'vertical',
+          newContent: content2,
+        })
+      )
+
+      const split = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      expect(split.direction).toBe('vertical')
+    })
+
+    it('sets the new pane as active', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', mode: 'claude' }
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const originalPaneId = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: originalPaneId,
+          direction: 'horizontal',
+          newContent: content2,
+        })
+      )
+
+      const split = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const newPane = split.children[1] as Extract<PaneNode, { type: 'leaf' }>
+      expect(state.activePane['tab-1']).toBe(newPane.id)
+    })
+
+    it('handles nested splits correctly', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', mode: 'claude' }
+      const content3: PaneContent = { kind: 'terminal', mode: 'codex' }
+
+      // Create initial layout
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const pane1Id = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      // First split: horizontal
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: pane1Id,
+          direction: 'horizontal',
+          newContent: content2,
+        })
+      )
+
+      // Get the second pane ID from the split
+      const split1 = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const pane2Id = (split1.children[1] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      // Second split: vertical on the second pane
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: pane2Id,
+          direction: 'vertical',
+          newContent: content3,
+        })
+      )
+
+      // Check the nested structure
+      const root = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      expect(root.type).toBe('split')
+      expect(root.direction).toBe('horizontal')
+
+      const [left, right] = root.children
+      expect(left.type).toBe('leaf')
+      expect(right.type).toBe('split')
+
+      const nestedSplit = right as Extract<PaneNode, { type: 'split' }>
+      expect(nestedSplit.direction).toBe('vertical')
+      expect(nestedSplit.children[0].type).toBe('leaf')
+      expect(nestedSplit.children[1].type).toBe('leaf')
+    })
+
+    it('preserves the original pane ID after split', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', mode: 'claude' }
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const originalPaneId = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: originalPaneId,
+          direction: 'horizontal',
+          newContent: content2,
+        })
+      )
+
+      const split = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const firstPane = split.children[0] as Extract<PaneNode, { type: 'leaf' }>
+      expect(firstPane.id).toBe(originalPaneId)
+    })
+
+    it('does nothing if tab layout does not exist', () => {
+      const content: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const state = panesReducer(
+        initialState,
+        splitPane({
+          tabId: 'non-existent-tab',
+          paneId: 'some-pane',
+          direction: 'horizontal',
+          newContent: content,
+        })
+      )
+
+      expect(state.layouts['non-existent-tab']).toBeUndefined()
+    })
+
+    it('does nothing if pane ID is not found', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', mode: 'claude' }
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const originalLayout = state.layouts['tab-1']
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: 'non-existent-pane',
+          direction: 'horizontal',
+          newContent: content2,
+        })
+      )
+
+      // Layout should be unchanged
+      expect(state.layouts['tab-1']).toEqual(originalLayout)
+    })
+
+    it('generates createRequestId for new terminal panes', () => {
+      // Initialize with terminal content (full form)
+      let state = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          content: { kind: 'terminal', createRequestId: 'orig-req', status: 'running', mode: 'shell' }
+        })
+      )
+
+      const layoutBefore = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+
+      // Split with partial terminal content (no createRequestId/status)
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: layoutBefore.id,
+          direction: 'horizontal',
+          newContent: { kind: 'terminal', mode: 'shell' },
+        })
+      )
+
+      const layout = state.layouts['tab-1']
+      expect(layout.type).toBe('split')
+
+      const split = layout as Extract<PaneNode, { type: 'split' }>
+      const newPane = split.children[1] as Extract<PaneNode, { type: 'leaf' }>
+
+      expect(newPane.content.kind).toBe('terminal')
+      if (newPane.content.kind === 'terminal') {
+        expect(newPane.content.createRequestId).toBeDefined()
+        expect(newPane.content.createRequestId).not.toBe('orig-req')
+        expect(newPane.content.status).toBe('creating')
+        expect(newPane.content.shell).toBe('system') // Default applied
+      }
+    })
+
+    it('preserves browser content unchanged in splitPane', () => {
+      let state = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' }
+        })
+      )
+
+      const layoutBefore = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+
+      // Split with browser content
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: layoutBefore.id,
+          direction: 'horizontal',
+          newContent: { kind: 'browser', url: 'https://example.com', devToolsOpen: true },
+        })
+      )
+
+      const layout = state.layouts['tab-1']
+      const split = layout as Extract<PaneNode, { type: 'split' }>
+      const newPane = split.children[1] as Extract<PaneNode, { type: 'leaf' }>
+
+      expect(newPane.content.kind).toBe('browser')
+      if (newPane.content.kind === 'browser') {
+        expect(newPane.content.url).toBe('https://example.com')
+        expect(newPane.content.devToolsOpen).toBe(true)
+      }
+    })
+
+    it('activate: false keeps the current active pane', () => {
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'shell' } })
+      )
+      const originalPaneId = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      // Pre-zoom the original pane so the split's zoom-clear invariant is pinned
+      // for the activate:false path too (it must be unconditional — it is a
+      // layout invariant, not a focus move).
+      state = panesReducer(state, toggleZoom({ tabId: 'tab-1', paneId: originalPaneId }))
+      expect(state.zoomedPane['tab-1']).toBe(originalPaneId)
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: originalPaneId,
+          direction: 'horizontal',
+          newPaneId: 'pane-new',
+          newContent: { kind: 'terminal', mode: 'claude' },
+          activate: false,
+        })
+      )
+
+      const split = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      expect(split.type).toBe('split')
+      expect((split.children[1] as Extract<PaneNode, { type: 'leaf' }>).id).toBe('pane-new')
+      expect(state.activePane['tab-1']).toBe(originalPaneId)
+      // Zoom clear + title bookkeeping stay unconditional (layout invariants, not focus):
+      expect(state.zoomedPane['tab-1']).toBeUndefined()
+      expect(state.paneTitles['tab-1']['pane-new']).toBeDefined()
+    })
+  })
+
+  describe('swapPanes', () => {
+    it('swaps pane content by pane id', () => {
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'shell' } })
+      )
+      const originalPaneId = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: originalPaneId,
+          direction: 'horizontal',
+          newContent: { kind: 'browser', url: 'https://example.com', devToolsOpen: false },
+        })
+      )
+
+      const split = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const left = split.children[0] as Extract<PaneNode, { type: 'leaf' }>
+      const right = split.children[1] as Extract<PaneNode, { type: 'leaf' }>
+
+      expect(left.content.kind).toBe('terminal')
+      expect(right.content.kind).toBe('browser')
+
+      state = panesReducer(
+        state,
+        swapPanes({ tabId: 'tab-1', paneId: left.id, otherId: right.id })
+      )
+
+      const swapped = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const swappedLeft = swapped.children[0] as Extract<PaneNode, { type: 'leaf' }>
+      const swappedRight = swapped.children[1] as Extract<PaneNode, { type: 'leaf' }>
+
+      expect(swappedLeft.content.kind).toBe('browser')
+      expect(swappedRight.content.kind).toBe('terminal')
+    })
+
+    it('swaps pane title metadata and user-set guards with the pane content', () => {
+      const state = panesReducer({
+        ...initialState,
+        layouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              { type: 'leaf', id: 'pane-a', content: { kind: 'terminal', mode: 'shell', status: 'running' } },
+              { type: 'leaf', id: 'pane-b', content: { kind: 'browser', url: 'https://example.com', devToolsOpen: false, browserInstanceId: 'browser-1' } },
+            ],
+          },
+        },
+        activePane: { 'tab-1': 'pane-a' },
+        paneTitles: { 'tab-1': { 'pane-a': 'Ops desk', 'pane-b': 'Docs' } },
+        paneTitleSetByUser: { 'tab-1': { 'pane-a': true } },
+      } as PanesState, swapPanes({ tabId: 'tab-1', paneId: 'pane-a', otherId: 'pane-b' }))
+
+      expect(state.paneTitles['tab-1']).toEqual({ 'pane-a': 'Docs', 'pane-b': 'Ops desk' })
+      expect(state.paneTitleSetByUser['tab-1']).toEqual({ 'pane-b': true })
+    })
+  })
+
+  describe('closePane', () => {
+    // Helpers for constructing pane trees directly
+    function terminalContent(createRequestId: string): PaneContent {
+      return { kind: 'terminal', createRequestId, status: 'running', mode: 'shell' }
+    }
+
+    function makeClosePaneState(
+      layouts: Record<string, PaneNode>,
+      activePane: Record<string, string>
+    ): PanesState {
+      return {
+        layouts,
+        activePane,
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+      }
+    }
+
+    it('does nothing when there is only one pane', () => {
+      const content: PaneContent = { kind: 'terminal', mode: 'shell' }
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content })
+      )
+      const paneId = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+      const originalLayout = state.layouts['tab-1']
+
+      state = panesReducer(state, closePane({ tabId: 'tab-1', paneId }))
+
+      expect(state.layouts['tab-1']).toEqual(originalLayout)
+    })
+
+    it('collapses a split to the remaining pane when one child is closed', () => {
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'shell' } })
+      )
+      const pane1Id = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: pane1Id,
+          direction: 'horizontal',
+          newContent: { kind: 'terminal', mode: 'claude' },
+        })
+      )
+
+      const split = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const pane2Id = (split.children[1] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      // Close the second pane
+      state = panesReducer(state, closePane({ tabId: 'tab-1', paneId: pane2Id }))
+
+      // Should collapse back to a single leaf
+      const remaining = state.layouts['tab-1']
+      expect(remaining.type).toBe('leaf')
+      expect((remaining as Extract<PaneNode, { type: 'leaf' }>).id).toBe(pane1Id)
+      const remainingContent = (remaining as Extract<PaneNode, { type: 'leaf' }>).content
+      expect(remainingContent.kind).toBe('terminal')
+      if (remainingContent.kind === 'terminal') {
+        expect(remainingContent.mode).toBe('shell')
+      }
+    })
+
+    it('collapses to the other pane when the first child is closed', () => {
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'shell' } })
+      )
+      const pane1Id = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: pane1Id,
+          direction: 'horizontal',
+          newContent: { kind: 'terminal', mode: 'claude' },
+        })
+      )
+
+      // Close the first pane
+      state = panesReducer(state, closePane({ tabId: 'tab-1', paneId: pane1Id }))
+
+      // Should collapse to the second pane
+      const remaining = state.layouts['tab-1']
+      expect(remaining.type).toBe('leaf')
+      const remainingContent = (remaining as Extract<PaneNode, { type: 'leaf' }>).content
+      expect(remainingContent.kind).toBe('terminal')
+      if (remainingContent.kind === 'terminal') {
+        expect(remainingContent.mode).toBe('claude')
+      }
+    })
+
+    it('updates active pane when the active pane is closed', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', mode: 'claude' }
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const pane1Id = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: pane1Id,
+          direction: 'horizontal',
+          newContent: content2,
+        })
+      )
+
+      const split = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const pane2Id = (split.children[1] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      // Pane 2 is active (set by splitPane)
+      expect(state.activePane['tab-1']).toBe(pane2Id)
+
+      // Close the active pane
+      state = panesReducer(state, closePane({ tabId: 'tab-1', paneId: pane2Id }))
+
+      // Active pane should update to the remaining pane
+      expect(state.activePane['tab-1']).toBe(pane1Id)
+    })
+
+    it('handles nested splits correctly when closing a pane', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', mode: 'claude' }
+      const content3: PaneContent = { kind: 'terminal', mode: 'codex' }
+
+      // Create: pane1 | (pane2 / pane3)
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const pane1Id = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: pane1Id,
+          direction: 'horizontal',
+          newContent: content2,
+        })
+      )
+
+      const split1 = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const pane2Id = (split1.children[1] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: pane2Id,
+          direction: 'vertical',
+          newContent: content3,
+        })
+      )
+
+      // Get pane3 id
+      const split2 = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const nestedSplit = split2.children[1] as Extract<PaneNode, { type: 'split' }>
+      const pane3Id = (nestedSplit.children[1] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      // Close pane3
+      state = panesReducer(state, closePane({ tabId: 'tab-1', paneId: pane3Id }))
+
+      // The nested split should collapse, leaving: pane1 | pane2
+      const root = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      expect(root.type).toBe('split')
+      expect(root.direction).toBe('horizontal')
+      expect(root.children[0].type).toBe('leaf')
+      expect(root.children[1].type).toBe('leaf')
+      expect((root.children[1] as Extract<PaneNode, { type: 'leaf' }>).id).toBe(pane2Id)
+    })
+
+    it('does nothing if tab layout does not exist', () => {
+      const state = panesReducer(
+        initialState,
+        closePane({ tabId: 'non-existent-tab', paneId: 'some-pane' })
+      )
+
+      expect(state).toEqual(initialState)
+    })
+
+    it('does nothing if pane ID is not found', () => {
+      const content: PaneContent = { kind: 'terminal', mode: 'shell' }
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content })
+      )
+      const originalLayout = state.layouts['tab-1']
+
+      state = panesReducer(
+        state,
+        closePane({ tabId: 'tab-1', paneId: 'non-existent-pane' })
+      )
+
+      expect(state.layouts['tab-1']).toEqual(originalLayout)
+    })
+
+    it('removes pane title when pane is closed', () => {
+      const layout: PaneNode = {
+        type: 'split',
+        id: 'split-1',
+        direction: 'horizontal',
+        sizes: [50, 50],
+        children: [
+          { type: 'leaf', id: 'pane-1', content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' } },
+          { type: 'leaf', id: 'pane-2', content: { kind: 'terminal', createRequestId: 'req-2', status: 'running', mode: 'shell' } },
+        ],
+      }
+      const state: PanesState = {
+        layouts: { 'tab-1': layout },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'First', 'pane-2': 'Second' } },
+      }
+
+      const result = panesReducer(state, closePane({ tabId: 'tab-1', paneId: 'pane-1' }))
+
+      expect(result.paneTitles['tab-1']['pane-1']).toBeUndefined()
+      expect(result.paneTitles['tab-1']['pane-2']).toBe('Second')
+    })
+
+    // --- Sibling promotion tests ---
+
+    it('promotes sibling when closing right child of a split', () => {
+      const tabId = 'tab1'
+      const leftLeaf: PaneNode = { type: 'leaf', id: 'left', content: terminalContent('left-req') }
+      const rightLeaf: PaneNode = { type: 'leaf', id: 'right', content: terminalContent('right-req') }
+      const root: PaneNode = {
+        type: 'split', id: 'split1', direction: 'horizontal',
+        sizes: [60, 40], children: [leftLeaf, rightLeaf],
+      }
+      const state = makeClosePaneState({ [tabId]: root }, { [tabId]: 'right' })
+      const result = panesReducer(state, closePane({ tabId, paneId: 'right' }))
+      // Root should now be the left leaf directly (promoted)
+      expect(result.layouts[tabId]).toEqual(leftLeaf)
+      expect(result.activePane[tabId]).toBe('left')
+    })
+
+    it('promotes sibling when closing left child of a split', () => {
+      const tabId = 'tab1'
+      const leftLeaf: PaneNode = { type: 'leaf', id: 'left', content: terminalContent('left-req') }
+      const rightLeaf: PaneNode = { type: 'leaf', id: 'right', content: terminalContent('right-req') }
+      const root: PaneNode = {
+        type: 'split', id: 'split1', direction: 'vertical',
+        sizes: [50, 50], children: [leftLeaf, rightLeaf],
+      }
+      const state = makeClosePaneState({ [tabId]: root }, { [tabId]: 'left' })
+      const result = panesReducer(state, closePane({ tabId, paneId: 'left' }))
+      expect(result.layouts[tabId]).toEqual(rightLeaf)
+      expect(result.activePane[tabId]).toBe('right')
+    })
+
+    it('preserves tree structure when closing a pane in a nested split', () => {
+      // Setup: root is V-split(H-split(A, B), C)
+      // Action: close A
+      // Expected: root becomes V-split(B, C) -- B promoted to replace H-split
+      const tabId = 'tab1'
+      const a: PaneNode = { type: 'leaf', id: 'a', content: terminalContent('a-req') }
+      const b: PaneNode = { type: 'leaf', id: 'b', content: terminalContent('b-req') }
+      const c: PaneNode = { type: 'leaf', id: 'c', content: terminalContent('c-req') }
+      const innerSplit: PaneNode = {
+        type: 'split', id: 'inner', direction: 'horizontal',
+        sizes: [50, 50], children: [a, b],
+      }
+      const root: PaneNode = {
+        type: 'split', id: 'outer', direction: 'vertical',
+        sizes: [70, 30], children: [innerSplit, c],
+      }
+      const state = makeClosePaneState({ [tabId]: root }, { [tabId]: 'a' })
+      const result = panesReducer(state, closePane({ tabId, paneId: 'a' }))
+      // Outer split should remain with same sizes, but inner replaced by b
+      expect(result.layouts[tabId]).toEqual({
+        type: 'split', id: 'outer', direction: 'vertical',
+        sizes: [70, 30], children: [b, c],
+      })
+      expect(result.activePane[tabId]).toBe('b')
+    })
+
+    it('preserves deeply nested tree structure', () => {
+      // Setup: root = V-split(H-split(A, B), H-split(C, D))
+      // Close B
+      // Expected: root = V-split(A, H-split(C, D))
+      // H-split(C, D) is completely untouched including sizes
+      const tabId = 'tab1'
+      const a: PaneNode = { type: 'leaf', id: 'a', content: terminalContent('a-req') }
+      const b: PaneNode = { type: 'leaf', id: 'b', content: terminalContent('b-req') }
+      const c: PaneNode = { type: 'leaf', id: 'c', content: terminalContent('c-req') }
+      const d: PaneNode = { type: 'leaf', id: 'd', content: terminalContent('d-req') }
+      const top: PaneNode = {
+        type: 'split', id: 'top', direction: 'horizontal',
+        sizes: [40, 60], children: [a, b],
+      }
+      const bottom: PaneNode = {
+        type: 'split', id: 'bottom', direction: 'horizontal',
+        sizes: [30, 70], children: [c, d],
+      }
+      const root: PaneNode = {
+        type: 'split', id: 'root', direction: 'vertical',
+        sizes: [50, 50], children: [top, bottom],
+      }
+      const state = makeClosePaneState({ [tabId]: root }, { [tabId]: 'b' })
+      const result = panesReducer(state, closePane({ tabId, paneId: 'b' }))
+      expect(result.layouts[tabId]).toEqual({
+        type: 'split', id: 'root', direction: 'vertical',
+        sizes: [50, 50], children: [a, bottom],
+      })
+      // Untouched subtree should preserve referential identity (Immer structural sharing)
+      const resultRoot = result.layouts[tabId] as Extract<PaneNode, { type: 'split' }>
+      expect(resultRoot.children[1]).toBe(bottom)
+    })
+
+    it('does nothing when closing the only pane (leaf root)', () => {
+      const tabId = 'tab1'
+      const leaf: PaneNode = { type: 'leaf', id: 'only', content: terminalContent('only-req') }
+      const state = makeClosePaneState({ [tabId]: leaf }, { [tabId]: 'only' })
+      const result = panesReducer(state, closePane({ tabId, paneId: 'only' }))
+      expect(result.layouts[tabId]).toEqual(leaf)
+    })
+  })
+
+  describe('setActivePane', () => {
+    it('updates the active pane for a tab', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', mode: 'claude' }
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const pane1Id = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: pane1Id,
+          direction: 'horizontal',
+          newContent: content2,
+        })
+      )
+
+      const split = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const pane2Id = (split.children[1] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      // Currently pane2 is active
+      expect(state.activePane['tab-1']).toBe(pane2Id)
+
+      // Set pane1 as active
+      state = panesReducer(
+        state,
+        setActivePane({ tabId: 'tab-1', paneId: pane1Id })
+      )
+
+      expect(state.activePane['tab-1']).toBe(pane1Id)
+    })
+
+    it('allows setting active pane even if tab has no layout', () => {
+      const state = panesReducer(
+        initialState,
+        setActivePane({ tabId: 'tab-1', paneId: 'some-pane' })
+      )
+
+      expect(state.activePane['tab-1']).toBe('some-pane')
+    })
+
+    it('bumps the pane focus epoch ONLY for explicit select folds (focusNudge), including same-target selects', () => {
+      // Pointer-driven activations must not bump: Pane mousedown bubbles from
+      // in-pane inputs (rename, search), and a bump would re-run focus effects
+      // and steal focus back from the element just clicked.
+      let state = panesReducer(initialState, setActivePane({ tabId: 'tab-1', paneId: 'p1' }))
+      expect(state.focusEpochByPaneId?.['p1'] ?? 0).toBe(0)
+      state = panesReducer(state, setActivePane({ tabId: 'tab-1', paneId: 'p1', focusNudge: true }))
+      expect(state.focusEpochByPaneId?.['p1']).toBe(1)
+      // Same-target re-select still bumps: it is the only DOM-focus signal
+      // when no eligibility transition exists (focus-neutral split aftermath).
+      state = panesReducer(state, setActivePane({ tabId: 'tab-1', paneId: 'p1', focusNudge: true }))
+      expect(state.focusEpochByPaneId?.['p1']).toBe(2)
+      state = panesReducer(state, setActivePane({ tabId: 'tab-1', paneId: 'p2' }))
+      expect(state.focusEpochByPaneId?.['p2'] ?? 0).toBe(0)
+      expect(state.focusEpochByPaneId?.['p1']).toBe(2) // p1 untouched
+    })
+
+    it('closePane drops the closed pane\'s focus-epoch entry', () => {
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-close', paneId: 'p1', content: { kind: 'terminal', mode: 'shell' } })
+      )
+      state = panesReducer(state, splitPane({
+        tabId: 'tab-close',
+        paneId: 'p1',
+        direction: 'horizontal',
+        newContent: { kind: 'terminal', mode: 'shell' },
+      }))
+      const split = state.layouts['tab-close'] as Extract<PaneNode, { type: 'split' }>
+      const newPaneId = (split.children[1] as Extract<PaneNode, { type: 'leaf' }>).id
+      state = panesReducer(state, setActivePane({ tabId: 'tab-close', paneId: newPaneId, focusNudge: true }))
+      expect(state.focusEpochByPaneId?.[newPaneId]).toBe(1)
+      state = panesReducer(state, closePane({ tabId: 'tab-close', paneId: newPaneId }))
+      expect(state.focusEpochByPaneId?.[newPaneId]).toBeUndefined()
+    })
+
+    it('removeLayout drops focus-epoch entries for every removed leaf', () => {
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-gone', paneId: 'pa', content: { kind: 'terminal', mode: 'shell' } })
+      )
+      state = panesReducer(state, splitPane({
+        tabId: 'tab-gone',
+        paneId: 'pa',
+        direction: 'horizontal',
+        newContent: { kind: 'terminal', mode: 'shell' },
+      }))
+      const split = state.layouts['tab-gone'] as Extract<PaneNode, { type: 'split' }>
+      const pb = (split.children[1] as Extract<PaneNode, { type: 'leaf' }>).id
+      state = panesReducer(state, setActivePane({ tabId: 'tab-gone', paneId: 'pa', focusNudge: true }))
+      state = panesReducer(state, setActivePane({ tabId: 'tab-gone', paneId: pb, focusNudge: true }))
+      expect(state.focusEpochByPaneId?.['pa']).toBeDefined()
+      expect(state.focusEpochByPaneId?.[pb]).toBeDefined()
+      state = panesReducer(state, removeLayout({ tabId: 'tab-gone' }))
+      expect(state.focusEpochByPaneId?.['pa']).toBeUndefined()
+      expect(state.focusEpochByPaneId?.[pb]).toBeUndefined()
+    })
+  })
+
+  describe('nudgePaneFocus', () => {
+    it("bumps the tab's ACTIVE pane epoch (tab.select fold) and no-ops without an active pane", () => {
+      let state = panesReducer(initialState, setActivePane({ tabId: 'tab-1', paneId: 'p1' }))
+      expect(state.focusEpochByPaneId?.['p1'] ?? 0).toBe(0)
+      state = panesReducer(state, nudgePaneFocus({ tabId: 'tab-1' }))
+      expect(state.focusEpochByPaneId?.['p1']).toBe(1)
+      const before = state.focusEpochByPaneId
+      state = panesReducer(state, nudgePaneFocus({ tabId: 'tab-without-active-pane' }))
+      expect(state.focusEpochByPaneId).toBe(before) // untouched map instance
+    })
+  })
+
+  describe('resizePanes', () => {
+    it('updates split sizes', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', mode: 'claude' }
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const pane1Id = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: pane1Id,
+          direction: 'horizontal',
+          newContent: content2,
+        })
+      )
+
+      const splitId = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>).id
+
+      state = panesReducer(
+        state,
+        resizePanes({ tabId: 'tab-1', splitId, sizes: [30, 70] })
+      )
+
+      const split = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      expect(split.sizes).toEqual([30, 70])
+    })
+
+    it('updates nested split sizes', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', mode: 'claude' }
+      const content3: PaneContent = { kind: 'terminal', mode: 'codex' }
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const pane1Id = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: pane1Id,
+          direction: 'horizontal',
+          newContent: content2,
+        })
+      )
+
+      const split1 = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const pane2Id = (split1.children[1] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: pane2Id,
+          direction: 'vertical',
+          newContent: content3,
+        })
+      )
+
+      // Get nested split id
+      const root = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const nestedSplitId = (root.children[1] as Extract<PaneNode, { type: 'split' }>).id
+
+      state = panesReducer(
+        state,
+        resizePanes({ tabId: 'tab-1', splitId: nestedSplitId, sizes: [25, 75] })
+      )
+
+      const updatedRoot = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const nestedSplit = updatedRoot.children[1] as Extract<PaneNode, { type: 'split' }>
+      expect(nestedSplit.sizes).toEqual([25, 75])
+    })
+
+    it('does nothing if tab layout does not exist', () => {
+      const state = panesReducer(
+        initialState,
+        resizePanes({ tabId: 'non-existent-tab', splitId: 'some-split', sizes: [40, 60] })
+      )
+
+      expect(state).toEqual(initialState)
+    })
+
+    it('does nothing if split ID is not found', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', mode: 'claude' }
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const pane1Id = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: pane1Id,
+          direction: 'horizontal',
+          newContent: content2,
+        })
+      )
+
+      const originalSizes = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>).sizes
+
+      state = panesReducer(
+        state,
+        resizePanes({ tabId: 'tab-1', splitId: 'non-existent-split', sizes: [40, 60] })
+      )
+
+      const split = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      expect(split.sizes).toEqual(originalSizes)
+    })
+  })
+
+  describe('resizeMultipleSplits', () => {
+    it('updates multiple splits at once', () => {
+      // Build a 2x2 grid: V-split(H-split(A, B), H-split(C, D))
+      const stateWithA = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'shell' } })
+      )
+      const paneAId = (stateWithA.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      // Split A vertically to get top/bottom
+      const stateWithAB = panesReducer(
+        stateWithA,
+        splitPane({ tabId: 'tab-1', paneId: paneAId, direction: 'vertical', newContent: { kind: 'terminal', mode: 'shell' } })
+      )
+      const vSplit = stateWithAB.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const vSplitId = vSplit.id
+      const topPaneId = (vSplit.children[0] as Extract<PaneNode, { type: 'leaf' }>).id
+      const botPaneId = (vSplit.children[1] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      // Split top pane horizontally
+      const stateWithTop = panesReducer(
+        stateWithAB,
+        splitPane({ tabId: 'tab-1', paneId: topPaneId, direction: 'horizontal', newContent: { kind: 'terminal', mode: 'shell' } })
+      )
+      const root1 = stateWithTop.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const topHSplit = root1.children[0] as Extract<PaneNode, { type: 'split' }>
+      const topHSplitId = topHSplit.id
+
+      // Split bottom pane horizontally
+      const stateWithAll = panesReducer(
+        stateWithTop,
+        splitPane({ tabId: 'tab-1', paneId: botPaneId, direction: 'horizontal', newContent: { kind: 'terminal', mode: 'shell' } })
+      )
+      const root2 = stateWithAll.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const botHSplit = root2.children[1] as Extract<PaneNode, { type: 'split' }>
+      const botHSplitId = botHSplit.id
+
+      // Now resize both H-splits and the V-split in one action
+      const finalState = panesReducer(
+        stateWithAll,
+        resizeMultipleSplits({
+          tabId: 'tab-1',
+          resizes: [
+            { splitId: topHSplitId, sizes: [60, 40] },
+            { splitId: botHSplitId, sizes: [60, 40] },
+            { splitId: vSplitId, sizes: [40, 60] },
+          ],
+        })
+      )
+
+      const finalRoot = finalState.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      expect(finalRoot.sizes).toEqual([40, 60])
+      const finalTopH = finalRoot.children[0] as Extract<PaneNode, { type: 'split' }>
+      expect(finalTopH.sizes).toEqual([60, 40])
+      const finalBotH = finalRoot.children[1] as Extract<PaneNode, { type: 'split' }>
+      expect(finalBotH.sizes).toEqual([60, 40])
+    })
+
+    it('does nothing if tab layout does not exist', () => {
+      const state = panesReducer(
+        initialState,
+        resizeMultipleSplits({
+          tabId: 'non-existent',
+          resizes: [{ splitId: 's1', sizes: [60, 40] }],
+        })
+      )
+      expect(state).toEqual(initialState)
+    })
+
+    it('preserves sizes of splits not in the resizes array', () => {
+      // Build a simple H-split(A, B) with [50,50]
+      const s1 = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'shell' } })
+      )
+      const pId = (s1.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+      const s2 = panesReducer(
+        s1,
+        splitPane({ tabId: 'tab-1', paneId: pId, direction: 'horizontal', newContent: { kind: 'terminal', mode: 'shell' } })
+      )
+      const splitId = (s2.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>).id
+
+      // Resize with empty array - nothing changes
+      const s3 = panesReducer(
+        s2,
+        resizeMultipleSplits({ tabId: 'tab-1', resizes: [] })
+      )
+      const split = s3.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      expect(split.sizes).toEqual([50, 50])
+    })
+  })
+
+  describe('updatePaneContent', () => {
+    it('updates the content of a leaf pane', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', terminalId: 'term-123', mode: 'claude' }
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const paneId = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        updatePaneContent({ tabId: 'tab-1', paneId, content: content2 })
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.content).toMatchObject(content2)
+      if (leaf.content.kind === 'terminal') {
+        expect(leaf.content.createRequestId).toBeDefined()
+        expect(leaf.content.status).toBe('creating')
+        expect(leaf.content.shell).toBe('system')
+      }
+    })
+
+    it('normalizes browserInstanceId for direct updatePaneContent browser payloads', () => {
+      const start = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          paneId: 'pane-1',
+          content: { kind: 'browser', url: 'https://example.com', devToolsOpen: false } as any,
+        }),
+      )
+
+      const next = panesReducer(
+        start,
+        updatePaneContent({
+          tabId: 'tab-1',
+          paneId: 'pane-1',
+          content: { kind: 'browser', url: 'https://example.org', devToolsOpen: false } as any,
+        }),
+      )
+
+      const layout = next.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(layout.content.kind).toBe('browser')
+      if (layout.content.kind === 'browser') {
+        expect((layout.content as any).browserInstanceId).toBeDefined()
+      }
+    })
+
+    it('updates pane content in a split layout', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', mode: 'claude' }
+      const content3 = { kind: 'browser', url: 'https://updated.com', devToolsOpen: true } as any
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const pane1Id = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        splitPane({
+          tabId: 'tab-1',
+          paneId: pane1Id,
+          direction: 'horizontal',
+          newContent: content2,
+        })
+      )
+
+      state = panesReducer(
+        state,
+        updatePaneContent({ tabId: 'tab-1', paneId: pane1Id, content: content3 })
+      )
+
+      const split = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const firstPane = split.children[0] as Extract<PaneNode, { type: 'leaf' }>
+      expect(firstPane.content).toMatchObject(content3)
+      expect((firstPane.content as any).browserInstanceId).toBeDefined()
+    })
+
+    it('does nothing if tab layout does not exist', () => {
+      const content: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const state = panesReducer(
+        initialState,
+        updatePaneContent({ tabId: 'non-existent-tab', paneId: 'some-pane', content })
+      )
+
+      expect(state).toEqual(initialState)
+    })
+
+    it('does nothing if pane ID is not found', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', mode: 'claude' }
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      const originalLayout = JSON.parse(JSON.stringify(state.layouts['tab-1']))
+
+      state = panesReducer(
+        state,
+        updatePaneContent({ tabId: 'tab-1', paneId: 'non-existent-pane', content: content2 })
+      )
+
+      expect(state.layouts['tab-1']).toEqual(originalLayout)
+    })
+  })
+
+  describe('mergePaneContent', () => {
+    it('preserves existing browserInstanceId when mergePaneContent updates browser fields', () => {
+      const start = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-1',
+          paneId: 'pane-1',
+          content: {
+            kind: 'browser',
+            browserInstanceId: 'browser-1',
+            url: 'https://example.com',
+            devToolsOpen: false,
+          } as any,
+        }),
+      )
+
+      const next = panesReducer(
+        start,
+        mergePaneContent({
+          tabId: 'tab-1',
+          paneId: 'pane-1',
+          updates: { url: 'https://example.org' },
+        }),
+      )
+
+      const layout = next.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(layout.content).toMatchObject({
+        kind: 'browser',
+        browserInstanceId: 'browser-1',
+        url: 'https://example.org',
+      })
+    })
+  })
+
+  describe('refresh requests', () => {
+    it('requestPaneRefresh skips blank browser panes and unattached terminals', () => {
+      const blankBrowserState = panesReducer(
+        stateWithLeaf('pane-browser', {
+          kind: 'browser',
+          browserInstanceId: 'browser-1',
+          url: '',
+          devToolsOpen: false,
+        }),
+        requestPaneRefresh({ tabId: 'tab-1', paneId: 'pane-browser' }),
+      )
+      expect(blankBrowserState.refreshRequestsByPane['tab-1']).toBeUndefined()
+
+      const unattachedTerminalState = panesReducer(
+        stateWithLeaf('pane-term', {
+          kind: 'terminal',
+          mode: 'shell',
+          createRequestId: 'req-1',
+          status: 'running',
+        }),
+        requestPaneRefresh({ tabId: 'tab-1', paneId: 'pane-term' }),
+      )
+      expect(unattachedTerminalState.refreshRequestsByPane['tab-1']).toBeUndefined()
+    })
+
+    it('requestTabRefresh exits zoom first and queues only live-capable leaves', () => {
+      const state = panesReducer(
+        stateWithLayoutAndZoom({
+          layout: refreshSplit([
+            refreshLeaf('pane-editor', refreshEditorContent),
+            refreshSplit([
+              refreshLeaf('pane-live-browser', {
+                kind: 'browser',
+                browserInstanceId: 'browser-1',
+                url: 'https://example.test/a',
+                devToolsOpen: false,
+              }),
+              refreshLeaf('pane-blank-browser', {
+                kind: 'browser',
+                browserInstanceId: 'browser-2',
+                url: '',
+                devToolsOpen: false,
+              }),
+            ]),
+          ]),
+          zoomedPaneId: 'pane-editor',
+        }),
+        requestTabRefresh({ tabId: 'tab-1' }),
+      )
+
+      expect(state.zoomedPane['tab-1']).toBeUndefined()
+      expect(Object.keys(state.refreshRequestsByPane['tab-1'])).toEqual(['pane-live-browser'])
+    })
+
+    it('preserves a browser refresh request across same-instance url changes', () => {
+      const requested = panesReducer(
+        stateWithLeaf('pane-browser', {
+          kind: 'browser',
+          browserInstanceId: 'browser-1',
+          url: 'https://example.test/a',
+          devToolsOpen: false,
+        }),
+        requestPaneRefresh({ tabId: 'tab-1', paneId: 'pane-browser' }),
+      )
+
+      const next = panesReducer(
+        requested,
+        updatePaneContent({
+          tabId: 'tab-1',
+          paneId: 'pane-browser',
+          content: {
+            kind: 'browser',
+            browserInstanceId: 'browser-1',
+            url: 'https://example.test/b',
+            devToolsOpen: false,
+          },
+        }),
+      )
+
+      expect(next.refreshRequestsByPane['tab-1']?.['pane-browser']).toBeDefined()
+    })
+
+    it('clears a pending browser request after a same-url browser swap changes instance identity', () => {
+      const requested = panesReducer(
+        stateWithLayout({
+          'tab-1': refreshSplit([
+            refreshLeaf('pane-a', {
+              kind: 'browser',
+              browserInstanceId: 'browser-a',
+              url: 'https://example.test/shared',
+              devToolsOpen: false,
+            }),
+            refreshLeaf('pane-b', {
+              kind: 'browser',
+              browserInstanceId: 'browser-b',
+              url: 'https://example.test/shared',
+              devToolsOpen: false,
+            }),
+          ]),
+        }),
+        requestPaneRefresh({ tabId: 'tab-1', paneId: 'pane-a' }),
+      )
+
+      const next = panesReducer(
+        requested,
+        swapPanes({ tabId: 'tab-1', paneId: 'pane-a', otherId: 'pane-b' }),
+      )
+
+      expect(next.refreshRequestsByPane['tab-1']?.['pane-a']).toBeUndefined()
+    })
+  })
+
+  describe('replacePane', () => {
+    it('sets pane content to picker', () => {
+      const leaf: PaneNode = {
+        type: 'leaf',
+        id: 'pane-1',
+        content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell', terminalId: 'term-1' },
+      }
+      const state: PanesState = {
+        layouts: { 'tab-1': leaf },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+      }
+
+      const result = panesReducer(state, replacePane({ tabId: 'tab-1', paneId: 'pane-1' }))
+
+      const resultLeaf = result.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(resultLeaf.content).toEqual({ kind: 'picker' })
+    })
+
+    it('clears paneTitleSetByUser and resets derived title', () => {
+      const leaf: PaneNode = {
+        type: 'leaf',
+        id: 'pane-1',
+        content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' },
+      }
+      const state: PanesState = {
+        layouts: { 'tab-1': leaf },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'My Custom Name' } },
+        paneTitleSetByUser: { 'tab-1': { 'pane-1': true } },
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+      }
+
+      const result = panesReducer(state, replacePane({ tabId: 'tab-1', paneId: 'pane-1' }))
+
+      expect(result.paneTitles['tab-1']['pane-1']).toBe('New Tab')
+      expect(result.paneTitleSetByUser['tab-1']?.['pane-1']).toBeUndefined()
+    })
+
+    it('is a no-op on non-existent tab', () => {
+      const result = panesReducer(initialState, replacePane({ tabId: 'nope', paneId: 'pane-1' }))
+      expect(result).toEqual(initialState)
+    })
+
+    it('is a no-op on non-existent pane (layout unchanged)', () => {
+      const leaf: PaneNode = {
+        type: 'leaf',
+        id: 'pane-1',
+        content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' },
+      }
+      const state: PanesState = {
+        layouts: { 'tab-1': leaf },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+      }
+
+      const result = panesReducer(state, replacePane({ tabId: 'tab-1', paneId: 'non-existent' }))
+
+      // Content should be unchanged
+      const resultLeaf = result.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(resultLeaf.content.kind).toBe('terminal')
+
+      // No ghost title entry should be created for non-existent pane
+      expect(result.paneTitles['tab-1']['non-existent']).toBeUndefined()
+    })
+
+    it('works on a pane inside a split', () => {
+      const layout: PaneNode = {
+        type: 'split',
+        id: 'split-1',
+        direction: 'horizontal',
+        sizes: [50, 50],
+        children: [
+          { type: 'leaf', id: 'pane-1', content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' } },
+          { type: 'leaf', id: 'pane-2', content: { kind: 'terminal', createRequestId: 'req-2', status: 'running', mode: 'claude' } },
+        ],
+      }
+      const state: PanesState = {
+        layouts: { 'tab-1': layout },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell', 'pane-2': 'Claude CLI' } },
+        paneTitleSetByUser: { 'tab-1': { 'pane-2': true } },
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+      }
+
+      const result = panesReducer(state, replacePane({ tabId: 'tab-1', paneId: 'pane-2' }))
+
+      // pane-2 should be picker, pane-1 untouched
+      const split = result.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const pane1 = split.children[0] as Extract<PaneNode, { type: 'leaf' }>
+      const pane2 = split.children[1] as Extract<PaneNode, { type: 'leaf' }>
+      expect(pane1.content.kind).toBe('terminal')
+      expect(pane2.content).toEqual({ kind: 'picker' })
+      expect(result.paneTitles['tab-1']['pane-2']).toBe('New Tab')
+      expect(result.paneTitleSetByUser['tab-1']?.['pane-2']).toBeUndefined()
+    })
+  })
+
+  describe('removeLayout', () => {
+    it('removes the layout for a tab', () => {
+      const content: PaneContent = { kind: 'terminal', mode: 'shell' }
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content })
+      )
+
+      expect(state.layouts['tab-1']).toBeDefined()
+
+      state = panesReducer(state, removeLayout({ tabId: 'tab-1' }))
+
+      expect(state.layouts['tab-1']).toBeUndefined()
+    })
+
+    it('removes the active pane entry for the tab', () => {
+      const content: PaneContent = { kind: 'terminal', mode: 'shell' }
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content })
+      )
+
+      expect(state.activePane['tab-1']).toBeDefined()
+
+      state = panesReducer(state, removeLayout({ tabId: 'tab-1' }))
+
+      expect(state.activePane['tab-1']).toBeUndefined()
+    })
+
+    it('does not affect other tabs', () => {
+      const content1: PaneContent = { kind: 'terminal', mode: 'shell' }
+      const content2: PaneContent = { kind: 'terminal', mode: 'claude' }
+
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: content1 })
+      )
+      state = panesReducer(
+        state,
+        initLayout({ tabId: 'tab-2', content: content2 })
+      )
+
+      state = panesReducer(state, removeLayout({ tabId: 'tab-1' }))
+
+      expect(state.layouts['tab-1']).toBeUndefined()
+      expect(state.layouts['tab-2']).toBeDefined()
+      expect(state.activePane['tab-1']).toBeUndefined()
+      expect(state.activePane['tab-2']).toBeDefined()
+    })
+
+    it('does nothing if tab does not exist', () => {
+      const content: PaneContent = { kind: 'terminal', mode: 'shell' }
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content })
+      )
+      const originalState = { ...state }
+
+      state = panesReducer(state, removeLayout({ tabId: 'non-existent-tab' }))
+
+      expect(state.layouts).toEqual(originalState.layouts)
+      expect(state.activePane).toEqual(originalState.activePane)
+    })
+
+    it('removes paneTitles for the tab', () => {
+      const state: PanesState = {
+        layouts: {
+          'tab-1': { type: 'leaf', id: 'pane-1', content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' } },
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'My Title' } },
+      }
+
+      const result = panesReducer(state, removeLayout({ tabId: 'tab-1' }))
+
+      expect(result.paneTitles['tab-1']).toBeUndefined()
+    })
+
+    it('preserves paneTitles for other tabs when removing one', () => {
+      const state: PanesState = {
+        layouts: {
+          'tab-1': { type: 'leaf', id: 'pane-1', content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' } },
+          'tab-2': { type: 'leaf', id: 'pane-2', content: { kind: 'terminal', createRequestId: 'req-2', status: 'running', mode: 'shell' } },
+        },
+        activePane: { 'tab-1': 'pane-1', 'tab-2': 'pane-2' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Title 1' }, 'tab-2': { 'pane-2': 'Title 2' } },
+      }
+
+      const result = panesReducer(state, removeLayout({ tabId: 'tab-1' }))
+
+      expect(result.paneTitles['tab-1']).toBeUndefined()
+      expect(result.paneTitles['tab-2']).toEqual({ 'pane-2': 'Title 2' })
+    })
+  })
+
+  describe('hydratePanes', () => {
+    it('prunes focus-epoch entries for panes dropped by the merged layouts', () => {
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-x', paneId: 'keep', content: { kind: 'terminal', mode: 'shell' } })
+      )
+      state = panesReducer(state, setActivePane({ tabId: 'tab-x', paneId: 'keep', focusNudge: true }))
+      state = panesReducer(state, setActivePane({ tabId: 'tab-x', paneId: 'remote-gone', focusNudge: true }))
+      expect(state.focusEpochByPaneId?.['keep']).toBe(1)
+      expect(state.focusEpochByPaneId?.['remote-gone']).toBe(1)
+
+      const incoming: PanesState = {
+        layouts: {
+          // Cross-device sync dropped 'remote-gone'; only 'keep' survives.
+          'tab-x': { type: 'leaf', id: 'keep', content: { kind: 'terminal', mode: 'shell' } },
+        },
+        activePane: { 'tab-x': 'keep' },
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+      }
+      state = panesReducer(state, hydratePanes(incoming))
+      expect(state.focusEpochByPaneId?.['keep']).toBe(1)
+      expect(state.focusEpochByPaneId?.['remote-gone']).toBeUndefined()
+    })
+
+    it('restores persisted state', () => {
+      const savedState: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-saved-1',
+            content: { kind: 'terminal', mode: 'shell' },
+          },
+          'tab-2': {
+            type: 'split',
+            id: 'split-saved-1',
+            direction: 'horizontal',
+            children: [
+              { type: 'leaf', id: 'pane-saved-2', content: { kind: 'terminal', mode: 'claude' } },
+              {
+                type: 'leaf',
+                id: 'pane-saved-3',
+                content: {
+                  kind: 'browser',
+                  browserInstanceId: 'browser-saved-1',
+                  url: 'https://example.com',
+                  devToolsOpen: false,
+                },
+              },
+            ],
+            sizes: [40, 60],
+          },
+        },
+        activePane: {
+          'tab-1': 'pane-saved-1',
+          'tab-2': 'pane-saved-3',
+        },
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+      }
+
+      const state = panesReducer(initialState, hydratePanes(savedState))
+
+      expect(state.activePane).toEqual(savedState.activePane)
+      expect(state.paneTitles).toEqual(savedState.paneTitles)
+      const tab1 = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(tab1.content).toMatchObject({ kind: 'terminal', mode: 'shell' })
+      if (tab1.content.kind === 'terminal') {
+        expect(tab1.content.createRequestId).toBeDefined()
+        expect(tab1.content.status).toBe('creating')
+      }
+      const tab2 = state.layouts['tab-2'] as Extract<PaneNode, { type: 'split' }>
+      const browserLeaf = tab2.children[1] as Extract<PaneNode, { type: 'leaf' }>
+      expect(browserLeaf.content).toMatchObject({
+        kind: 'browser',
+        browserInstanceId: 'browser-saved-1',
+        url: 'https://example.com',
+        devToolsOpen: false,
+      })
+    })
+
+    it('handles empty saved state', () => {
+      const savedState: PanesState = {
+        layouts: {},
+        activePane: {},
+        paneTitles: {},
+      }
+
+      const state = panesReducer(initialState, hydratePanes(savedState))
+
+      expect(state.layouts).toEqual({})
+      expect(state.activePane).toEqual({})
+      expect(state.paneTitles).toEqual({})
+    })
+
+    it('preserves complex nested structures', () => {
+      const savedState: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'root-split',
+            direction: 'horizontal',
+            children: [
+              { type: 'leaf', id: 'pane-1', content: { kind: 'terminal', mode: 'shell' } },
+              {
+                type: 'split',
+                id: 'nested-split',
+                direction: 'vertical',
+                children: [
+                  { type: 'leaf', id: 'pane-2', content: { kind: 'terminal', mode: 'claude' } },
+                  { type: 'leaf', id: 'pane-3', content: { kind: 'terminal', mode: 'codex' } },
+                ],
+                sizes: [30, 70],
+              },
+            ],
+            sizes: [50, 50],
+          },
+        },
+        activePane: {
+          'tab-1': 'pane-2',
+        },
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+      }
+
+      const state = panesReducer(initialState, hydratePanes(savedState))
+
+      expect(state.activePane).toEqual(savedState.activePane)
+
+      // Verify structure
+      const root = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      expect(root.type).toBe('split')
+      expect(root.children[1].type).toBe('split')
+      const firstLeaf = root.children[0] as Extract<PaneNode, { type: 'leaf' }>
+      expect(firstLeaf.content).toMatchObject({ kind: 'terminal', mode: 'shell' })
+      if (firstLeaf.content.kind === 'terminal') {
+        expect(firstLeaf.content.createRequestId).toBeDefined()
+      }
+      const nested = root.children[1] as Extract<PaneNode, { type: 'split' }>
+      expect(nested.sizes).toEqual([30, 70])
+      const nestedLeaf = nested.children[0] as Extract<PaneNode, { type: 'leaf' }>
+      expect(nestedLeaf.content).toMatchObject({ kind: 'terminal', mode: 'claude' })
+    })
+
+    it('restores paneTitles from persisted state', () => {
+      const savedState: PanesState = {
+        layouts: {
+          'tab-1': { type: 'leaf', id: 'pane-1', content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' } },
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'My Shell' } },
+      }
+
+      const state = panesReducer(initialState, hydratePanes(savedState))
+
+      expect(state.paneTitles).toEqual({ 'tab-1': { 'pane-1': 'My Shell' } })
+    })
+
+    it('preserves local resumeSessionId when incoming has different session (same createRequestId)', () => {
+      // Simulate local state: Claude pane with SESSION_A, still creating
+      const localState: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'claude',
+              createRequestId: 'req-1',
+              status: 'creating',
+              resumeSessionId: localClaudeSessionId,
+              sessionRef: {
+                provider: 'claude',
+                sessionId: localClaudeSessionId,
+              },
+            },
+          } as any,
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: {},
+      }
+
+      // Incoming: same createRequestId but different resumeSessionId
+      const incoming: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'claude',
+              createRequestId: 'req-1',
+              status: 'running',
+              terminalId: 'remote-t1',
+              resumeSessionId: 'named-resume',
+              sessionRef: {
+                provider: 'claude',
+                sessionId: remoteClaudeSessionId,
+              },
+            },
+          } as any,
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: {},
+      }
+
+      const state = panesReducer(localState, hydratePanes(incoming))
+      const content = (state.layouts['tab-1'] as any).content
+
+      expect(content.resumeSessionId).toBe(localClaudeSessionId)
+      expect(content.sessionRef).toEqual({
+        provider: 'claude',
+        sessionId: localClaudeSessionId,
+      })
+    })
+
+    it('preserves local resumeSessionId inside split pane trees', () => {
+      const localState: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              {
+                type: 'leaf',
+                id: 'pane-1',
+                content: {
+                  kind: 'terminal',
+                  mode: 'shell',
+                  createRequestId: 'req-1',
+                  status: 'running',
+                  terminalId: 't1',
+                },
+              },
+              {
+                type: 'leaf',
+                id: 'pane-2',
+                content: {
+                  kind: 'terminal',
+                  mode: 'claude',
+                  createRequestId: 'req-2',
+                  status: 'creating',
+                  resumeSessionId: 'session-X',
+                },
+              },
+            ],
+          } as any,
+        },
+        activePane: { 'tab-1': 'pane-2' },
+        paneTitles: {},
+      }
+
+      const incoming: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              {
+                type: 'leaf',
+                id: 'pane-1',
+                content: {
+                  kind: 'terminal',
+                  mode: 'shell',
+                  createRequestId: 'req-1',
+                  status: 'running',
+                  terminalId: 't1',
+                },
+              },
+              {
+                type: 'leaf',
+                id: 'pane-2',
+                content: {
+                  kind: 'terminal',
+                  mode: 'claude',
+                  createRequestId: 'req-2',
+                  status: 'running',
+                  terminalId: 'remote-t2',
+                  resumeSessionId: 'session-Y',
+                },
+              },
+            ],
+          } as any,
+        },
+        activePane: { 'tab-1': 'pane-2' },
+        paneTitles: {},
+      }
+
+      const state = panesReducer(localState, hydratePanes(incoming))
+      const split = state.layouts['tab-1'] as any
+      const pane2Content = split.children[1].content
+
+      expect(pane2Content.resumeSessionId).toBe('session-X')
+    })
+
+    it('accepts incoming when resumeSessionId matches local (no conflict)', () => {
+      const localState: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'claude',
+              createRequestId: 'req-1',
+              status: 'creating',
+              resumeSessionId: 'session-A',
+            },
+          } as any,
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: {},
+      }
+
+      const incoming: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'claude',
+              createRequestId: 'req-1',
+              status: 'running',
+              terminalId: 'remote-t1',
+              resumeSessionId: 'session-A',
+            },
+          } as any,
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: {},
+      }
+
+      const state = panesReducer(localState, hydratePanes(incoming))
+      const content = (state.layouts['tab-1'] as any).content
+
+      // Same session — incoming accepted wholesale (lifecycle progress propagated)
+      expect(content.resumeSessionId).toBe('session-A')
+      expect(content.terminalId).toBe('remote-t1')
+      expect(content.status).toBe('running')
+    })
+
+    it('preserves local resumeSessionId even when incoming has exited status', () => {
+      const localState: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'claude',
+              createRequestId: 'req-1',
+              status: 'running',
+              terminalId: 't1',
+              resumeSessionId: 'session-A',
+            },
+          } as any,
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: {},
+      }
+
+      // Incoming: same createRequestId, exited, but different resumeSessionId
+      const incoming: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'claude',
+              createRequestId: 'req-1',
+              status: 'exited',
+              terminalId: 't1',
+              resumeSessionId: 'session-B',
+            },
+          } as any,
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: {},
+      }
+
+      const state = panesReducer(localState, hydratePanes(incoming))
+      const content = (state.layouts['tab-1'] as any).content
+
+      // Session identity preserved, but exit status propagated
+      expect(content.resumeSessionId).toBe('session-A')
+      expect(content.status).toBe('exited')
+    })
+
+    it('allows resumeSessionId update when local has no session', () => {
+      // Local pane has no resumeSessionId (new terminal, not yet associated)
+      const localState: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'claude',
+              createRequestId: 'req-1',
+              status: 'creating',
+              // no resumeSessionId
+            },
+          } as any,
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: {},
+      }
+
+      const incoming: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'claude',
+              createRequestId: 'req-1',
+              status: 'running',
+              terminalId: 'remote-t1',
+              resumeSessionId: 'session-new',
+            },
+          } as any,
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: {},
+      }
+
+      const state = panesReducer(localState, hydratePanes(incoming))
+      const content = (state.layouts['tab-1'] as any).content
+
+      // When local has NO resumeSessionId, incoming's session should be accepted
+      expect(content.resumeSessionId).toBe('session-new')
+    })
+
+    it('handles missing paneTitles in persisted state', () => {
+      const savedStateWithoutTitles = {
+        layouts: {},
+        activePane: {},
+        // paneTitles is missing
+      } as PanesState
+
+      const state = panesReducer(initialState, hydratePanes(savedStateWithoutTitles))
+
+      expect(state.paneTitles).toEqual({})
+    })
+
+    it('normalizes browserInstanceId from hydratePanes cross-tab payloads', () => {
+      const next = panesReducer(
+        initialState,
+        hydratePanes({
+          layouts: {
+            'tab-1': {
+              type: 'leaf',
+              id: 'pane-1',
+              content: { kind: 'browser', url: 'https://example.com', devToolsOpen: false },
+            },
+          },
+          activePane: { 'tab-1': 'pane-1' },
+          paneTitles: {},
+          paneTitleSetByUser: {},
+          renameRequestTabId: null,
+          renameRequestPaneId: null,
+          zoomedPane: {},
+        } as any),
+      )
+
+      const layout = next.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(layout.content.kind).toBe('browser')
+      if (layout.content.kind === 'browser') {
+        expect((layout.content as any).browserInstanceId).toBeDefined()
+      }
+    })
+
+    it('falls back to local state when hydratePanes receives malformed leaf content', () => {
+      const localState: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'shell',
+              createRequestId: 'req-1',
+              status: 'running',
+              terminalId: 'local-terminal-1',
+            },
+          } as any,
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Local title' } },
+        paneTitleSetByUser: { 'tab-1': { 'pane-1': true } },
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const incoming: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: { kind: 'editor' },
+          } as any,
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Remote bad title' } },
+        paneTitleSetByUser: { 'tab-1': { 'pane-1': false } },
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const next = panesReducer(localState, hydratePanes(incoming))
+
+      const leaf = next.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.content.kind).toBe('terminal')
+      expect((leaf.content as TerminalPaneContent).terminalId).toBe('local-terminal-1')
+      expect(next.activePane['tab-1']).toBe('pane-1')
+      expect(next.paneTitles['tab-1']).toEqual({ 'pane-1': 'Local title' })
+      expect(next.paneTitleSetByUser['tab-1']).toEqual({ 'pane-1': true })
+    })
+
+    const terminalLeaf = (id: string, terminalId: string): PaneNode => ({
+      type: 'leaf',
+      id,
+      content: {
+        kind: 'terminal',
+        mode: 'shell',
+        createRequestId: `req-${id}`,
+        status: 'running',
+        terminalId,
+      } as TerminalPaneContent,
+    })
+
+    const editorLeaf = (id: string, filePath: string): PaneNode => ({
+      type: 'leaf',
+      id,
+      content: {
+        kind: 'editor',
+        filePath,
+        language: null,
+        readOnly: false,
+        content: '',
+        viewMode: 'source',
+      } as EditorPaneContent,
+    })
+
+    const crossTabMeta = (localLayoutPersistedAt: number, remoteLayoutPersistedAt: number) => ({
+      localLayoutPersistedAt,
+      remoteLayoutPersistedAt,
+    })
+
+    it('preserves local split when incoming is a stale leaf', () => {
+      const now = 1_000_000
+      const localState: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              terminalLeaf('pane-1', 't1'),
+              editorLeaf('pane-2', '/path/to/file.ts'),
+            ],
+          },
+        },
+        activePane: { 'tab-1': 'pane-2' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell', 'pane-2': 'file.ts' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const incoming: PanesState = {
+        layouts: { 'tab-1': terminalLeaf('pane-1', 't1') },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const action = {
+        ...hydratePanes(incoming),
+        meta: crossTabMeta(now, now - 60_000),
+      }
+
+      const state = panesReducer(localState, action)
+      expect(state.layouts['tab-1']?.type).toBe('split')
+      expect(state.activePane['tab-1']).toBe('pane-2')
+    })
+
+    it('accepts incoming leaf over local split when incoming is newer', () => {
+      const now = 1_000_000
+      const localState: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              terminalLeaf('pane-1', 't1'),
+              editorLeaf('pane-2', '/path/to/file.ts'),
+            ],
+          },
+        },
+        activePane: { 'tab-1': 'pane-2' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell', 'pane-2': 'file.ts' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const incoming: PanesState = {
+        layouts: { 'tab-1': terminalLeaf('pane-1', 't1') },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const action = {
+        ...hydratePanes(incoming),
+        meta: crossTabMeta(now - 60_000, now),
+      }
+
+      const state = panesReducer(localState, action)
+      expect(state.layouts['tab-1']?.type).toBe('leaf')
+      expect(state.activePane['tab-1']).toBe('pane-1')
+    })
+
+    it('accepts incoming leaf over local split when timestamps are absent', () => {
+      const localState: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              terminalLeaf('pane-1', 't1'),
+              editorLeaf('pane-2', '/path/to/file.ts'),
+            ],
+          },
+        },
+        activePane: { 'tab-1': 'pane-2' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell', 'pane-2': 'file.ts' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const incoming: PanesState = {
+        layouts: { 'tab-1': terminalLeaf('pane-1', 't1') },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const state = panesReducer(localState, hydratePanes(incoming))
+      expect(state.layouts['tab-1']?.type).toBe('leaf')
+      expect(state.activePane['tab-1']).toBe('pane-1')
+    })
+
+    it('preserves local leaf when incoming is a stale split', () => {
+      const now = 1_000_000
+      const localState: PanesState = {
+        layouts: { 'tab-1': terminalLeaf('pane-1', 't1') },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const incoming: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              terminalLeaf('pane-1', 't1'),
+              editorLeaf('pane-2', '/path/to/file.ts'),
+            ],
+          },
+        },
+        activePane: { 'tab-1': 'pane-2' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell', 'pane-2': 'file.ts' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const action = {
+        ...hydratePanes(incoming),
+        meta: crossTabMeta(now, now - 60_000),
+      }
+
+      const state = panesReducer(localState, action)
+      expect(state.layouts['tab-1']?.type).toBe('leaf')
+      expect(state.activePane['tab-1']).toBe('pane-1')
+    })
+
+    it('keeps incoming metadata as the base but reapplies local user titles for surviving panes', () => {
+      const now = 1_000_000
+      const localState: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              terminalLeaf('pane-1', 't1'),
+              editorLeaf('pane-2', '/path/to/local-file.ts'),
+            ],
+          },
+        },
+        activePane: { 'tab-1': 'pane-2' },
+        paneTitles: { 'tab-1': { 'pane-1': 'My shell', 'pane-2': 'My file alias' } },
+        paneTitleSetByUser: { 'tab-1': { 'pane-1': true, 'pane-2': true } },
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const incoming: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              terminalLeaf('pane-1', 't1'),
+              editorLeaf('pane-2', '/path/to/remote-file.ts'),
+            ],
+          },
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Remote shell', 'pane-2': 'remote-file.ts' } },
+        paneTitleSetByUser: { 'tab-1': { 'pane-2': false } },
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const action = {
+        ...hydratePanes(incoming),
+        meta: crossTabMeta(now - 60_000, now),
+      }
+
+      const state = panesReducer(localState, action)
+      expect(state.activePane['tab-1']).toBe('pane-1')
+      expect(state.paneTitles['tab-1']).toEqual({
+        'pane-1': 'My shell',
+        'pane-2': 'My file alias',
+      })
+      expect(state.paneTitleSetByUser['tab-1']).toEqual({
+        'pane-1': true,
+        'pane-2': true,
+      })
+    })
+
+    it('preserves local user-set pane titles for surviving panes when local layout wins', () => {
+      const now = 1_000_000
+      const localState: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              terminalLeaf('pane-1', 't1'),
+              editorLeaf('pane-2', '/path/to/local-file.ts'),
+            ],
+          },
+        },
+        activePane: { 'tab-1': 'pane-2' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell', 'pane-2': 'My file alias' } },
+        paneTitleSetByUser: { 'tab-1': { 'pane-2': true } },
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const incoming: PanesState = {
+        layouts: { 'tab-1': terminalLeaf('pane-1', 't1') },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const action = {
+        ...hydratePanes(incoming),
+        meta: crossTabMeta(now, now - 60_000),
+      }
+
+      const state = panesReducer(localState, action)
+      expect(state.paneTitles['tab-1']).toEqual({
+        'pane-1': 'Shell',
+        'pane-2': 'My file alias',
+      })
+      expect(state.paneTitleSetByUser['tab-1']).toEqual({
+        'pane-2': true,
+      })
+    })
+  })
+
+  describe('fresh-agent durable sessionRef identity guard', () => {
+    const OPENCODE_CRID = 'req-opencode-guard'
+    const OPENCODE_DURABLE_ID = 'ses_guard_durable_1'
+
+    function opencodeFreshAgentContent(overrides: Partial<FreshAgentPaneContent> = {}): FreshAgentPaneContent {
+      return {
+        kind: 'fresh-agent',
+        sessionType: 'freshopencode',
+        provider: 'opencode',
+        createRequestId: OPENCODE_CRID,
+        status: 'idle',
+        ...overrides,
+      }
+    }
+
+    function durableOpencodeContent(): FreshAgentPaneContent {
+      return opencodeFreshAgentContent({
+        sessionId: OPENCODE_DURABLE_ID,
+        resumeSessionId: OPENCODE_DURABLE_ID,
+        sessionRef: { provider: 'opencode', sessionId: OPENCODE_DURABLE_ID },
+      })
+    }
+
+    function placeholderOpencodeContent(
+      createRequestId = OPENCODE_CRID,
+      overrides: Partial<FreshAgentPaneContent> = {},
+    ): FreshAgentPaneContent {
+      const placeholderId = `freshopencode-${createRequestId}`
+      return opencodeFreshAgentContent({
+        createRequestId,
+        sessionId: placeholderId,
+        resumeSessionId: placeholderId,
+        sessionRef: { provider: 'opencode', sessionId: placeholderId },
+        ...overrides,
+      })
+    }
+
+    function freshAgentLeaf(state: PanesState, tabId = 'tab-1'): FreshAgentPaneContent {
+      const node = state.layouts[tabId]
+      if (!node || node.type !== 'leaf' || node.content.kind !== 'fresh-agent') {
+        throw new Error('expected fresh-agent leaf')
+      }
+      return node.content
+    }
+
+    it('keeps a materialized durable sessionRef when a later hydrate carries a placeholder for the same provider+createRequestId', () => {
+      const seeded = panesReducer(
+        initialState,
+        hydratePanes(stateWithLayout({
+          'tab-1': { type: 'leaf', id: 'pane-1', content: durableOpencodeContent() },
+        })),
+      )
+      expect(freshAgentLeaf(seeded).sessionRef).toEqual({
+        provider: 'opencode',
+        sessionId: OPENCODE_DURABLE_ID,
+      })
+
+      // Regression: a stale persisted/tabs.sync payload re-derives
+      // sessionRef { provider: 'opencode', sessionId: 'freshopencode-<crid>' }
+      // for a pane that already materialized to ses_….
+      const merged = panesReducer(
+        seeded,
+        hydratePanes(stateWithLayout({
+          'tab-1': { type: 'leaf', id: 'pane-1', content: placeholderOpencodeContent() },
+        })),
+      )
+
+      const content = freshAgentLeaf(merged)
+      expect(content.sessionRef).toEqual({ provider: 'opencode', sessionId: OPENCODE_DURABLE_ID })
+      expect(content.sessionId).toBe(OPENCODE_DURABLE_ID)
+      expect(content.resumeSessionId).toBe(OPENCODE_DURABLE_ID)
+      expect(content.createRequestId).toBe(OPENCODE_CRID)
+    })
+
+    it('still clamps a regressed status carried by the same placeholder payload (identity clamp composes with the status arm)', () => {
+      const seeded = panesReducer(
+        initialState,
+        hydratePanes(stateWithLayout({
+          'tab-1': { type: 'leaf', id: 'pane-1', content: durableOpencodeContent() },
+        })),
+      )
+
+      // The stale placeholder payload also regresses status back to an early
+      // state ('starting') while local is past it ('idle'). The identity clamp
+      // must not early-return past the status-regression protection arm.
+      const merged = panesReducer(
+        seeded,
+        hydratePanes(stateWithLayout({
+          'tab-1': { type: 'leaf', id: 'pane-1', content: placeholderOpencodeContent(undefined, { status: 'starting' }) },
+        })),
+      )
+
+      const content = freshAgentLeaf(merged)
+      expect(content.sessionRef).toEqual({ provider: 'opencode', sessionId: OPENCODE_DURABLE_ID })
+      expect(content.sessionId).toBe(OPENCODE_DURABLE_ID)
+      expect(content.resumeSessionId).toBe(OPENCODE_DURABLE_ID)
+      expect(content.createRequestId).toBe(OPENCODE_CRID)
+      expect(content.status).toBe('idle')
+    })
+
+    it('clamps at the mergeTerminalState site itself: emits the merge-sourced guard warn before normalize runs', () => {
+      // RED when ONLY the merge-site wiring is removed: the hydrate test above
+      // stays green because normalizePaneContent clamps afterward (its
+      // reference is the un-merged local node), so a pure state assertion
+      // cannot pin mergeTerminalState. What only the merge site emits is the
+      // clamp warn tagged `source: 'mergeTerminalState'` — the normalize site
+      // tags the same message with `source: 'normalizePaneContent'`.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const seeded = panesReducer(
+          initialState,
+          hydratePanes(stateWithLayout({
+            'tab-1': { type: 'leaf', id: 'pane-1', content: durableOpencodeContent() },
+          })),
+        )
+
+        panesReducer(
+          seeded,
+          hydratePanes(stateWithLayout({
+            'tab-1': { type: 'leaf', id: 'pane-1', content: placeholderOpencodeContent() },
+          })),
+        )
+
+        const clampWarns = warnSpy.mock.calls.filter(
+          (call) => typeof call[1] === 'string'
+            && call[1].startsWith('Clamped a re-derived placeholder fresh-agent sessionRef'),
+        )
+        const sources = clampWarns.map((call) => (call[2] as { source: string }).source)
+        expect(sources).toContain('mergeTerminalState')
+        // The merge clamp runs first and resolves the identity, so normalize
+        // must NOT need its own clamp on this path (its warn would carry a
+        // placeholderSessionId only if the incoming fold still held one).
+        expect(sources).not.toContain('normalizePaneContent')
+
+        const mergeWarn = clampWarns.find(
+          (call) => (call[2] as { source: string }).source === 'mergeTerminalState',
+        )
+        expect(mergeWarn?.[2]).toMatchObject({
+          source: 'mergeTerminalState',
+          provider: 'opencode',
+          createRequestId: OPENCODE_CRID,
+          preservedSessionId: OPENCODE_DURABLE_ID,
+          placeholderSessionId: `freshopencode-${OPENCODE_CRID}`,
+        })
+      } finally {
+        warnSpy.mockRestore()
+      }
+    })
+
+    it('keeps the durable sessionRef when updatePaneContent folds a placeholder payload for the same provider+createRequestId', () => {
+      const seeded = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', paneId: 'pane-1', content: durableOpencodeContent() }),
+      )
+
+      const updated = panesReducer(
+        seeded,
+        updatePaneContent({ tabId: 'tab-1', paneId: 'pane-1', content: placeholderOpencodeContent() }),
+      )
+
+      const content = freshAgentLeaf(updated)
+      expect(content.sessionRef).toEqual({ provider: 'opencode', sessionId: OPENCODE_DURABLE_ID })
+      expect(content.sessionId).toBe(OPENCODE_DURABLE_ID)
+      expect(content.resumeSessionId).toBe(OPENCODE_DURABLE_ID)
+    })
+
+    it('does not clamp a deliberate reset: a new createRequestId carrying a placeholder replaces cleanly', () => {
+      const seeded = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', paneId: 'pane-1', content: durableOpencodeContent() }),
+      )
+
+      const updated = panesReducer(
+        seeded,
+        updatePaneContent({
+          tabId: 'tab-1',
+          paneId: 'pane-1',
+          content: placeholderOpencodeContent('req-reset-generation'),
+        }),
+      )
+
+      const content = freshAgentLeaf(updated)
+      expect(content.createRequestId).toBe('req-reset-generation')
+      expect(content.sessionRef).toEqual({ provider: 'opencode', sessionId: 'freshopencode-req-reset-generation' })
+      expect(content.sessionId).toBe('freshopencode-req-reset-generation')
+      expect(content.resumeSessionId).toBe('freshopencode-req-reset-generation')
+    })
+
+    describe('stale restoreError folds over a durable identity', () => {
+      const DEAD_HANDLE_RESTORE_ERROR = {
+        code: 'RESTORE_UNAVAILABLE',
+        reason: 'dead_live_handle',
+      } as const
+
+      function placeholderWithRestoreError(
+        overrides: Partial<FreshAgentPaneContent> = {},
+      ): FreshAgentPaneContent {
+        return placeholderOpencodeContent(undefined, {
+          restoreError: DEAD_HANDLE_RESTORE_ERROR,
+          ...overrides,
+        })
+      }
+
+      function placeholderWithRestoreErrorNoLocator(
+        overrides: Partial<FreshAgentPaneContent> = {},
+      ): FreshAgentPaneContent {
+        const { sessionRef: _droppedLocator, ...rest } = placeholderWithRestoreError(overrides)
+        return rest
+      }
+
+      function expectDurableIdentityRestoreErrorDropped(content: FreshAgentPaneContent) {
+        expect(content.sessionRef).toEqual({ provider: 'opencode', sessionId: OPENCODE_DURABLE_ID })
+        expect(content.sessionId).toBe(OPENCODE_DURABLE_ID)
+        expect(content.resumeSessionId).toBe(OPENCODE_DURABLE_ID)
+        expect(content.createRequestId).toBe(OPENCODE_CRID)
+        expect(content.restoreError).toBeUndefined()
+      }
+
+      function seedDurable() {
+        return panesReducer(
+          initialState,
+          initLayout({ tabId: 'tab-1', paneId: 'pane-1', content: durableOpencodeContent() }),
+        )
+      }
+
+      it('updatePaneContent: restoreError + placeholder locator (raw shape) preserves the durable identity and drops the restoreError', () => {
+        const updated = panesReducer(
+          seedDurable(),
+          updatePaneContent({ tabId: 'tab-1', paneId: 'pane-1', content: placeholderWithRestoreError() }),
+        )
+        expectDurableIdentityRestoreErrorDropped(freshAgentLeaf(updated))
+      })
+
+      it('updatePaneContent: restoreError + placeholder sessionId/resumeSessionId without a locator (normalized shape) preserves the durable identity and drops the restoreError', () => {
+        const updated = panesReducer(
+          seedDurable(),
+          updatePaneContent({ tabId: 'tab-1', paneId: 'pane-1', content: placeholderWithRestoreErrorNoLocator() }),
+        )
+        expectDurableIdentityRestoreErrorDropped(freshAgentLeaf(updated))
+      })
+
+      it('hydrate: restoreError + placeholder locator (raw shape) preserves the durable identity and drops the restoreError', () => {
+        const seeded = panesReducer(
+          initialState,
+          hydratePanes(stateWithLayout({
+            'tab-1': { type: 'leaf', id: 'pane-1', content: durableOpencodeContent() },
+          })),
+        )
+        const merged = panesReducer(
+          seeded,
+          hydratePanes(stateWithLayout({
+            'tab-1': { type: 'leaf', id: 'pane-1', content: placeholderWithRestoreError() },
+          })),
+        )
+        expectDurableIdentityRestoreErrorDropped(freshAgentLeaf(merged))
+      })
+
+      it('hydrate: restoreError + placeholder sessionId/resumeSessionId without a locator (normalized shape) preserves the durable identity and drops the restoreError', () => {
+        const seeded = panesReducer(
+          initialState,
+          hydratePanes(stateWithLayout({
+            'tab-1': { type: 'leaf', id: 'pane-1', content: durableOpencodeContent() },
+          })),
+        )
+        const merged = panesReducer(
+          seeded,
+          hydratePanes(stateWithLayout({
+            'tab-1': { type: 'leaf', id: 'pane-1', content: placeholderWithRestoreErrorNoLocator() },
+          })),
+        )
+        expectDurableIdentityRestoreErrorDropped(freshAgentLeaf(merged))
+      })
+
+      it('restoreError on a DURABLE incoming identity applies unchanged (a genuinely broken durable pane)', () => {
+        const brokenDurable: FreshAgentPaneContent = {
+          ...durableOpencodeContent(),
+          restoreError: DEAD_HANDLE_RESTORE_ERROR,
+        }
+        const updated = panesReducer(
+          seedDurable(),
+          updatePaneContent({ tabId: 'tab-1', paneId: 'pane-1', content: brokenDurable }),
+        )
+        const content = freshAgentLeaf(updated)
+        expect(content.restoreError).toEqual(DEAD_HANDLE_RESTORE_ERROR)
+        expect(content.sessionId).toBe(OPENCODE_DURABLE_ID)
+        expect(content.resumeSessionId).toBe(OPENCODE_DURABLE_ID)
+      })
+
+      it('hydrate: restoreError on a DURABLE incoming identity applies unchanged', () => {
+        const brokenDurable: FreshAgentPaneContent = {
+          ...durableOpencodeContent(),
+          restoreError: DEAD_HANDLE_RESTORE_ERROR,
+        }
+        const seeded = panesReducer(
+          initialState,
+          hydratePanes(stateWithLayout({
+            'tab-1': { type: 'leaf', id: 'pane-1', content: durableOpencodeContent() },
+          })),
+        )
+        const merged = panesReducer(
+          seeded,
+          hydratePanes(stateWithLayout({
+            'tab-1': { type: 'leaf', id: 'pane-1', content: brokenDurable },
+          })),
+        )
+        const content = freshAgentLeaf(merged)
+        expect(content.restoreError).toEqual(DEAD_HANDLE_RESTORE_ERROR)
+        expect(content.sessionId).toBe(OPENCODE_DURABLE_ID)
+      })
+
+      it('deliberate reset: restoreError + placeholder under a NEW createRequestId applies unchanged', () => {
+        const resetStale = placeholderOpencodeContent('req-reset-generation', {
+          restoreError: DEAD_HANDLE_RESTORE_ERROR,
+        })
+        const updated = panesReducer(
+          seedDurable(),
+          updatePaneContent({ tabId: 'tab-1', paneId: 'pane-1', content: resetStale }),
+        )
+        const content = freshAgentLeaf(updated)
+        expect(content.createRequestId).toBe('req-reset-generation')
+        expect(content.sessionId).toBe('freshopencode-req-reset-generation')
+        expect(content.resumeSessionId).toBe('freshopencode-req-reset-generation')
+        expect(content.restoreError).toEqual(DEAD_HANDLE_RESTORE_ERROR)
+      })
+    })
+
+    it('does not clamp across providers: same createRequestId with a different incoming provider is not continuity', () => {
+      const seeded = panesReducer(
+        initialState,
+        hydratePanes(stateWithLayout({
+          'tab-1': { type: 'leaf', id: 'pane-1', content: durableOpencodeContent() },
+        })),
+      )
+
+      const codexPlaceholderId = `freshcodex-${OPENCODE_CRID}`
+      const incomingCodex: FreshAgentPaneContent = {
+        kind: 'fresh-agent',
+        sessionType: 'freshcodex',
+        provider: 'codex',
+        createRequestId: OPENCODE_CRID,
+        status: 'idle',
+        sessionId: codexPlaceholderId,
+        resumeSessionId: codexPlaceholderId,
+        sessionRef: { provider: 'codex', sessionId: codexPlaceholderId },
+      }
+
+      const merged = panesReducer(
+        seeded,
+        hydratePanes(stateWithLayout({
+          'tab-1': { type: 'leaf', id: 'pane-1', content: incomingCodex },
+        })),
+      )
+
+      const content = freshAgentLeaf(merged)
+      expect(content.provider).toBe('codex')
+      expect(content.sessionType).toBe('freshcodex')
+      expect(content.sessionRef).toEqual({ provider: 'codex', sessionId: codexPlaceholderId })
+      expect(content.sessionId).toBe(codexPlaceholderId)
+    })
+
+    describe('preservedDurableFreshAgentIdentity', () => {
+      const PREVIOUS_DURABLE = {
+        provider: 'opencode',
+        createRequestId: 'req-1',
+        sessionRef: { provider: 'opencode', sessionId: 'ses_durable_1' },
+        sessionId: 'ses_durable_1',
+        resumeSessionId: 'ses_durable_1',
+      } as const
+
+      const INCOMING_PLACEHOLDER = {
+        provider: 'opencode',
+        createRequestId: 'req-1',
+        sessionRef: { provider: 'opencode', sessionId: 'freshopencode-req-1' },
+        sessionId: 'freshopencode-req-1',
+        resumeSessionId: 'freshopencode-req-1',
+      } as const
+
+      it('returns the previous durable identity when the incoming fold is a placeholder for the same provider+createRequestId', () => {
+        const preserved = preservedDurableFreshAgentIdentity(PREVIOUS_DURABLE, INCOMING_PLACEHOLDER)
+        expect(preserved).toEqual({
+          sessionRef: { provider: 'opencode', sessionId: 'ses_durable_1' },
+          sessionId: 'ses_durable_1',
+          resumeSessionId: 'ses_durable_1',
+        })
+        // The sessionRef survives as an OBJECT — never coerced to a string,
+        // or downstream sanitizeSessionRef would discard it.
+        expect(typeof preserved?.sessionRef).toBe('object')
+      })
+
+      it('returns undefined when there is no previous fold', () => {
+        expect(preservedDurableFreshAgentIdentity(undefined, INCOMING_PLACEHOLDER)).toBeUndefined()
+      })
+
+      it('returns undefined when the previous fold has no durable sessionRef', () => {
+        expect(preservedDurableFreshAgentIdentity(
+          { ...PREVIOUS_DURABLE, sessionRef: { provider: 'opencode', sessionId: 'freshopencode-req-1' } },
+          INCOMING_PLACEHOLDER,
+        )).toBeUndefined()
+        expect(preservedDurableFreshAgentIdentity(
+          { ...PREVIOUS_DURABLE, sessionRef: undefined },
+          INCOMING_PLACEHOLDER,
+        )).toBeUndefined()
+      })
+
+      it('returns undefined when createRequestIds differ (deliberate reset)', () => {
+        expect(preservedDurableFreshAgentIdentity(
+          PREVIOUS_DURABLE,
+          { ...INCOMING_PLACEHOLDER, createRequestId: 'req-2' },
+        )).toBeUndefined()
+      })
+
+      it('returns undefined when providers differ even with the same createRequestId', () => {
+        expect(preservedDurableFreshAgentIdentity(
+          PREVIOUS_DURABLE,
+          {
+            provider: 'codex',
+            createRequestId: 'req-1',
+            sessionRef: { provider: 'codex', sessionId: 'freshcodex-req-1' },
+            sessionId: 'freshcodex-req-1',
+          },
+        )).toBeUndefined()
+      })
+
+      it('returns undefined when the incoming sessionRef is a string — sanitize discards it as a locator, never matches', () => {
+        // The discriminator is the locator; with no usable locator the scalar
+        // identity fields classify. Keep them durable here so ONLY the
+        // string-locator rule is under test.
+        expect(preservedDurableFreshAgentIdentity(
+          PREVIOUS_DURABLE,
+          {
+            ...INCOMING_PLACEHOLDER,
+            sessionRef: 'freshopencode-req-1' as any,
+            sessionId: 'ses_other_2',
+            resumeSessionId: 'ses_other_2',
+          },
+        )).toBeUndefined()
+      })
+
+      it('classifies staleness from a placeholder sessionId when the locator is absent (normalized restoreError shape)', () => {
+        const preserved = preservedDurableFreshAgentIdentity(
+          PREVIOUS_DURABLE,
+          {
+            provider: 'opencode',
+            createRequestId: 'req-1',
+            sessionId: 'freshopencode-req-1',
+            resumeSessionId: 'freshopencode-req-1',
+          },
+        )
+        expect(preserved).toEqual({
+          sessionRef: { provider: 'opencode', sessionId: 'ses_durable_1' },
+          sessionId: 'ses_durable_1',
+          resumeSessionId: 'ses_durable_1',
+        })
+      })
+
+      it('classifies staleness from a placeholder resumeSessionId alone when the locator is absent', () => {
+        expect(preservedDurableFreshAgentIdentity(
+          PREVIOUS_DURABLE,
+          {
+            provider: 'opencode',
+            createRequestId: 'req-1',
+            resumeSessionId: 'freshopencode-req-1',
+          },
+        )).toBeDefined()
+      })
+
+      it('classifies staleness when ANY present identity field is a placeholder (placeholder sessionId beside a durable resumeSessionId)', () => {
+        expect(preservedDurableFreshAgentIdentity(
+          PREVIOUS_DURABLE,
+          {
+            provider: 'opencode',
+            createRequestId: 'req-1',
+            sessionId: 'freshopencode-req-1',
+            resumeSessionId: 'ses_other_2',
+          },
+        )).toBeDefined()
+      })
+
+      it('returns undefined when the locator is absent and every present scalar identity field is durable', () => {
+        expect(preservedDurableFreshAgentIdentity(
+          PREVIOUS_DURABLE,
+          {
+            provider: 'opencode',
+            createRequestId: 'req-1',
+            sessionId: 'ses_other_2',
+            resumeSessionId: 'ses_other_2',
+          },
+        )).toBeUndefined()
+      })
+
+      it('returns undefined when the locator is absent and no scalar identity fields are present', () => {
+        expect(preservedDurableFreshAgentIdentity(
+          PREVIOUS_DURABLE,
+          { provider: 'opencode', createRequestId: 'req-1' },
+        )).toBeUndefined()
+      })
+
+      it('returns undefined when the incoming sessionRef is already durable (nothing to protect against)', () => {
+        expect(preservedDurableFreshAgentIdentity(
+          PREVIOUS_DURABLE,
+          {
+            ...INCOMING_PLACEHOLDER,
+            sessionRef: { provider: 'opencode', sessionId: 'ses_other_2' },
+            sessionId: 'ses_other_2',
+            resumeSessionId: 'ses_other_2',
+          },
+        )).toBeUndefined()
+      })
+
+      it('returns undefined when the previous sessionRef locator provider disagrees with the pane provider', () => {
+        expect(preservedDurableFreshAgentIdentity(
+          {
+            ...PREVIOUS_DURABLE,
+            sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+          },
+          INCOMING_PLACEHOLDER,
+        )).toBeUndefined()
+      })
+    })
+  })
+
+  describe('clearDeadTerminals', () => {
+    it('clears only explicitly removed terminal handles and preserves durable restore state', () => {
+      const state = stateWithLayout({
+        'tab-1': {
+          type: 'leaf',
+          id: 'p1',
+          content: {
+            kind: 'terminal',
+            mode: 'codex',
+            createRequestId: 'req-dead',
+            status: 'running',
+            terminalId: 'term-dead',
+            serverInstanceId: 'srv-old',
+            streamId: 'stream-old',
+            sessionRef: { provider: 'codex', sessionId: 'codex-thread-1' },
+          },
+        } as any,
+        'tab-2': {
+          type: 'leaf',
+          id: 'p2',
+          content: {
+            kind: 'terminal',
+            mode: 'shell',
+            createRequestId: 'req-alive',
+            status: 'running',
+            terminalId: 'term-alive',
+          },
+        } as any,
+      })
+
+      const next = panesReducer(state, clearTerminalLiveHandles({ terminalIds: ['term-dead'] }))
+      const dead = next.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      const alive = next.layouts['tab-2'] as Extract<PaneNode, { type: 'leaf' }>
+
+      expect((dead.content as TerminalPaneContent).terminalId).toBeUndefined()
+      expect((dead.content as TerminalPaneContent).status).toBe('creating')
+      expect((dead.content as TerminalPaneContent).createRequestId).not.toBe('req-dead')
+      expect((dead.content as TerminalPaneContent).serverInstanceId).toBeUndefined()
+      expect((dead.content as TerminalPaneContent).streamId).toBeUndefined()
+      expect((dead.content as TerminalPaneContent).sessionRef).toEqual({
+        provider: 'codex',
+        sessionId: 'codex-thread-1',
+      })
+      expect(next.restoreFallbackAttemptsByPane?.['tab-1']?.['p1']).toBeUndefined()
+
+      expect((alive.content as TerminalPaneContent).terminalId).toBe('term-alive')
+      expect((alive.content as TerminalPaneContent).status).toBe('running')
+      expect((alive.content as TerminalPaneContent).createRequestId).toBe('req-alive')
+    })
+
+    it('clears terminal IDs not in the live list', () => {
+      const state: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'p1',
+            content: { kind: 'terminal', mode: 'shell', createRequestId: 'r1', status: 'running', terminalId: 'alive-1' },
+          } as any,
+          'tab-2': {
+            type: 'leaf',
+            id: 'p2',
+            content: { kind: 'terminal', mode: 'shell', createRequestId: 'r2', status: 'running', terminalId: 'dead-1' },
+          } as any,
+          'tab-3': {
+            type: 'leaf',
+            id: 'p3',
+            content: { kind: 'browser', url: 'https://example.com' },
+          } as any,
+        },
+        activePane: {},
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const next = panesReducer(state, clearDeadTerminals({ liveTerminalIds: ['alive-1'] }))
+
+      // alive-1 should be preserved
+      const leaf1 = next.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect((leaf1.content as TerminalPaneContent).terminalId).toBe('alive-1')
+      expect((leaf1.content as TerminalPaneContent).status).toBe('running')
+
+      // dead-1 should be cleared with a new createRequestId to trigger re-creation
+      const leaf2 = next.layouts['tab-2'] as Extract<PaneNode, { type: 'leaf' }>
+      expect((leaf2.content as TerminalPaneContent).terminalId).toBeUndefined()
+      expect((leaf2.content as TerminalPaneContent).status).toBe('creating')
+      expect((leaf2.content as TerminalPaneContent).createRequestId).not.toBe('r2')
+
+      // browser pane should be untouched
+      const leaf3 = next.layouts['tab-3'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf3.content.kind).toBe('browser')
+    })
+
+    it('generates new createRequestIds to trigger TerminalView effect re-run', () => {
+      const state: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'p1',
+            content: { kind: 'terminal', mode: 'shell', createRequestId: 'original-req-1', status: 'running', terminalId: 'dead-1' },
+          } as any,
+          'tab-2': {
+            type: 'leaf',
+            id: 'p2',
+            content: { kind: 'terminal', mode: 'claude', createRequestId: 'original-req-2', status: 'running', terminalId: 'dead-2' },
+          } as any,
+        },
+        activePane: {},
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const next = panesReducer(state, clearDeadTerminals({ liveTerminalIds: [] }))
+
+      const leaf1 = next.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect((leaf1.content as TerminalPaneContent).createRequestId).not.toBe('original-req-1')
+      expect((leaf1.content as TerminalPaneContent).terminalId).toBeUndefined()
+      expect((leaf1.content as TerminalPaneContent).status).toBe('creating')
+
+      const leaf2 = next.layouts['tab-2'] as Extract<PaneNode, { type: 'leaf' }>
+      expect((leaf2.content as TerminalPaneContent).createRequestId).not.toBe('original-req-2')
+      expect((leaf2.content as TerminalPaneContent).terminalId).toBeUndefined()
+      expect((leaf2.content as TerminalPaneContent).serverInstanceId).toBeUndefined()
+      expect((leaf2.content as TerminalPaneContent).streamId).toBeUndefined()
+      expect((leaf2.content as TerminalPaneContent).status).toBe('creating')
+    })
+  })
+
+  describe('repairCodexIdentityMismatch', () => {
+    it('clears stale runtime plumbing and preserves only matching durable identity', () => {
+      const state = stateWithLeaf('pane-codex', {
+        kind: 'terminal',
+        createRequestId: 'req-old',
+        status: 'running',
+        mode: 'codex',
+        shell: 'system',
+        terminalId: 'term-old',
+        serverInstanceId: 'srv-1',
+        streamId: 'stream-1',
+        sessionRef: { provider: 'codex', sessionId: 'thread-1' },
+        codexDurability: {
+          schemaVersion: 1,
+          state: 'durable',
+          durableThreadId: 'thread-1',
+        },
+      })
+
+      const next = panesReducer(state, repairCodexIdentityMismatch({
+        tabId: 'tab-1',
+        paneId: 'pane-codex',
+        staleTerminalId: 'term-old',
+        expectedSessionRef: { provider: 'codex', sessionId: 'thread-1' },
+        createRequestId: 'req-new',
+      }))
+
+      const leaf = next.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      const content = leaf.content as TerminalPaneContent
+      expect(content.terminalId).toBeUndefined()
+      expect(content.serverInstanceId).toBeUndefined()
+      expect(content.streamId).toBeUndefined()
+      expect(content.createRequestId).toBe('req-new')
+      expect(content.status).toBe('creating')
+      expect(content.sessionRef).toEqual({ provider: 'codex', sessionId: 'thread-1' })
+      expect(content.codexDurability).toEqual({
+        schemaVersion: 1,
+        state: 'durable',
+        durableThreadId: 'thread-1',
+      })
+    })
+  })
+
+  describe('PaneContent types', () => {
+    it('preserves local canonical Codex identity over incoming runtime fields during hydration', () => {
+      const localState = stateWithLeaf('pane-canonical', {
+        kind: 'terminal',
+        createRequestId: 'req-1',
+        status: 'running',
+        mode: 'codex',
+        shell: 'system',
+        terminalId: 'term-local',
+        serverInstanceId: 'srv-local',
+        streamId: 'stream-local',
+        sessionRef: { provider: 'codex', sessionId: 'thread-1' },
+        codexDurability: {
+          schemaVersion: 1,
+          state: 'durable',
+          durableThreadId: 'thread-1',
+        },
+      })
+
+      const incoming: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-canonical',
+            content: {
+              kind: 'terminal',
+              createRequestId: 'req-2',
+              status: 'running',
+              mode: 'codex',
+              shell: 'system',
+              terminalId: 'term-remote',
+              serverInstanceId: 'srv-remote',
+              streamId: 'stream-remote',
+              sessionRef: { provider: 'codex', sessionId: 'thread-other' },
+              codexDurability: {
+                schemaVersion: 1,
+                state: 'durable',
+                durableThreadId: 'thread-other',
+              },
+            },
+          },
+        },
+        activePane: localState.activePane,
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      }
+
+      const merged = panesReducer(localState, hydratePanes(incoming))
+      const leaf = merged.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.content).toMatchObject({
+        kind: 'terminal',
+        createRequestId: 'req-1',
+        status: 'running',
+        sessionRef: { provider: 'codex', sessionId: 'thread-1' },
+        terminalId: 'term-local',
+        serverInstanceId: 'srv-local',
+        streamId: 'stream-local',
+        codexDurability: {
+          schemaVersion: 1,
+          state: 'durable',
+          durableThreadId: 'thread-1',
+        },
+      })
+    })
+
+    it('TerminalPaneContent has required lifecycle fields', () => {
+      const content: TerminalPaneContent = {
+        kind: 'terminal',
+        createRequestId: 'req-123',
+        status: 'creating',
+        mode: 'shell',
+      }
+      expect(content.kind).toBe('terminal')
+      expect(content.createRequestId).toBe('req-123')
+      expect(content.status).toBe('creating')
+    })
+
+    it('TerminalPaneContent shell is optional with default behavior', () => {
+      const content: TerminalPaneContent = {
+        kind: 'terminal',
+        createRequestId: 'req-123',
+        status: 'creating',
+        mode: 'shell',
+        // shell is optional - defaults handled by reducer
+      }
+      expect(content.shell).toBeUndefined()
+    })
+
+    it('BrowserPaneContent unchanged', () => {
+      const content: BrowserPaneContent = {
+        kind: 'browser',
+        browserInstanceId: 'browser-1',
+        url: 'https://example.com',
+        devToolsOpen: false,
+      }
+      expect(content.kind).toBe('browser')
+      expect(content.browserInstanceId).toBe('browser-1')
+    })
+
+    it('PaneContent is union of both types', () => {
+      const terminal: PaneContent = {
+        kind: 'terminal',
+        createRequestId: 'req-1',
+        status: 'running',
+        mode: 'shell',
+      }
+      const browser: PaneContent = {
+        kind: 'browser',
+        browserInstanceId: 'browser-1',
+        url: '',
+        devToolsOpen: false,
+      }
+      expect(terminal.kind).toBe('terminal')
+      expect(browser.kind).toBe('browser')
+    })
+  })
+
+  describe('EditorPaneContent type', () => {
+    it('can be created with required fields', () => {
+      const content: EditorPaneContent = {
+        kind: 'editor',
+        filePath: '/path/to/file.ts',
+        language: 'typescript',
+        readOnly: false,
+        content: 'const x = 1',
+        viewMode: 'source',
+      }
+      expect(content.kind).toBe('editor')
+      expect(content.filePath).toBe('/path/to/file.ts')
+    })
+
+    it('supports scratch pad mode with null filePath', () => {
+      const content: EditorPaneContent = {
+        kind: 'editor',
+        filePath: null,
+        language: null,
+        readOnly: false,
+        content: '',
+        viewMode: 'source',
+      }
+      expect(content.filePath).toBeNull()
+    })
+
+    it('is part of PaneContent union', () => {
+      const editor: PaneContent = {
+        kind: 'editor',
+        filePath: '/test.md',
+        language: 'markdown',
+        readOnly: false,
+        content: '# Hello',
+        viewMode: 'preview',
+      }
+      expect(editor.kind).toBe('editor')
+    })
+  })
+
+  describe('ExtensionPaneContent type', () => {
+    it('can be created with required fields', () => {
+      const content: ExtensionPaneContent = {
+        kind: 'extension',
+        extensionName: 'my-widget',
+        props: { foo: 'bar', count: 42 },
+      }
+      expect(content.kind).toBe('extension')
+      expect(content.extensionName).toBe('my-widget')
+      expect(content.props).toEqual({ foo: 'bar', count: 42 })
+    })
+
+    it('is part of PaneContent union', () => {
+      const ext: PaneContent = {
+        kind: 'extension',
+        extensionName: 'some-ext',
+        props: {},
+      }
+      expect(ext.kind).toBe('extension')
+    })
+
+    it('passes through normalizeContent unchanged via initLayout', () => {
+      const state = panesReducer(
+        initialState,
+        initLayout({
+          tabId: 'tab-ext',
+          content: { kind: 'extension', extensionName: 'my-ext', props: { key: 'value' } },
+        })
+      )
+
+      const leaf = state.layouts['tab-ext'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.content).toEqual({
+        kind: 'extension',
+        extensionName: 'my-ext',
+        props: { key: 'value' },
+      })
+    })
+
+    it('survives hydratePanes round-trip', () => {
+      const savedState: PanesState = {
+        layouts: {
+          'tab-ext': {
+            type: 'leaf',
+            id: 'pane-ext-1',
+            content: { kind: 'extension', extensionName: 'my-widget', props: { theme: 'dark' } },
+          },
+        },
+        activePane: { 'tab-ext': 'pane-ext-1' },
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+      }
+
+      const state = panesReducer(initialState, hydratePanes(savedState))
+      const leaf = state.layouts['tab-ext'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.content).toEqual({
+        kind: 'extension',
+        extensionName: 'my-widget',
+        props: { theme: 'dark' },
+      })
+    })
+
+    it('preserves local terminal pane when incoming is browser kind', () => {
+      const terminalContent: TerminalPaneContent = {
+        kind: 'terminal',
+        createRequestId: 'req-1',
+        status: 'running',
+        mode: 'shell',
+        terminalId: 'term-live',
+      }
+      const browserContent: PaneContent = {
+        kind: 'browser',
+        url: 'https://example.com',
+      }
+
+      const localState = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-xk', content: terminalContent })
+      )
+
+      const paneId = (localState.layouts['tab-xk'] as any).id
+
+      const incoming: PanesState = {
+        layouts: {
+          'tab-xk': {
+            type: 'leaf',
+            id: paneId,
+            content: browserContent,
+          },
+        },
+        activePane: localState.activePane,
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+      }
+
+      const merged = panesReducer(localState, hydratePanes(incoming))
+      const leaf = merged.layouts['tab-xk'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.content.kind).toBe('terminal')
+      expect((leaf.content as TerminalPaneContent).terminalId).toBe('term-live')
+    })
+
+    it('preserves local browser pane when incoming is terminal kind', () => {
+      const browserContent: PaneContent = {
+        kind: 'browser',
+        url: 'https://example.com',
+      }
+      const terminalContent: TerminalPaneContent = {
+        kind: 'terminal',
+        createRequestId: 'req-2',
+        status: 'running',
+        mode: 'shell',
+        terminalId: 'term-other',
+      }
+
+      const localState = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-xk2', content: browserContent })
+      )
+
+      const paneId = (localState.layouts['tab-xk2'] as any).id
+
+      const incoming: PanesState = {
+        layouts: {
+          'tab-xk2': {
+            type: 'leaf',
+            id: paneId,
+            content: terminalContent,
+          },
+        },
+        activePane: localState.activePane,
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+      }
+
+      const merged = panesReducer(localState, hydratePanes(incoming))
+      const leaf = merged.layouts['tab-xk2'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.content.kind).toBe('browser')
+    })
+
+    it('survives mergeTerminalState when extension pane exists locally and remotely', () => {
+      const extensionContent: PaneContent = {
+        kind: 'extension',
+        extensionName: 'my-ext',
+        props: { key: 'value' },
+      }
+
+      // Set up local state with an extension pane
+      const localState = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-ext', content: extensionContent })
+      )
+
+      // Hydrate incoming state with the same extension pane
+      const incoming: PanesState = {
+        layouts: {
+          'tab-ext': {
+            type: 'leaf',
+            id: (localState.layouts['tab-ext'] as any).id,
+            content: extensionContent,
+          },
+        },
+        activePane: localState.activePane,
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+      }
+
+      const merged = panesReducer(localState, hydratePanes(incoming))
+      const leaf = merged.layouts['tab-ext'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.content).toEqual(extensionContent)
+    })
+  })
+
+  describe('addPane', () => {
+    // Helper to construct state with explicit layouts and activePane
+    function terminalContent(createRequestId: string): PaneContent {
+      return { kind: 'terminal', createRequestId, status: 'running', mode: 'shell' }
+    }
+
+    function makeState(
+      layouts: Record<string, PaneNode>,
+      activePane: Record<string, string>
+    ): PanesState {
+      return {
+        layouts,
+        activePane,
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+      }
+    }
+
+    // Helper to count leaves in a pane tree
+    function countLeaves(node: PaneNode): number {
+      if (node.type === 'leaf') return 1
+      return countLeaves(node.children[0]) + countLeaves(node.children[1])
+    }
+
+    it('does nothing if layout does not exist', () => {
+      const state = panesReducer(
+        initialState,
+        addPane({ tabId: 'non-existent', newContent: { kind: 'terminal', mode: 'shell' } })
+      )
+      expect(state.layouts['non-existent']).toBeUndefined()
+    })
+
+    it('falls back to first leaf when no active pane is set', () => {
+      const tabId = 'tab1'
+      const leaf: PaneNode = { type: 'leaf', id: 'only', content: terminalContent('only-req') }
+      // activePane is empty — no active pane set for this tab
+      const state = makeState({ [tabId]: leaf }, {})
+      const result = panesReducer(state, addPane({ tabId, newContent: { kind: 'picker' } }))
+      // Should still split the only leaf
+      const root = result.layouts[tabId]
+      expect(root.type).toBe('split')
+      if (root.type !== 'split') return
+      expect(root.children[0]).toEqual(leaf)
+      expect(root.children[1].type).toBe('leaf')
+    })
+
+    it('splits the active pane to the right', () => {
+      const tabId = 'tab1'
+      const leaf: PaneNode = { type: 'leaf', id: 'active', content: terminalContent('active-req') }
+      const state = makeState({ [tabId]: leaf }, { [tabId]: 'active' })
+      const result = panesReducer(state, addPane({
+        tabId,
+        newContent: { kind: 'picker' },
+      }))
+      // Root should be a horizontal split with active pane on left, new pane on right
+      const root = result.layouts[tabId]
+      expect(root.type).toBe('split')
+      if (root.type !== 'split') return
+      expect(root.direction).toBe('horizontal')
+      expect(root.sizes).toEqual([50, 50])
+      expect(root.children[0]).toEqual(leaf) // Original pane preserved
+      expect(root.children[1].type).toBe('leaf')
+      if (root.children[1].type === 'leaf') {
+        expect(root.children[1].content.kind).toBe('picker')
+      }
+    })
+
+    it('splits only the active pane, preserving the rest of the tree', () => {
+      // Setup: H-split(A, B), A is active
+      // Action: addPane
+      // Expected: H-split(H-split(A, new), B) — only A was split
+      const tabId = 'tab1'
+      const a: PaneNode = { type: 'leaf', id: 'a', content: terminalContent('a-req') }
+      const b: PaneNode = { type: 'leaf', id: 'b', content: terminalContent('b-req') }
+      const root: PaneNode = {
+        type: 'split', id: 'split1', direction: 'horizontal',
+        sizes: [50, 50], children: [a, b],
+      }
+      const state = makeState({ [tabId]: root }, { [tabId]: 'a' })
+      const result = panesReducer(state, addPane({ tabId, newContent: { kind: 'picker' } }))
+      const newRoot = result.layouts[tabId]
+      expect(newRoot.type).toBe('split')
+      if (newRoot.type !== 'split') return
+      // B should be completely untouched
+      expect(newRoot.children[1]).toBe(b)
+      // A's position should now contain a split
+      expect(newRoot.children[0].type).toBe('split')
+    })
+
+    it('sets the new pane as active', () => {
+      const tabId = 'tab1'
+      const leaf: PaneNode = { type: 'leaf', id: 'active', content: terminalContent('active-req') }
+      const state = makeState({ [tabId]: leaf }, { [tabId]: 'active' })
+      const result = panesReducer(state, addPane({ tabId, newContent: { kind: 'picker' } }))
+      expect(result.activePane[tabId]).not.toBe('active')
+      // Active should be the new pane's id
+      const root = result.layouts[tabId]
+      if (root.type === 'split' && root.children[1].type === 'leaf') {
+        expect(result.activePane[tabId]).toBe(root.children[1].id)
+      }
+    })
+
+    it('preserves existing pane IDs when splitting', () => {
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'shell' } })
+      )
+      const pane1Id = (state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      state = panesReducer(
+        state,
+        addPane({ tabId: 'tab-1', newContent: { kind: 'terminal', mode: 'claude' } })
+      )
+
+      // First pane should keep its ID
+      const root = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const firstPane = root.children[0] as Extract<PaneNode, { type: 'leaf' }>
+      expect(firstPane.id).toBe(pane1Id)
+    })
+
+    it('generates createRequestId for new terminal panes', () => {
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'shell' } })
+      )
+
+      state = panesReducer(
+        state,
+        addPane({ tabId: 'tab-1', newContent: { kind: 'terminal', mode: 'claude' } })
+      )
+
+      const root = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const newPane = root.children[1] as Extract<PaneNode, { type: 'leaf' }>
+      expect(newPane.content.kind).toBe('terminal')
+      if (newPane.content.kind === 'terminal') {
+        expect(newPane.content.createRequestId).toBeDefined()
+        expect(newPane.content.status).toBe('creating')
+      }
+    })
+
+    it('preserves pane contents when adding a 3rd pane (splits active, not grid rebuild)', () => {
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'shell', createRequestId: 'req-1', status: 'running' } })
+      )
+      state = panesReducer(
+        state,
+        addPane({ tabId: 'tab-1', newContent: { kind: 'terminal', mode: 'claude', createRequestId: 'req-2', status: 'running' } })
+      )
+
+      // After first addPane: H-split(shell, claude) with claude as active
+      const split2 = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const pane1Id = (split2.children[0] as Extract<PaneNode, { type: 'leaf' }>).id
+
+      // Add 3rd pane — should split the active (claude) pane, not rebuild grid
+      state = panesReducer(
+        state,
+        addPane({ tabId: 'tab-1', newContent: { kind: 'terminal', mode: 'codex', createRequestId: 'req-3', status: 'running' } })
+      )
+
+      // Root should still be H-split; left child is original shell pane
+      const root = state.layouts['tab-1']
+      expect(root.type).toBe('split')
+      if (root.type !== 'split') return
+      expect(root.direction).toBe('horizontal')
+      // Left child should be the original shell pane (untouched)
+      expect(root.children[0].type).toBe('leaf')
+      const leftLeaf = root.children[0] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leftLeaf.id).toBe(pane1Id)
+      // Right child should now be a split (claude | codex)
+      expect(root.children[1].type).toBe('split')
+
+      expect(countLeaves(root)).toBe(3)
+    })
+  })
+
+  describe('updatePaneTitle', () => {
+    it('updates the title for a specific pane', () => {
+      const initialLayout: PaneNode = {
+        type: 'leaf',
+        id: 'pane-1',
+        content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' },
+      }
+      const state: PanesState = {
+        layouts: { 'tab-1': initialLayout },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: {},
+      }
+
+      const result = panesReducer(state, updatePaneTitle({ tabId: 'tab-1', paneId: 'pane-1', title: 'My Terminal' }))
+
+      expect(result.paneTitles['tab-1']).toBeDefined()
+      expect(result.paneTitles['tab-1']['pane-1']).toBe('My Terminal')
+    })
+
+    it('preserves other pane titles when updating one', () => {
+      const state: PanesState = {
+        layouts: {},
+        activePane: {},
+        paneTitles: { 'tab-1': { 'pane-2': 'Other Pane' } },
+      }
+
+      const result = panesReducer(state, updatePaneTitle({ tabId: 'tab-1', paneId: 'pane-1', title: 'First Pane' }))
+
+      expect(result.paneTitles['tab-1']['pane-1']).toBe('First Pane')
+      expect(result.paneTitles['tab-1']['pane-2']).toBe('Other Pane')
+    })
+  })
+
+  describe('splitPane title initialization', () => {
+    it('initializes title for new pane using derivePaneTitle', () => {
+      const leaf: PaneNode = {
+        type: 'leaf',
+        id: 'pane-1',
+        content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' },
+      }
+      const state: PanesState = {
+        layouts: { 'tab-1': leaf },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: {},
+      }
+
+      const result = panesReducer(state, splitPane({
+        tabId: 'tab-1',
+        paneId: 'pane-1',
+        direction: 'horizontal',
+        newContent: { kind: 'terminal', mode: 'claude' },
+      }))
+
+      // Find the new pane ID (it's the active pane after split)
+      const newPaneId = result.activePane['tab-1']
+      // Without extensions, derivePaneTitle capitalizes the provider name
+      expect(result.paneTitles['tab-1'][newPaneId]).toBe('Claude')
+    })
+  })
+
+  describe('addPane title initialization', () => {
+    it('initializes title for new pane using derivePaneTitle', () => {
+      const leaf: PaneNode = {
+        type: 'leaf',
+        id: 'pane-1',
+        content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' },
+      }
+      const state: PanesState = {
+        layouts: { 'tab-1': leaf },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: {},
+      }
+
+      const result = panesReducer(state, addPane({
+        tabId: 'tab-1',
+        newContent: { kind: 'terminal', mode: 'codex' },
+      }))
+
+      const newPaneId = result.activePane['tab-1']
+      // Without extensions, derivePaneTitle capitalizes the provider name
+      expect(result.paneTitles['tab-1'][newPaneId]).toBe('Codex')
+    })
+  })
+
+  describe('paneTitleSetByUser guard', () => {
+    const makeState = (setByUser: boolean): PanesState => ({
+      layouts: {
+        'tab-1': {
+          type: 'leaf',
+          id: 'pane-1',
+          content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' },
+        },
+      },
+      activePane: { 'tab-1': 'pane-1' },
+      paneTitles: { 'tab-1': { 'pane-1': 'User Title' } },
+      paneTitleSetByUser: setByUser ? { 'tab-1': { 'pane-1': true } } : {},
+      renameRequestTabId: null,
+      renameRequestPaneId: null,
+    })
+
+    it('updatePaneContent does NOT overwrite title when paneTitleSetByUser is true', () => {
+      const state = makeState(true)
+      const result = panesReducer(state, updatePaneContent({
+        tabId: 'tab-1',
+        paneId: 'pane-1',
+        content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'claude' },
+      }))
+
+      expect(result.paneTitles['tab-1']['pane-1']).toBe('User Title')
+    })
+
+    it('updatePaneContent rewrites titles that still match the pane default', () => {
+      const state = makeState(false)
+      state.paneTitles['tab-1']['pane-1'] = 'Shell'
+      const result = panesReducer(state, updatePaneContent({
+        tabId: 'tab-1',
+        paneId: 'pane-1',
+        content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'claude' },
+      }))
+
+      // Without extensions, derivePaneTitle capitalizes the provider name
+      expect(result.paneTitles['tab-1']['pane-1']).toBe('Claude')
+    })
+
+    it('updatePaneContent preserves runtime titles when they no longer match the pane default', () => {
+      const state = makeState(false)
+      state.paneTitles['tab-1']['pane-1'] = 'Release prep'
+      const result = panesReducer(state, updatePaneContent({
+        tabId: 'tab-1',
+        paneId: 'pane-1',
+        content: {
+          kind: 'terminal',
+          createRequestId: 'req-1',
+          terminalId: 'term-1',
+          status: 'running',
+          mode: 'shell',
+        },
+      }))
+
+      expect(result.paneTitles['tab-1']['pane-1']).toBe('Release prep')
+    })
+
+    it('mergePaneContent preserves runtime titles when they no longer match the pane default', () => {
+      const state = makeState(false)
+      state.paneTitles['tab-1']['pane-1'] = 'Release prep'
+      const result = panesReducer(state, mergePaneContent({
+        tabId: 'tab-1',
+        paneId: 'pane-1',
+        updates: { terminalId: 'term-1' },
+      }))
+
+      expect(result.paneTitles['tab-1']['pane-1']).toBe('Release prep')
+    })
+
+    it('updatePaneTitle sets paneTitleSetByUser to true', () => {
+      const state = makeState(false)
+      const result = panesReducer(state, updatePaneTitle({
+        tabId: 'tab-1',
+        paneId: 'pane-1',
+        title: 'Custom Name',
+      }))
+
+      expect(result.paneTitleSetByUser['tab-1']?.['pane-1']).toBe(true)
+    })
+
+    it('updatePaneTitle with setByUser=false does NOT set paneTitleSetByUser', () => {
+      const state = makeState(false)
+      const result = panesReducer(state, updatePaneTitle({
+        tabId: 'tab-1',
+        paneId: 'pane-1',
+        title: 'System Title',
+        setByUser: false,
+      }))
+
+      expect(result.paneTitles['tab-1']['pane-1']).toBe('System Title')
+      expect(result.paneTitleSetByUser['tab-1']?.['pane-1']).toBeUndefined()
+    })
+
+    it('updatePaneTitle with setByUser=false skips update when user already set the title', () => {
+      const state = makeState(true)
+      const result = panesReducer(state, updatePaneTitle({
+        tabId: 'tab-1',
+        paneId: 'pane-1',
+        title: 'System Override Attempt',
+        setByUser: false,
+      }))
+
+      // User title should be preserved
+      expect(result.paneTitles['tab-1']['pane-1']).toBe('User Title')
+    })
+
+    it('closePane cleans up paneTitleSetByUser entry', () => {
+      // Need a split so we can actually close a pane
+      const state: PanesState = {
+        layouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              { type: 'leaf', id: 'pane-1', content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' } },
+              { type: 'leaf', id: 'pane-2', content: { kind: 'terminal', createRequestId: 'req-2', status: 'running', mode: 'claude' } },
+            ],
+          },
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell', 'pane-2': 'Claude CLI' } },
+        paneTitleSetByUser: { 'tab-1': { 'pane-1': true, 'pane-2': true } },
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+      }
+
+      const result = panesReducer(state, closePane({ tabId: 'tab-1', paneId: 'pane-2' }))
+
+      expect(result.paneTitleSetByUser['tab-1']?.['pane-2']).toBeUndefined()
+      // pane-1 should still be there
+      expect(result.paneTitleSetByUser['tab-1']?.['pane-1']).toBe(true)
+    })
+
+    it('removeLayout cleans up paneTitleSetByUser for the tab', () => {
+      const state: PanesState = {
+        ...initialState,
+        layouts: { 'tab-1': { type: 'leaf', id: 'pane-1', content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' } } },
+        paneTitleSetByUser: { 'tab-1': { 'pane-1': true } },
+      }
+
+      const result = panesReducer(state, removeLayout({ tabId: 'tab-1' }))
+
+      expect(result.paneTitleSetByUser['tab-1']).toBeUndefined()
+    })
+  })
+
+  describe('requestPaneRename / clearPaneRenameRequest', () => {
+    it('requestPaneRename sets tabId and paneId', () => {
+      const result = panesReducer(initialState, requestPaneRename({ tabId: 'tab-1', paneId: 'pane-1' }))
+
+      expect(result.renameRequestTabId).toBe('tab-1')
+      expect(result.renameRequestPaneId).toBe('pane-1')
+    })
+
+    it('clearPaneRenameRequest resets to null', () => {
+      const state: PanesState = {
+        ...initialState,
+        renameRequestTabId: 'tab-1',
+        renameRequestPaneId: 'pane-1',
+      }
+
+      const result = panesReducer(state, clearPaneRenameRequest())
+
+      expect(result.renameRequestTabId).toBeNull()
+      expect(result.renameRequestPaneId).toBeNull()
+    })
+  })
+
+  describe('editor content normalization', () => {
+    it('passes editor content through unchanged', () => {
+      const editorContent: EditorPaneContent = {
+        kind: 'editor',
+        filePath: '/test.ts',
+        language: 'typescript',
+        readOnly: false,
+        content: 'code',
+        viewMode: 'source',
+      }
+
+      const state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: editorContent })
+      )
+
+      const leaf = state.layouts['tab-1'] as Extract<PaneNode, { type: 'leaf' }>
+      expect(leaf.content).toEqual(editorContent)
+    })
+
+    it('creates editor pane via addPane', () => {
+      let state = panesReducer(
+        initialState,
+        initLayout({ tabId: 'tab-1', content: { kind: 'terminal', mode: 'shell' } })
+      )
+
+      state = panesReducer(
+        state,
+        addPane({
+          tabId: 'tab-1',
+          newContent: {
+            kind: 'editor',
+            filePath: null,
+            language: null,
+            readOnly: false,
+            content: '',
+            viewMode: 'source',
+          },
+        })
+      )
+
+      const root = state.layouts['tab-1'] as Extract<PaneNode, { type: 'split' }>
+      const editorPane = root.children[1] as Extract<PaneNode, { type: 'leaf' }>
+      expect(editorPane.content.kind).toBe('editor')
+    })
+  })
+
+  describe('toggleZoom', () => {
+    function terminalContent(createRequestId: string): PaneContent {
+      return { kind: 'terminal', createRequestId, status: 'running', mode: 'shell' }
+    }
+
+    function makeZoomState(
+      layouts: Record<string, PaneNode>,
+      activePane: Record<string, string>,
+      zoomedPane: Record<string, string | undefined> = {}
+    ): PanesState {
+      return {
+        layouts,
+        activePane,
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane,
+      }
+    }
+
+    it('sets zoomedPane when not zoomed', () => {
+      const tabId = 'tab1'
+      const leaf: PaneNode = { type: 'leaf', id: 'pane-a', content: terminalContent('a-req') }
+      const state = makeZoomState({ [tabId]: leaf }, { [tabId]: 'pane-a' })
+
+      const result = panesReducer(state, toggleZoom({ tabId, paneId: 'pane-a' }))
+
+      expect(result.zoomedPane[tabId]).toBe('pane-a')
+    })
+
+    it('clears zoomedPane when same pane already zoomed (toggle off)', () => {
+      const tabId = 'tab1'
+      const leaf: PaneNode = { type: 'leaf', id: 'pane-a', content: terminalContent('a-req') }
+      const state = makeZoomState(
+        { [tabId]: leaf },
+        { [tabId]: 'pane-a' },
+        { [tabId]: 'pane-a' }
+      )
+
+      const result = panesReducer(state, toggleZoom({ tabId, paneId: 'pane-a' }))
+
+      expect(result.zoomedPane[tabId]).toBeUndefined()
+    })
+
+    it('switches zoom to different pane', () => {
+      const tabId = 'tab1'
+      const a: PaneNode = { type: 'leaf', id: 'pane-a', content: terminalContent('a-req') }
+      const b: PaneNode = { type: 'leaf', id: 'pane-b', content: terminalContent('b-req') }
+      const root: PaneNode = {
+        type: 'split', id: 'split1', direction: 'horizontal',
+        sizes: [50, 50], children: [a, b],
+      }
+      const state = makeZoomState(
+        { [tabId]: root },
+        { [tabId]: 'pane-a' },
+        { [tabId]: 'pane-a' }
+      )
+
+      const result = panesReducer(state, toggleZoom({ tabId, paneId: 'pane-b' }))
+
+      expect(result.zoomedPane[tabId]).toBe('pane-b')
+    })
+
+    it('does not affect other tabs', () => {
+      const a: PaneNode = { type: 'leaf', id: 'pane-a', content: terminalContent('a-req') }
+      const b: PaneNode = { type: 'leaf', id: 'pane-b', content: terminalContent('b-req') }
+      const state = makeZoomState(
+        { 'tab1': a, 'tab2': b },
+        { 'tab1': 'pane-a', 'tab2': 'pane-b' },
+        { 'tab2': 'pane-b' }
+      )
+
+      const result = panesReducer(state, toggleZoom({ tabId: 'tab1', paneId: 'pane-a' }))
+
+      expect(result.zoomedPane['tab1']).toBe('pane-a')
+      expect(result.zoomedPane['tab2']).toBe('pane-b')
+    })
+  })
+
+  describe('closePane clears zoom', () => {
+    function terminalContent(createRequestId: string): PaneContent {
+      return { kind: 'terminal', createRequestId, status: 'running', mode: 'shell' }
+    }
+
+    it('clears zoom when zoomed pane is closed', () => {
+      const tabId = 'tab1'
+      const a: PaneNode = { type: 'leaf', id: 'pane-a', content: terminalContent('a-req') }
+      const b: PaneNode = { type: 'leaf', id: 'pane-b', content: terminalContent('b-req') }
+      const root: PaneNode = {
+        type: 'split', id: 'split1', direction: 'horizontal',
+        sizes: [50, 50], children: [a, b],
+      }
+      const state: PanesState = {
+        layouts: { [tabId]: root },
+        activePane: { [tabId]: 'pane-b' },
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: { [tabId]: 'pane-b' },
+      }
+
+      const result = panesReducer(state, closePane({ tabId, paneId: 'pane-b' }))
+
+      expect(result.zoomedPane[tabId]).toBeUndefined()
+    })
+
+    it('preserves zoom when non-zoomed pane is closed', () => {
+      const tabId = 'tab1'
+      const a: PaneNode = { type: 'leaf', id: 'pane-a', content: terminalContent('a-req') }
+      const b: PaneNode = { type: 'leaf', id: 'pane-b', content: terminalContent('b-req') }
+      const root: PaneNode = {
+        type: 'split', id: 'split1', direction: 'horizontal',
+        sizes: [50, 50], children: [a, b],
+      }
+      const state: PanesState = {
+        layouts: { [tabId]: root },
+        activePane: { [tabId]: 'pane-a' },
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: { [tabId]: 'pane-a' },
+      }
+
+      const result = panesReducer(state, closePane({ tabId, paneId: 'pane-b' }))
+
+      expect(result.zoomedPane[tabId]).toBe('pane-a')
+    })
+  })
+
+  describe('addPane clears zoom', () => {
+    it('clears zoom when adding a pane while zoomed', () => {
+      const tabId = 'tab1'
+      const a: PaneNode = { type: 'leaf', id: 'pane-a', content: { kind: 'terminal', createRequestId: 'a-req', status: 'running', mode: 'shell' } }
+      const b: PaneNode = { type: 'leaf', id: 'pane-b', content: { kind: 'terminal', createRequestId: 'b-req', status: 'running', mode: 'shell' } }
+      const root: PaneNode = {
+        type: 'split', id: 'split1', direction: 'horizontal',
+        sizes: [50, 50], children: [a, b],
+      }
+      const state: PanesState = {
+        layouts: { [tabId]: root },
+        activePane: { [tabId]: 'pane-a' },
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: { [tabId]: 'pane-a' },
+      }
+
+      const result = panesReducer(state, addPane({ tabId, newContent: { kind: 'picker' } }))
+
+      // Zoom should be cleared so the new pane is visible
+      expect(result.zoomedPane[tabId]).toBeUndefined()
+    })
+  })
+
+  describe('splitPane clears zoom', () => {
+    it('clears zoom when splitting a pane while zoomed', () => {
+      const tabId = 'tab1'
+      const a: PaneNode = { type: 'leaf', id: 'pane-a', content: { kind: 'terminal', createRequestId: 'a-req', status: 'running', mode: 'shell' } }
+      const b: PaneNode = { type: 'leaf', id: 'pane-b', content: { kind: 'terminal', createRequestId: 'b-req', status: 'running', mode: 'shell' } }
+      const root: PaneNode = {
+        type: 'split', id: 'split1', direction: 'horizontal',
+        sizes: [50, 50], children: [a, b],
+      }
+      const state: PanesState = {
+        layouts: { [tabId]: root },
+        activePane: { [tabId]: 'pane-a' },
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: { [tabId]: 'pane-a' },
+      }
+
+      const result = panesReducer(state, splitPane({
+        tabId,
+        paneId: 'pane-a',
+        direction: 'horizontal',
+        newContent: { kind: 'picker' },
+      }))
+
+      // Zoom should be cleared so the new pane is visible
+      expect(result.zoomedPane[tabId]).toBeUndefined()
+    })
+  })
+
+  describe('updatePaneTitleByTerminalId', () => {
+    it('updates paneTitles when a leaf has matching terminalId', () => {
+      const leaf: PaneNode = {
+        type: 'leaf',
+        id: 'pane-a',
+        content: { kind: 'terminal', terminalId: 'term-42', createRequestId: 'req-1', status: 'running', mode: 'claude' },
+      }
+      const state: PanesState = {
+        layouts: { 'tab-1': leaf },
+        activePane: { 'tab-1': 'pane-a' },
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+      }
+
+      const result = panesReducer(state, updatePaneTitleByTerminalId({ terminalId: 'term-42', title: 'My Session' }))
+
+      expect(result.paneTitles['tab-1']['pane-a']).toBe('My Session')
+    })
+
+    it('does nothing when no pane matches the terminalId', () => {
+      const leaf: PaneNode = {
+        type: 'leaf',
+        id: 'pane-a',
+        content: { kind: 'terminal', terminalId: 'term-99', createRequestId: 'req-1', status: 'running', mode: 'shell' },
+      }
+      const state: PanesState = {
+        layouts: { 'tab-1': leaf },
+        activePane: { 'tab-1': 'pane-a' },
+        paneTitles: { 'tab-1': { 'pane-a': 'Original Title' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+      }
+
+      const result = panesReducer(state, updatePaneTitleByTerminalId({ terminalId: 'term-42', title: 'New Title' }))
+
+      expect(result.paneTitles['tab-1']['pane-a']).toBe('Original Title')
+    })
+
+    it('updates pane title in a nested split tree', () => {
+      const leaf1: PaneNode = {
+        type: 'leaf',
+        id: 'pane-a',
+        content: { kind: 'terminal', terminalId: 'term-1', createRequestId: 'req-1', status: 'running', mode: 'shell' },
+      }
+      const leaf2: PaneNode = {
+        type: 'leaf',
+        id: 'pane-b',
+        content: { kind: 'terminal', terminalId: 'term-target', createRequestId: 'req-2', status: 'running', mode: 'claude' },
+      }
+      const leaf3: PaneNode = {
+        type: 'leaf',
+        id: 'pane-c',
+        content: { kind: 'terminal', terminalId: 'term-3', createRequestId: 'req-3', status: 'running', mode: 'shell' },
+      }
+      const innerSplit: PaneNode = {
+        type: 'split',
+        id: 'split-inner',
+        direction: 'vertical',
+        sizes: [50, 50],
+        children: [leaf2, leaf3],
+      }
+      const root: PaneNode = {
+        type: 'split',
+        id: 'split-root',
+        direction: 'horizontal',
+        sizes: [50, 50],
+        children: [leaf1, innerSplit],
+      }
+      const state: PanesState = {
+        layouts: { 'tab-1': root },
+        activePane: { 'tab-1': 'pane-a' },
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+      }
+
+      const result = panesReducer(state, updatePaneTitleByTerminalId({ terminalId: 'term-target', title: 'Deep Rename' }))
+
+      expect(result.paneTitles['tab-1']['pane-b']).toBe('Deep Rename')
+      // Other panes should not be affected
+      expect(result.paneTitles['tab-1']['pane-a']).toBeUndefined()
+      expect(result.paneTitles['tab-1']['pane-c']).toBeUndefined()
+    })
+
+    it('updates across multiple tabs when both have matching terminalId', () => {
+      const leaf1: PaneNode = {
+        type: 'leaf',
+        id: 'pane-a',
+        content: { kind: 'terminal', terminalId: 'term-shared', createRequestId: 'req-1', status: 'running', mode: 'claude' },
+      }
+      const leaf2: PaneNode = {
+        type: 'leaf',
+        id: 'pane-b',
+        content: { kind: 'terminal', terminalId: 'term-shared', createRequestId: 'req-2', status: 'running', mode: 'claude' },
+      }
+      const state: PanesState = {
+        layouts: { 'tab-1': leaf1, 'tab-2': leaf2 },
+        activePane: { 'tab-1': 'pane-a', 'tab-2': 'pane-b' },
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+      }
+
+      const result = panesReducer(state, updatePaneTitleByTerminalId({ terminalId: 'term-shared', title: 'Shared Title' }))
+
+      expect(result.paneTitles['tab-1']['pane-a']).toBe('Shared Title')
+      expect(result.paneTitles['tab-2']['pane-b']).toBe('Shared Title')
+    })
+
+    it('skips non-terminal panes', () => {
+      const leaf: PaneNode = {
+        type: 'leaf',
+        id: 'pane-a',
+        content: { kind: 'browser', url: 'https://example.com', devToolsOpen: false },
+      }
+      const state: PanesState = {
+        layouts: { 'tab-1': leaf },
+        activePane: { 'tab-1': 'pane-a' },
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+      }
+
+      const result = panesReducer(state, updatePaneTitleByTerminalId({ terminalId: 'term-42', title: 'Title' }))
+
+      expect(result.paneTitles['tab-1']).toBeUndefined()
+    })
+
+    it('skips panes where terminalId is undefined', () => {
+      const leaf: PaneNode = {
+        type: 'leaf',
+        id: 'pane-a',
+        content: { kind: 'terminal', createRequestId: 'req-1', status: 'creating', mode: 'claude' },
+      }
+      const state: PanesState = {
+        layouts: { 'tab-1': leaf },
+        activePane: { 'tab-1': 'pane-a' },
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+      }
+
+      const result = panesReducer(state, updatePaneTitleByTerminalId({ terminalId: 'term-42', title: 'Title' }))
+
+      expect(result.paneTitles['tab-1']).toBeUndefined()
+    })
+  })
+
+  describe('restoreLayout', () => {
+    it('restores a leaf layout with normalized content', () => {
+      const layout: PaneNode = {
+        type: 'leaf',
+        id: 'old-pane',
+        content: {
+          kind: 'terminal',
+          terminalId: 'stale-term-id',
+          createRequestId: 'stale-cr',
+          status: 'running',
+          mode: 'shell',
+        },
+      }
+      const paneTitles = { 'old-pane': 'My Shell' }
+
+      const result = panesReducer(
+        initialState,
+        restoreLayout({ tabId: 'tab-1', layout, paneTitles }),
+      )
+
+      const restoredLayout = result.layouts['tab-1']
+      expect(restoredLayout).toBeDefined()
+      expect(restoredLayout.type).toBe('leaf')
+      if (restoredLayout.type === 'leaf') {
+        // Stale terminalId should be cleared
+        expect((restoredLayout.content as TerminalPaneContent).terminalId).toBeUndefined()
+        // Fresh createRequestId should be generated
+        expect((restoredLayout.content as TerminalPaneContent).createRequestId).not.toBe('stale-cr')
+        // Status should be reset to creating
+        expect((restoredLayout.content as TerminalPaneContent).status).toBe('creating')
+        // Mode preserved
+        expect((restoredLayout.content as TerminalPaneContent).mode).toBe('shell')
+      }
+      expect(result.paneTitles['tab-1']).toEqual(paneTitles)
+      expect(result.activePane['tab-1']).toBe('old-pane')
+    })
+
+    it('restores a split layout with multiple leaves', () => {
+      const layout: PaneNode = {
+        type: 'split',
+        id: 'split-1',
+        direction: 'horizontal',
+        sizes: [50, 50],
+        children: [
+          {
+            type: 'leaf',
+            id: 'pane-a',
+            content: {
+              kind: 'terminal',
+              terminalId: 'stale-a',
+              createRequestId: 'stale-cr-a',
+              status: 'running',
+              mode: 'claude',
+            },
+          },
+          {
+            type: 'leaf',
+            id: 'pane-b',
+            content: {
+              kind: 'browser',
+              browserInstanceId: 'stale-browser',
+              url: 'https://example.com',
+              devToolsOpen: false,
+            },
+          },
+        ],
+      }
+      const paneTitles = { 'pane-a': 'Claude', 'pane-b': 'Browser' }
+
+      const result = panesReducer(
+        initialState,
+        restoreLayout({ tabId: 'tab-2', layout, paneTitles }),
+      )
+
+      const restored = result.layouts['tab-2']
+      expect(restored.type).toBe('split')
+      if (restored.type === 'split') {
+        const left = restored.children[0]
+        const right = restored.children[1]
+        expect(left.type).toBe('leaf')
+        expect(right.type).toBe('leaf')
+        if (left.type === 'leaf') {
+          expect((left.content as TerminalPaneContent).terminalId).toBeUndefined()
+          expect((left.content as TerminalPaneContent).status).toBe('creating')
+        }
+        if (right.type === 'leaf') {
+          // Browser pane should get fresh browserInstanceId
+          expect((right.content as BrowserPaneContent).browserInstanceId).not.toBe('stale-browser')
+          expect((right.content as BrowserPaneContent).url).toBe('https://example.com')
+        }
+      }
+      expect(result.activePane['tab-2']).toBe('pane-a')
+    })
+
+    it('strips stale fresh-agent runtime identity while preserving durable resume options', () => {
+      const layout: PaneNode = {
+        type: 'leaf',
+        id: 'pane-agent',
+        content: {
+          kind: 'fresh-agent',
+          sessionType: 'freshclaude',
+          provider: 'claude',
+          sessionId: 'stale-live-session',
+          createRequestId: 'stale-create',
+          status: 'running',
+          serverInstanceId: 'stale-server',
+          createError: { code: 'STALE', message: 'stale', retryable: true },
+          sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+          resumeSessionId: VALID_CLAUDE_SESSION_ID,
+          initialCwd: '/repo',
+          modelSelection: { kind: 'exact', modelId: 'claude-opus-4-6' },
+          permissionMode: 'acceptEdits',
+          effort: 'high',
+          showThinking: false,
+          showTools: true,
+          showTimecodes: true,
+        },
+      } as PaneNode
+
+      const result = panesReducer(
+        initialState,
+        restoreLayout({ tabId: 'tab-agent', layout, paneTitles: { 'pane-agent': 'Agent' } }),
+      )
+
+      const restoredLayout = result.layouts['tab-agent']
+      expect(restoredLayout.type).toBe('leaf')
+      if (restoredLayout.type !== 'leaf' || restoredLayout.content.kind !== 'fresh-agent') {
+        throw new Error('expected restored fresh-agent leaf')
+      }
+      expect(restoredLayout.content.sessionId).toBeUndefined()
+      expect(restoredLayout.content.createRequestId).not.toBe('stale-create')
+      expect(restoredLayout.content.status).toBe('creating')
+      expect(restoredLayout.content.serverInstanceId).toBeUndefined()
+      expect(restoredLayout.content.createError).toBeUndefined()
+      expect(restoredLayout.content).toMatchObject({
+        kind: 'fresh-agent',
+        sessionType: 'freshclaude',
+        provider: 'claude',
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+        resumeSessionId: VALID_CLAUDE_SESSION_ID,
+        initialCwd: '/repo',
+        modelSelection: { kind: 'exact', modelId: 'claude-opus-4-6' },
+        permissionMode: 'acceptEdits',
+        effort: 'high',
+        showThinking: false,
+        showTools: true,
+        showTimecodes: true,
+      })
+    })
+
+    it('does not overwrite an existing layout', () => {
+      const existingLayout: PaneNode = {
+        type: 'leaf',
+        id: 'existing',
+        content: { kind: 'terminal', createRequestId: 'existing-cr', status: 'running', mode: 'shell' },
+      }
+      const stateWithLayout: PanesState = {
+        ...initialState,
+        layouts: { 'tab-1': existingLayout },
+        activePane: { 'tab-1': 'existing' },
+        paneTitles: { 'tab-1': { existing: 'Existing' } },
+      }
+
+      const newLayout: PaneNode = {
+        type: 'leaf',
+        id: 'new-pane',
+        content: { kind: 'terminal', createRequestId: 'new-cr', status: 'creating', mode: 'shell' },
+      }
+      const result = panesReducer(
+        stateWithLayout,
+        restoreLayout({ tabId: 'tab-1', layout: newLayout, paneTitles: { 'new-pane': 'New' } }),
+      )
+
+      // Should still be the existing layout
+      expect(result.layouts['tab-1'].id).toBe('existing')
+    })
+  })
+})

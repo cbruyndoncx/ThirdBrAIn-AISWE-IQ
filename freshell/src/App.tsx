@@ -1,0 +1,2089 @@
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type TouchEvent as ReactTouchEvent } from 'react'
+import { useAppDispatch, useAppSelector, useAppStore } from '@/store/hooks'
+import { setStatus, setError, setErrorCode, setServerInstanceId, setBootId, setServerRestarted, setLiveTerminalIds, setPlatform, setAvailableClis, setFeatureFlags } from '@/store/connectionSlice'
+import { resetCompletionDedupeBaselines } from '@/store/turnCompletionSlice'
+import { setLocalSettings, setServerConfigDir, setServerSettings } from '@/store/settingsSlice'
+import {
+  markWsSnapshotReceived,
+  patchSessionRunningStateFromTerminalMeta,
+  resetWsSnapshotReceived,
+} from '@/store/sessionsSlice'
+import { addTab, closeTab, reopenClosedTab, switchToNextTab, switchToPrevTab } from '@/store/tabsSlice'
+import { api, isApiUnauthorizedError, isTransientRequestFailure, type VersionInfo } from '@/lib/api'
+import {
+  fetchSessionWindow,
+  loadInitialSessionsWindow,
+  queueActiveSessionWindowRefresh,
+  type FetchSessionWindowResult,
+} from '@/store/sessionsThunks'
+import { fetchTerminalDirectoryWindow } from '@/store/terminalDirectoryThunks'
+import { createTerminalInvalidationHandler } from '@/lib/terminal-invalidation-handler'
+import { buildReconcileRequest, collectTerminalPaneTargets, foldVerdicts, RECONCILE_RESULT_WAIT_MS, setFreshAgentReconcileActive } from '@/lib/pane-reconcile'
+import { reassertAllOpenPanes } from '@/lib/kill-ack'
+import { PaneReconcileResultSchema, type PaneReconcileRequest, type HostStatsRefreshResponseMessage, type HostStatsSnapshotMessage } from '@shared/ws-protocol'
+import { getShareAction, ensureShareUrlToken, isRemoteAccessEnabledStatus } from '@/lib/share-utils'
+import { getWsClient } from '@/lib/ws-client'
+import { collectSessionLocatorsFromTabs, getSessionsForHello } from '@/lib/session-utils'
+import { installClientPerfAuditSink, setClientPerfEnabled } from '@/lib/perf-logger'
+import {
+  loadBrowserPreferencesRecord,
+  patchBrowserPreferencesRecord,
+  resolveBrowserPreferenceSettings,
+  seedBrowserPreferencesSettingsIfEmpty,
+} from '@/lib/browser-preferences'
+import { handleUiCommand } from '@/lib/ui-commands'
+import { getAuthToken } from '@/lib/auth'
+import { installTestHarness } from '@/lib/test-harness'
+import { checkServerBuildId } from '@/lib/server-build-check'
+import { createPerfAuditBridge, installPerfAuditBridge } from '@/lib/perf-audit-bridge'
+import { getTabSwitchShortcutDirection, getTabLifecycleAction } from '@/lib/tab-switch-shortcuts'
+import { useThemeEffect } from '@/hooks/useTheme'
+import { useMobile } from '@/hooks/useMobile'
+import { useOrientation } from '@/hooks/useOrientation'
+import { useFullscreen } from '@/hooks/useFullscreen'
+import { useElectronExternalLinks } from '@/hooks/useElectronExternalLinks'
+import { useTurnCompletionNotifications } from '@/hooks/useTurnCompletionNotifications'
+import { useFocusStealGuard } from '@/hooks/useFocusStealGuard'
+import { useStreamDeck } from '@/hooks/useStreamDeck'
+import { useDrag } from '@use-gesture/react'
+import { installCrossTabSync } from '@/store/crossTabSync'
+import { startTabRegistrySync, getCurrentTabRegistryClientInstanceId } from '@/store/tabRegistrySync'
+import { startSessionGreyTouchWatcher } from '@/store/sessionGreyTouch'
+import { resolveAndPersistDeviceMeta, setTabRegistryDeviceMeta } from '@/store/tabRegistrySlice'
+import { buildLocalSettingsPatch } from '@/store/browserPreferencesPersistence'
+import Sidebar, { AppView } from '@/components/Sidebar'
+import TabBar from '@/components/TabBar'
+import TabContent from '@/components/TabContent'
+import OverviewView from '@/components/OverviewView'
+import TabsView from '@/components/TabsView'
+import PaneDivider from '@/components/panes/PaneDivider'
+import { AuthRequiredModal } from '@/components/AuthRequiredModal'
+import { DeadSessionPanel } from '@/components/DeadSessionPanel'
+import { TerminalInterestReporter } from '@/components/TerminalInterestReporter'
+import { ReconcileWarmingBanner } from '@/components/ReconcileWarmingBanner'
+import { SetupWizard } from '@/components/SetupWizard'
+import { RecoveryOfferPanel } from '@/components/RecoveryOfferPanel'
+import VirtualDeckPanel from '@/components/VirtualDeckPanel'
+import { ErrorBoundary } from '@/components/ui/error-boundary'
+import { fetchNetworkStatus } from '@/store/networkSlice'
+import { ContextMenuProvider } from '@/components/context-menu/ContextMenuProvider'
+import { ContextIds } from '@/components/context-menu/context-menu-constants'
+import { triggerHapticFeedback } from '@/lib/mobile-haptics'
+import { X, Copy, Check, PanelLeft, AlertTriangle } from 'lucide-react'
+import { updateSettingsLocal } from '@/store/settingsSlice'
+
+import { setTerminalMetaSnapshot, upsertTerminalMeta, removeTerminalMeta } from '@/store/terminalMetaSlice'
+import { clearAllReconcilePendingPanes, clearDeadSessionAdjudication, clearDeadTerminals, clearReconcileWarming, clearTerminalLiveHandles, setReconcilePendingPanes } from '@/store/panesSlice'
+import { addTerminalFreshRecoveryRequestId, addTerminalRestoreRequestId, setPaneReconcileActive } from '@/lib/terminal-restore'
+import { reconcileTerminalSessionAssociation } from '@/lib/terminal-session-association'
+import { setCodexActivitySnapshot, upsertCodexActivity, removeCodexActivity, resetCodexActivity } from '@/store/codexActivitySlice'
+import { setClaudeActivitySnapshot, upsertClaudeActivity, removeClaudeActivity, resetClaudeActivity } from '@/store/claudeActivitySlice'
+import { setAmplifierActivitySnapshot, upsertAmplifierActivity, removeAmplifierActivity, resetAmplifierActivity } from '@/store/amplifierActivitySlice'
+import { setOpencodeActivitySnapshot, upsertOpencodeActivity, removeOpencodeActivity, resetOpencodeActivity } from '@/store/opencodeActivitySlice'
+import { hostStatsReset, hostStatsSnapshotReceived, hostStatsSubscribedSet, resolveHostStatsRefresh, failHostStatsRefresh } from '@/store/hostStatsSlice'
+import { subscribeHostStats } from '@/lib/host-stats-ws'
+import { applyServerIdle } from '@/store/turnCompletionThunks'
+import { setRegistry, updateServerStatus } from '@/store/extensionsSlice'
+import { handleFreshAgentMessage } from '@/lib/fresh-agent-ws'
+import { createLogger } from '@/lib/client-logger'
+import { hasDismissedAutoSetupWizard, markAutoSetupWizardDismissed } from '@/lib/setup-wizard-dismissal'
+import type { LocalSettingsPatch, ServerSettings } from '@shared/settings'
+import { z } from 'zod'
+import { withChunkErrorRecovery } from '@/lib/import-retry'
+
+const log = createLogger('App')
+
+// Lazy QR code component to avoid loading lean-qr until the share panel opens
+function ShareQrCode({ url }: { url: string }) {
+  const [svgUrl, setSvgUrl] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { generate } = await import('lean-qr')
+        const { toSvgDataURL } = await import('lean-qr/extras/svg')
+        if (cancelled) return
+        const code = generate(url)
+        setSvgUrl(toSvgDataURL(code, { on: 'black', off: 'white' }))
+      } catch {
+        // QR generation failed — panel still shows URL text
+      }
+    })()
+    return () => { cancelled = true }
+  }, [url])
+  if (!svgUrl) return null
+  return <img src={svgUrl} alt="QR code for access URL" className="w-48 h-48" />
+}
+
+const HistoryView = lazy(() => withChunkErrorRecovery(import('@/components/HistoryView')))
+const SettingsView = lazy(() => withChunkErrorRecovery(import('@/components/SettingsView')))
+const ExtensionsView = lazy(() => withChunkErrorRecovery(import('@/components/ExtensionsView')))
+
+const SIDEBAR_MIN_WIDTH = 200
+const SIDEBAR_MAX_WIDTH = 500
+const CHROME_REVEAL_TOP_EDGE_PX = 48
+const CHROME_REVEAL_SWIPE_PX = 60
+const RECENT_HTTP_SESSIONS_BASELINE_MS = 30_000
+
+
+function isVersionInfo(value: unknown): value is VersionInfo {
+  return !!value && typeof value === 'object' && typeof (value as { currentVersion?: unknown }).currentVersion === 'string'
+}
+
+type ConfigFallbackInfo = {
+  reason: 'PARSE_ERROR' | 'VERSION_MISMATCH' | 'READ_ERROR' | 'ENOENT'
+  backupExists: boolean
+  /** Profile-aware backup path (when the server provides it). */
+  backupPath?: string
+}
+
+type BootstrapPlatformInfo = {
+  platform: string
+  availableClis?: Record<string, boolean>
+  hostName?: string
+  host?: string
+  featureFlags?: Record<string, boolean>
+}
+
+function describeConfigFallbackReason(reason: ConfigFallbackInfo['reason']): string {
+  if (reason === 'PARSE_ERROR') return 'could not parse config JSON'
+  if (reason === 'VERSION_MISMATCH') return 'config version is incompatible'
+  if (reason === 'READ_ERROR') return 'config file could not be read'
+  return 'config file was missing'
+}
+
+function parseConfigFallbackReason(value: unknown): ConfigFallbackInfo['reason'] {
+  return value === 'PARSE_ERROR' || value === 'VERSION_MISMATCH' || value === 'READ_ERROR' || value === 'ENOENT'
+    ? value
+    : 'READ_ERROR'
+}
+
+function hasLoadedPlatformCapabilities(value: BootstrapPlatformInfo | null | undefined): boolean {
+  if (!value) return false
+  return 'availableClis' in value || 'featureFlags' in value
+}
+
+const ReadyMessageSchema = z.object({
+  type: z.literal('ready'),
+  timestamp: z.string(),
+  serverInstanceId: z.string().min(1),
+  bootId: z.string().min(1).optional(),
+  // The server's baked build identity (additive/optional — old servers omit
+  // it). Compared in checkServerBuildId below. Plain `z.string()` (NOT
+  // min(1)): a present-but-EMPTY buildId must reach the helper and no-op
+  // there, never fail the WHOLE ready frame and silently disable restart
+  // detection. Only a non-string TYPE can fail the frame, which no real
+  // server emits (the helper additionally treats "unknown" as a no-op).
+  buildId: z.string().optional(),
+  // Server capability ack (present iff our hello opted in). Deliberately a
+  // loose record: an unexpected capabilities shape must never fail the WHOLE
+  // ready frame and silently disable restart detection.
+  capabilities: z.record(z.string(), z.unknown()).optional(),
+})
+
+export default function App() {
+  useThemeEffect()
+  useTurnCompletionNotifications()
+  useElectronExternalLinks()
+  useFocusStealGuard()
+  useStreamDeck()
+
+  const dispatch = useAppDispatch()
+  const appStore = useAppStore()
+  const tabs = useAppSelector((s) => s.tabs.tabs)
+  const activeTabId = useAppSelector((s) => s.tabs.activeTabId)
+  const settings = useAppSelector((s) => s.settings.settings)
+  const settingsLoaded = useAppSelector((s) => s.settings.loaded)
+  const connectionLastError = useAppSelector((s) => s.connection.lastError)
+  // Kata dtfn: reactive readiness signal for the firewall-command deferral --
+  // the effect below re-runs when the status flips back to 'ready'.
+  const connectionStatus = useAppSelector((s) => s.connection.status)
+  const networkStatus = useAppSelector((s) => s.network.status)
+  const perfAuditEnabled = typeof window !== 'undefined'
+    && new URLSearchParams(window.location.search).has('perfAudit')
+  const perfAuditBridgeRef = useRef<ReturnType<typeof createPerfAuditBridge> | null>(null)
+
+  if (perfAuditEnabled && !perfAuditBridgeRef.current) {
+    perfAuditBridgeRef.current = createPerfAuditBridge()
+  }
+
+  // Install test harness when URL has ?e2e=1 parameter (for Playwright E2E tests).
+  // Uses useState initializer to run exactly once. The URL parameter approach is
+  // used instead of import.meta.env.PROD because E2E tests run against the
+  // production build where PROD=true.
+  const [_harnessInstalled] = useState(() => {
+    if (typeof window === 'undefined') return false
+    const params = new URLSearchParams(window.location.search)
+    if (!params.has('e2e')) return false
+
+    const ws = getWsClient()
+    installTestHarness(
+      appStore,
+      () => (ws as any)._state || 'unknown',
+      (timeoutMs = 10_000) => new Promise<void>((resolve, reject) => {
+        if ((ws as any)._state === 'ready') { resolve(); return }
+        const timeout = setTimeout(
+          () => reject(new Error('WS connection timeout')),
+          timeoutMs,
+        )
+        const unsub = ws.onMessage(() => {
+          if ((ws as any)._state === 'ready') {
+            clearTimeout(timeout)
+            unsub()
+            resolve()
+          }
+        })
+      }),
+      // forceDisconnect: close the underlying WebSocket to trigger auto-reconnect.
+      // Unlike ws.disconnect(), this does NOT set intentionalClose, so the client
+      // will reconnect automatically.
+      () => { (ws as any).ws?.close() },
+      // sendWsMessage: send a raw WS message for test cleanup (e.g., terminal.kill)
+      (msg: unknown) => { ws.send(msg) },
+      (msg) => { ws.receiveMessageForTest?.(msg) },
+      () => perfAuditBridgeRef.current?.snapshot() ?? null,
+    )
+    ws.setOutboundMessageObserver?.((msg) => {
+      window.__FRESHELL_TEST_HARNESS__?.recordSentWsMessage?.(msg)
+    })
+    return true
+  })
+
+  const [view, setView] = useState<AppView>('terminal')
+  const [showSharePanel, setShowSharePanel] = useState(false)
+  const [showUpdateInstructions, setShowUpdateInstructions] = useState(false)
+  const [showSetupWizard, setShowSetupWizard] = useState(false)
+  const [configFallback, setConfigFallback] = useState<ConfigFallbackInfo | null>(null)
+  const [wizardInitialStep, setWizardInitialStep] = useState<1 | 2>(1)
+  const setupWizardAutoShownRef = useRef(false)
+  const setupWizardUserInteractedRef = useRef(false)
+  const [copied, setCopied] = useState(false)
+  const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null)
+  const [pendingFirewallCommand, setPendingFirewallCommand] = useState<{ tabId: string; command: string } | null>(null)
+  const [landscapeTabBarRevealed, setLandscapeTabBarRevealed] = useState(false)
+  const isMobile = useMobile()
+  const isMobileRef = useRef(isMobile)
+  const { isLandscape } = useOrientation()
+  const { isFullscreen, exitFullscreen } = useFullscreen()
+  const paneLayouts = useAppSelector((s) => s.panes.layouts)
+  const mainContentRef = useRef<HTMLDivElement>(null)
+  const userOpenedSidebarOnMobileRef = useRef(false)
+  const codexActivityListRequestSeqRef = useRef(new Map<string, number>())
+  const claudeActivityListRequestSeqRef = useRef(new Map<string, number>())
+  const amplifierActivityListRequestSeqRef = useRef(new Map<string, number>())
+  const opencodeActivityListRequestSeqRef = useRef(new Map<string, number>())
+  const codexActivityOrderRef = useRef(0)
+  const claudeActivityOrderRef = useRef(0)
+  const amplifierActivityOrderRef = useRef(0)
+  const opencodeActivityOrderRef = useRef(0)
+  const copiedResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // pane.reconcile adoption: capability of the CURRENT connection (re-captured
+  // on every ready) and the reconcile request App itself minted. Fold-ownership
+  // rule: App folds ONLY results whose reconcileId it minted, skipping foreign
+  // ones (TerminalView exhaustion auto-resolve and the warming-banner Retry
+  // mint their own).
+  const paneReconcileActiveRef = useRef(false)
+  const pendingReconcileRef = useRef<PaneReconcileRequest | null>(null)
+  // Wall-clock timer for the bounded boot-reconcile result wait; see
+  // clearReconcileResultWait in the ws effect for the full contract.
+  const reconcileResultTimerRef = useRef<number | null>(null)
+  const fullscreenTouchStartYRef = useRef<number | null>(null)
+  const isLandscapeTerminalView = isMobile && isLandscape && view === 'terminal'
+  const shareAccessUrl = networkStatus?.accessUrl
+    ? ensureShareUrlToken(networkStatus.accessUrl, getAuthToken())
+    : null
+  const authRequiredVisible = connectionLastError?.includes('Authentication failed') ?? false
+  const handleOpenTab = useCallback(() => {
+    setView('terminal')
+  }, [])
+
+  useEffect(() => {
+    if (!perfAuditEnabled || !perfAuditBridgeRef.current) return
+    const bridge = perfAuditBridgeRef.current
+    bridge.mark('app.bootstrap_started')
+    installPerfAuditBridge(bridge)
+    setClientPerfEnabled(true, 'perf-audit')
+    installClientPerfAuditSink((entry) => {
+      bridge.addPerfEvent(entry)
+      if (
+        entry.event === 'perf.terminal_input_to_output_sample'
+        && typeof entry.latencyMs === 'number'
+      ) {
+        bridge.addTerminalLatencySample(entry.latencyMs)
+      }
+    })
+    return () => {
+      installPerfAuditBridge(null)
+      installClientPerfAuditSink(null)
+      setClientPerfEnabled(false, 'perf-audit')
+    }
+  }, [perfAuditEnabled])
+
+  useEffect(() => {
+    if (!perfAuditEnabled || !perfAuditBridgeRef.current || !settingsLoaded) return
+    perfAuditBridgeRef.current.mark('app.settings_loaded')
+  }, [perfAuditEnabled, settingsLoaded])
+
+  useEffect(() => {
+    if (!perfAuditEnabled || !perfAuditBridgeRef.current || !authRequiredVisible) return
+    perfAuditBridgeRef.current.mark('app.auth_required_visible')
+  }, [authRequiredVisible, perfAuditEnabled])
+
+  // Keep this tab's Redux state in sync with persisted writes from other browser tabs.
+  useEffect(() => {
+    return installCrossTabSync(appStore)
+  }, [appStore])
+
+  useEffect(() => {
+    return () => {
+      if (copiedResetTimeoutRef.current !== null) {
+        clearTimeout(copiedResetTimeoutRef.current)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    isMobileRef.current = isMobile
+  }, [isMobile])
+
+  useEffect(() => {
+    const markUserInteracted = () => {
+      setupWizardUserInteractedRef.current = true
+    }
+    window.addEventListener('pointerdown', markUserInteracted, { capture: true })
+    window.addEventListener('keydown', markUserInteracted, { capture: true })
+    return () => {
+      window.removeEventListener('pointerdown', markUserInteracted, { capture: true })
+      window.removeEventListener('keydown', markUserInteracted, { capture: true })
+    }
+  }, [])
+
+  // Sidebar width from settings (or local state during drag)
+  const sidebarWidth = settings.sidebar?.width ?? 288
+  const persistedSidebarCollapsed = settings.sidebar?.collapsed ?? false
+
+  useEffect(() => {
+    if (!isMobile) {
+      userOpenedSidebarOnMobileRef.current = false
+    }
+  }, [isMobile])
+
+  const responsiveSidebarCollapsed = (
+    isLandscapeTerminalView
+    || (isMobile && !persistedSidebarCollapsed && !userOpenedSidebarOnMobileRef.current)
+  )
+  const sidebarCollapsed = persistedSidebarCollapsed || responsiveSidebarCollapsed
+
+  useEffect(() => {
+    if (view !== 'terminal' && isFullscreen) {
+      void exitFullscreen()
+    }
+  }, [exitFullscreen, isFullscreen, view])
+
+  useEffect(() => {
+    if (!isLandscapeTerminalView) {
+      setLandscapeTabBarRevealed(false)
+    }
+  }, [isLandscapeTerminalView])
+
+  const handleSidebarResize = useCallback((delta: number) => {
+    const newWidth = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, sidebarWidth + delta))
+    dispatch(updateSettingsLocal({ sidebar: { width: newWidth } }))
+  }, [sidebarWidth, dispatch])
+
+  const handleSidebarResizeEnd = useCallback(() => {}, [])
+
+  const toggleSidebarCollapse = useCallback(() => {
+    const newCollapsed = !sidebarCollapsed
+    if (isMobile && !newCollapsed) {
+      userOpenedSidebarOnMobileRef.current = true
+      triggerHapticFeedback()
+    } else if (isMobile && newCollapsed) {
+      triggerHapticFeedback()
+    }
+    dispatch(updateSettingsLocal({ sidebar: { collapsed: newCollapsed } }))
+  }, [isMobile, sidebarCollapsed, dispatch])
+
+  // Swipe gesture: right-swipe from left edge opens sidebar, left-swipe closes it
+  const swipeStartXRef = useRef(0)
+
+  const bindSidebarSwipe = useDrag(
+    ({ movement: [mx], velocity: [vx], direction: [dx], first, last, xy: [x] }) => {
+      if (!isMobile || isLandscapeTerminalView) return
+      if (first) {
+        swipeStartXRef.current = x
+        return
+      }
+      if (!last) return
+
+      const startX = swipeStartXRef.current
+      const swipedRight = dx > 0 && (mx > 50 || vx > 0.5)
+      const swipedLeft = dx < 0 && (Math.abs(mx) > 50 || vx > 0.5)
+
+      if (swipedRight && sidebarCollapsed && startX < 30) {
+        toggleSidebarCollapse()
+      } else if (swipedLeft && !sidebarCollapsed) {
+        toggleSidebarCollapse()
+      }
+    },
+    {
+      axis: 'x',
+      filterTaps: true,
+      pointer: { touch: true },
+    }
+  )
+
+  // Swipe gesture: left/right on terminal content area switches tabs
+  const tabSwipeStartXRef = useRef(0)
+  const bindTabSwipe = useDrag(
+    ({ movement: [mx], velocity: [vx], direction: [dx], first, last, xy: [x] }) => {
+      if (!isMobile || view !== 'terminal') return
+      if (first) {
+        tabSwipeStartXRef.current = x
+        return
+      }
+      if (!last) return
+
+      // If swipe started from the left edge, the sidebar swipe handler owns it
+      if (tabSwipeStartXRef.current < 30 && sidebarCollapsed) return
+
+      const swipedLeft = dx < 0 && (Math.abs(mx) > 50 || vx > 0.5)
+      const swipedRight = dx > 0 && (mx > 50 || vx > 0.5)
+
+      if (swipedLeft) {
+        triggerHapticFeedback()
+        dispatch(switchToNextTab())
+      } else if (swipedRight) {
+        triggerHapticFeedback()
+        dispatch(switchToPrevTab())
+      }
+    },
+    {
+      axis: 'x',
+      filterTaps: true,
+      pointer: { touch: true },
+    }
+  )
+
+  const handleShare = () => {
+    const action = getShareAction(networkStatus)
+
+    switch (action.type) {
+      case 'loading':
+        // Network status not loaded yet — retry the fetch so a transient
+        // failure doesn't permanently disable the Share button.
+        dispatch(fetchNetworkStatus())
+        return
+      case 'wizard':
+        setWizardInitialStep(action.initialStep)
+        setShowSetupWizard(true)
+        return
+      case 'panel':
+        setCopied(false)
+        setShowSharePanel(true)
+        return
+    }
+  }
+
+  const handleCopyAccessUrl = async () => {
+    if (!shareAccessUrl) return
+    try {
+      await navigator.clipboard.writeText(shareAccessUrl)
+      setCopied(true)
+      if (copiedResetTimeoutRef.current !== null) {
+        clearTimeout(copiedResetTimeoutRef.current)
+      }
+      copiedResetTimeoutRef.current = setTimeout(() => {
+        copiedResetTimeoutRef.current = null
+        setCopied(false)
+      }, 2000)
+    } catch (err) {
+      log.warn('Clipboard write failed:', err)
+    }
+  }
+
+  const currentVersion = versionInfo?.currentVersion ?? null
+  const updateCheck = versionInfo?.updateCheck ?? null
+  const updateAvailable = !!updateCheck?.updateAvailable
+  const latestVersion = updateCheck?.latestVersion ?? null
+  const releaseUrl = updateCheck?.releaseUrl ?? null
+
+  const handleBrandClick = useCallback(() => {
+    if (updateAvailable) {
+      setShowUpdateInstructions(true)
+    }
+  }, [updateAvailable])
+
+  // Bootstrap: load settings, sessions, and connect websocket.
+  useEffect(() => {
+    let cancelled = false
+    let cleanedUp = false
+    let cleanup: (() => void) | null = null
+    let stopTabRegistrySync: (() => void) | null = null
+    let stopSessionGreyTouch: (() => void) | null = null
+    let stopWsDisconnectSync: (() => void) | null = null
+    let bootstrapDataLoading = false
+    let sidebarWindowLoading = false
+    let versionInfoLoading = false
+    let platformDetailsLoading = false
+    let startupRecoveryInFlight = false
+    let startupRecoveryRerunRequested = false
+    let platformCapabilitiesLoaded = false
+    let lastReadyServerInstanceId: string | undefined
+    let lastSessionsRevision = -1
+    const versionInfoLoadedRef = { current: false }
+
+    // Bounded wait for the current boot's pane.reconcile.result: the result
+    // is unicast to THIS socket, so a result lost with a dying socket would
+    // otherwise wedge panes pending-verdict until the NEXT ready healed them
+    // (the reported gray-and-dead shape). Armed right after the request is
+    // sent; cancelled by the result, a correlated error, disconnect, or
+    // teardown.
+    const clearReconcileResultWait = () => {
+      if (reconcileResultTimerRef.current !== null) {
+        window.clearTimeout(reconcileResultTimerRef.current)
+        reconcileResultTimerRef.current = null
+      }
+    }
+
+    async function bootstrap() {
+      const performAuthFailureTeardown = () => {
+        if (!cancelled) {
+          resetCodexActivityOverlay()
+          resetClaudeActivityOverlay()
+          resetAmplifierActivityOverlay()
+          resetOpencodeActivityOverlay()
+          dispatch(setStatus('disconnected'))
+          dispatch(setError('Authentication failed'))
+        }
+        // Tear down WS subscriptions that were registered before the HTTP
+        // fetches (cleanup + stopTabRegistrySync are already assigned by now).
+        cleanup?.()
+        stopTabRegistrySync?.()
+        stopSessionGreyTouch?.()
+      }
+
+      const handleBootstrapAuthFailure = (err: unknown): boolean => {
+        if (!isApiUnauthorizedError(err)) return false
+        performAuthFailureTeardown()
+        return true
+      }
+
+      const loadBootstrapData = async (): Promise<boolean> => {
+        if (bootstrapDataLoading) return true
+        bootstrapDataLoading = true
+        try {
+          type BootstrapData = {
+            settings?: ServerSettings
+            legacyLocalSettingsSeed?: LocalSettingsPatch
+            platform?: BootstrapPlatformInfo
+            configFallback?: {
+              reason?: unknown
+              backupExists?: unknown
+              backupPath?: unknown
+            }
+            configDir?: string
+          }
+          let bootstrapData: BootstrapData | undefined
+          let lastBootstrapError: unknown
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+              bootstrapData = await api.get<BootstrapData>('/api/bootstrap')
+              break
+            } catch (err) {
+              lastBootstrapError = err
+              const isTransientFailure = isTransientRequestFailure(err)
+              if (attempt === 0 && isTransientFailure && !cancelled) {
+                await new Promise((resolve) => setTimeout(resolve, 150))
+                continue
+              }
+              throw err
+            }
+          }
+          if (!bootstrapData) {
+            throw lastBootstrapError ?? new Error('Bootstrap data unavailable')
+          }
+          if (!cancelled) {
+            if (bootstrapData.legacyLocalSettingsSeed) {
+              const currentPreferences = loadBrowserPreferencesRecord()
+              const currentLocalSettingsPatch = buildLocalSettingsPatch(appStore.getState().settings.localSettings)
+              const currentPreferencesPatch = currentPreferences.settings ?? {}
+              const hasExistingLocalSettings =
+                Object.keys(currentPreferencesPatch).length > 0
+                || Object.keys(currentLocalSettingsPatch).length > 0
+              const shouldPersistCurrentLocalSettings =
+                Object.keys(currentLocalSettingsPatch).length > 0
+                && JSON.stringify(currentPreferencesPatch) !== JSON.stringify(currentLocalSettingsPatch)
+              const nextPreferences = hasExistingLocalSettings
+                ? patchBrowserPreferencesRecord({
+                    ...(shouldPersistCurrentLocalSettings
+                      ? { settings: currentLocalSettingsPatch }
+                      : {}),
+                    legacyLocalSettingsSeedApplied: true,
+                  })
+                : seedBrowserPreferencesSettingsIfEmpty(bootstrapData.legacyLocalSettingsSeed)
+
+              if (JSON.stringify(currentPreferences.settings) !== JSON.stringify(nextPreferences.settings)) {
+                dispatch(setLocalSettings(resolveBrowserPreferenceSettings(nextPreferences)))
+              }
+            }
+            if (bootstrapData.settings) {
+              dispatch(setServerSettings(bootstrapData.settings))
+            }
+            if (bootstrapData.platform) {
+              dispatch(setPlatform(bootstrapData.platform.platform))
+              if (bootstrapData.platform.availableClis) {
+                dispatch(setAvailableClis(bootstrapData.platform.availableClis))
+              }
+              if (bootstrapData.platform.featureFlags) {
+                dispatch(setFeatureFlags(bootstrapData.platform.featureFlags))
+              }
+              if (hasLoadedPlatformCapabilities(bootstrapData.platform)) {
+                platformCapabilitiesLoaded = true
+              }
+              dispatch(setTabRegistryDeviceMeta(resolveAndPersistDeviceMeta({
+                platform: bootstrapData.platform.platform,
+                hostName: bootstrapData.platform.hostName ?? bootstrapData.platform.host,
+              })))
+            }
+            if (bootstrapData.configFallback) {
+              setConfigFallback({
+                reason: parseConfigFallbackReason(bootstrapData.configFallback.reason),
+                backupExists: !!bootstrapData.configFallback.backupExists,
+                backupPath:
+                  typeof bootstrapData.configFallback.backupPath === 'string'
+                    ? bootstrapData.configFallback.backupPath
+                    : undefined,
+              })
+            }
+            if (typeof bootstrapData.configDir === 'string' && bootstrapData.configDir) {
+              dispatch(setServerConfigDir(bootstrapData.configDir))
+            }
+          }
+          return true
+        } catch (err: any) {
+          if (handleBootstrapAuthFailure(err)) return false
+          log.warn('Failed to load bootstrap data', err)
+          return true
+        } finally {
+          bootstrapDataLoading = false
+        }
+      }
+
+      const loadPlatformDetails = async (): Promise<boolean> => {
+        if (platformDetailsLoading) return true
+        platformDetailsLoading = true
+        try {
+          const platformData = await api.get<BootstrapPlatformInfo>('/api/platform')
+          if (!cancelled) {
+            dispatch(setPlatform(platformData.platform))
+            dispatch(setAvailableClis(platformData.availableClis ?? {}))
+            dispatch(setFeatureFlags(platformData.featureFlags ?? {}))
+            platformCapabilitiesLoaded = true
+            dispatch(setTabRegistryDeviceMeta(resolveAndPersistDeviceMeta({
+              platform: platformData.platform,
+              hostName: platformData.hostName ?? platformData.host,
+            })))
+          }
+          return true
+        } catch (err: any) {
+          if (handleBootstrapAuthFailure(err)) return false
+          log.warn('Failed to load platform info', err)
+          return true
+        } finally {
+          platformDetailsLoading = false
+        }
+      }
+
+      const loadVersionInfo = async (): Promise<boolean> => {
+        if (versionInfoLoading || versionInfoLoadedRef.current) return true
+        versionInfoLoading = true
+        try {
+          const nextVersionInfo = await api.get<VersionInfo>('/api/version')
+          if (!cancelled && isVersionInfo(nextVersionInfo)) {
+            versionInfoLoadedRef.current = true
+            setVersionInfo(nextVersionInfo)
+          }
+          return true
+        } catch (err: any) {
+          if (handleBootstrapAuthFailure(err)) return false
+          log.warn('Failed to load version info', err)
+          return true
+        } finally {
+          versionInfoLoading = false
+        }
+      }
+
+      const ensureNetworkStatusLoaded = () => {
+        const networkState = appStore.getState().network
+        if (cancelled || networkState.loading || networkState.status !== null) return
+        dispatch(fetchNetworkStatus())
+      }
+
+      if (!getAuthToken()) {
+        dispatch(setStatus('disconnected'))
+        dispatch(setError('Authentication failed'))
+      }
+
+      // ── WebSocket setup (synchronous) ─────────────────────────────
+      // Register the message handler BEFORE any async work.  App.tsx is the
+      // sole owner of the WebSocket connection. The socket may become ready
+      // while we await HTTP fetches below; registering early avoids losing
+      // early messages.
+      const ws = getWsClient()
+      stopTabRegistrySync = startTabRegistrySync(appStore, ws)
+      // Grey-transition touch: sessions leaving non-grey status (any of the
+      // four tiers) get an activity ratchet, so the default sort floats them
+      // to the top of the grey agents. Store-only; no WS dependency.
+      stopSessionGreyTouch = startSessionGreyTouchWatcher(appStore)
+
+      // Set up hello extension to include session IDs for prioritized repair
+      ws.setHelloExtensionProvider(() => ({
+        sessions: getSessionsForHello(appStore.getState()),
+        sidebarOpenSessions: collectSessionLocatorsFromTabs(
+          appStore.getState().tabs.tabs,
+          appStore.getState().panes,
+        ),
+        client: { mobile: isMobileRef.current },
+        // D8 (restore-open-sessions-only): the connection's provenance identity
+        // — the same deviceId/clientInstanceId `tabs.sync.push` frames carry —
+        // so the server can stamp connection-scoped ledger bind rows. The
+        // provider is re-invoked per (re)connect, so a lease-collision rotation
+        // re-stamps on the next hello.
+        deviceId: appStore.getState().tabRegistry.deviceId,
+        clientInstanceId: getCurrentTabRegistryClientInstanceId(),
+      }))
+
+      const requestCodexActivityList = () => {
+        const requestId = `codex-activity-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        const requestSeq = ++codexActivityOrderRef.current
+        codexActivityListRequestSeqRef.current.set(requestId, requestSeq)
+        ws.send({
+          type: 'codex.activity.list',
+          requestId,
+        })
+      }
+
+      const requestClaudeActivityList = () => {
+        const requestId = `claude-activity-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        const requestSeq = ++claudeActivityOrderRef.current
+        claudeActivityListRequestSeqRef.current.set(requestId, requestSeq)
+        ws.send({
+          type: 'claude.activity.list',
+          requestId,
+        })
+      }
+
+      const requestAmplifierActivityList = () => {
+        const requestId = `amplifier-activity-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        const requestSeq = ++amplifierActivityOrderRef.current
+        amplifierActivityListRequestSeqRef.current.set(requestId, requestSeq)
+        ws.send({
+          type: 'amplifier.activity.list',
+          requestId,
+        })
+      }
+
+      const requestOpencodeActivityList = () => {
+        const requestId = `opencode-activity-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        const requestSeq = ++opencodeActivityOrderRef.current
+        opencodeActivityListRequestSeqRef.current.set(requestId, requestSeq)
+        ws.send({
+          type: 'opencode.activity.list',
+          requestId,
+        })
+      }
+
+      const resetCodexActivityOverlay = () => {
+        codexActivityListRequestSeqRef.current.clear()
+        dispatch(resetCodexActivity())
+      }
+
+      const resetClaudeActivityOverlay = () => {
+        claudeActivityListRequestSeqRef.current.clear()
+        dispatch(resetClaudeActivity())
+      }
+
+      const resetAmplifierActivityOverlay = () => {
+        amplifierActivityListRequestSeqRef.current.clear()
+        dispatch(resetAmplifierActivity())
+      }
+
+      const resetOpencodeActivityOverlay = () => {
+        opencodeActivityListRequestSeqRef.current.clear()
+        dispatch(resetOpencodeActivity())
+      }
+
+      const wsWithOptionalDisconnect = ws as typeof ws & {
+        onDisconnect?: (handler: () => void) => (() => void) | void
+      }
+
+      stopWsDisconnectSync = wsWithOptionalDisconnect.onDisconnect?.(() => {
+        if (cancelled) return
+        // Cancel any armed boot-result wait: never census from stale
+        // inventory while offline — the next ready re-sends the request and
+        // re-arms the wait.
+        clearReconcileResultWait()
+        pendingReconcileRef.current = null
+        resetCodexActivityOverlay()
+        resetClaudeActivityOverlay()
+        resetAmplifierActivityOverlay()
+        resetOpencodeActivityOverlay()
+        // The hoststats subscription died with the socket; keep last-known values.
+        dispatch(hostStatsReset())
+        dispatch(setStatus('disconnected'))
+      }) ?? null
+
+      const promoteRecentHttpSessionsBaseline = () => {
+        const lastLoadedAt = appStore.getState().sessions.lastLoadedAt
+        if (typeof lastLoadedAt !== 'number') return false
+        if (Date.now() - lastLoadedAt > RECENT_HTTP_SESSIONS_BASELINE_MS) return false
+        dispatch(markWsSnapshotReceived())
+        return true
+      }
+
+      const ensureSidebarSessionsWindow = async (): Promise<boolean> => {
+        if (sidebarWindowLoading) return true
+        const sidebarWindow = appStore.getState().sessions.windows?.sidebar
+        if (typeof sidebarWindow?.lastLoadedAt === 'number') {
+          return true
+        }
+
+        sidebarWindowLoading = true
+        try {
+          const activeSurface = appStore.getState().sessions.activeSurface
+          const result = (activeSurface && activeSurface !== 'sidebar'
+            ? await dispatch(fetchSessionWindow({
+                surface: 'sidebar',
+                priority: 'visible',
+              }) as any)
+            : await dispatch(loadInitialSessionsWindow() as any)) as FetchSessionWindowResult | undefined
+          if (result?.unauthorized) {
+            performAuthFailureTeardown()
+            return false
+          }
+          if (!result?.ok) {
+            log.warn('Failed to load initial sidebar session window')
+          }
+          return true
+        } finally {
+          sidebarWindowLoading = false
+        }
+      }
+
+      const recoverMissingStartupState = async () => {
+        if (cancelled) return
+        if (startupRecoveryInFlight) {
+          startupRecoveryRerunRequested = true
+          return
+        }
+        startupRecoveryInFlight = true
+        try {
+          const state = appStore.getState()
+          if (!state.settings.loaded || state.connection.platform === null) {
+            if (!(await loadBootstrapData())) return
+          }
+          if (!platformCapabilitiesLoaded) {
+            if (!(await loadPlatformDetails())) return
+          }
+          if (!(await ensureSidebarSessionsWindow())) return
+          if (!(await loadVersionInfo())) return
+          ensureNetworkStatusLoaded()
+        } finally {
+          startupRecoveryInFlight = false
+          if (startupRecoveryRerunRequested && !cancelled) {
+            startupRecoveryRerunRequested = false
+            void recoverMissingStartupState()
+          }
+        }
+      }
+
+      const findPaneById = (layout: any, paneId: string): any | undefined => {
+        if (!layout) return undefined
+        if (layout.type === 'leaf') return layout.id === paneId ? layout : undefined
+        if (layout.type === 'split' && Array.isArray(layout.children)) {
+          for (const child of layout.children) {
+            const found = findPaneById(child, paneId)
+            if (found) return found
+          }
+        }
+        return undefined
+      }
+
+      const registerPendingTerminalRecoveriesForTargets = (targets: Array<{ tabId: string; paneId: string }>) => {
+        const state = appStore.getState()
+        const fallbackAttempts = state.panes.restoreFallbackAttemptsByPane || {}
+        for (const target of targets) {
+          const pane = findPaneById(state.panes.layouts[target.tabId], target.paneId)
+          const content = pane?.content
+          if (content?.kind !== 'terminal' || content.status !== 'creating' || !content.createRequestId) continue
+          const fallbackAttempt = fallbackAttempts[target.tabId]?.[target.paneId]
+          if (
+            fallbackAttempt?.requestId === content.createRequestId &&
+            !content.sessionRef
+          ) {
+            addTerminalFreshRecoveryRequestId(
+              content.createRequestId,
+              'fresh_after_restore_unavailable',
+            )
+          } else if (content.sessionRef) {
+            addTerminalRestoreRequestId(content.createRequestId)
+          }
+        }
+      }
+
+      // The destructive half of the legacy inventory census: wipe pane handles
+      // whose terminals are not in liveIds, then re-arm the explicit recovery
+      // latches for the regenerated createRequestIds. Shared by the
+      // capability-absent inventory path and the reconcile fallback path.
+      const runDestructiveTerminalCensus = (liveIds: string[]) => {
+        dispatch(clearDeadTerminals({ liveTerminalIds: liveIds }))
+        // Register regenerated createRequestIds with the correct explicit
+        // recovery path after stale terminal handles are cleared.
+        const layouts = appStore.getState().panes.layouts
+        const fallbackAttempts = appStore.getState().panes.restoreFallbackAttemptsByPane || {}
+        for (const [tabId, layout] of Object.entries(layouts)) {
+          ;(function walk(node: any) {
+            if (!node) return
+            if (node.type === 'leaf') {
+              if (node.content?.kind === 'terminal' && node.content.status === 'creating' && node.content.createRequestId) {
+                const fallbackAttempt = fallbackAttempts[tabId]?.[node.id]
+                if (
+                  fallbackAttempt?.requestId === node.content.createRequestId
+                  && !node.content.sessionRef
+                ) {
+                  addTerminalFreshRecoveryRequestId(
+                    node.content.createRequestId,
+                    'fresh_after_restore_unavailable',
+                  )
+                } else if (node.content.sessionRef) {
+                  addTerminalRestoreRequestId(node.content.createRequestId)
+                }
+              }
+              return
+            }
+            if (node.type === 'split' && Array.isArray(node.children)) {
+              for (const child of node.children) walk(child)
+            }
+          })(layout)
+        }
+      }
+
+      // Terminal failure of a reconcile App minted (cardinality violation, a
+      // correlated server error frame like RECONCILE_TOO_LARGE /
+      // RECONCILE_UNAVAILABLE / RECONCILE_NOT_NEGOTIATED, or expiry of the
+      // bounded boot-result wait): deactivate reconcile for THIS inventory
+      // cycle (re-set true on the next ready) and run the legacy census once
+      // from the CACHED liveTerminalIds — on the real wire
+      // terminal.inventory ALWAYS precedes any reconcile result, so the
+      // cache is populated. The pending reconcile carries a bounded
+      // wall-clock wait (RECONCILE_RESULT_WAIT_MS, well past the server's
+      // single 2s warming deferral) that routes here on expiry — the earlier
+      // deliberate no-timeout decision wedged panes pending-verdict forever
+      // when the result died with its socket (the reported gray-and-dead
+      // shape).
+      const fallBackToLegacyCensus = () => {
+        pendingReconcileRef.current = null
+        paneReconcileActiveRef.current = false
+        setPaneReconcileActive(false)
+        const cachedLiveIds = appStore.getState().connection.liveTerminalIds
+        if (cachedLiveIds) {
+          runDestructiveTerminalCensus(cachedLiveIds)
+        }
+      }
+
+      const terminalInvalidationHandler = createTerminalInvalidationHandler({
+        dispatch: (action) => appStore.dispatch(action as any),
+        upsertTerminalMeta,
+        removeTerminalMeta,
+        patchSessionRunningStateFromTerminalMeta,
+        queueActiveSessionWindowRefresh: () => queueActiveSessionWindowRefresh() as any,
+        fetchTerminalDirectoryWindow: (payload) => fetchTerminalDirectoryWindow(payload) as any,
+        handleRecoverableTerminalIds: (terminalIds) => {
+          const targets = collectTerminalPaneTargets(appStore.getState().panes.layouts, terminalIds)
+          if (targets.length === 0) return
+          const removedSet = new Set(terminalIds)
+          const currentLiveIds = appStore.getState().connection.liveTerminalIds
+          if (currentLiveIds) {
+            dispatch(setLiveTerminalIds(currentLiveIds.filter((terminalId) => !removedSet.has(terminalId))))
+          }
+          dispatch(clearTerminalLiveHandles({ terminalIds }))
+          for (const terminalId of terminalIds) {
+            dispatch(removeTerminalMeta(terminalId))
+          }
+          registerPendingTerminalRecoveriesForTargets(targets)
+        },
+        onRefreshError: (error, source) => log.debug(
+          source === 'session-window'
+            ? 'active session window background refresh failed'
+            : 'terminal directory background refresh failed',
+          error,
+        ),
+      })
+
+      const unsubscribe = ws.onMessage((msg) => {
+        if (!msg?.type) return
+        if (msg.type === 'ready') {
+          const ready = ReadyMessageSchema.safeParse(msg)
+          const nextServerInstanceId = ready.success ? ready.data.serverInstanceId : undefined
+          if (
+            ready.success &&
+            lastReadyServerInstanceId &&
+            lastReadyServerInstanceId !== nextServerInstanceId
+          ) {
+            platformCapabilitiesLoaded = false
+          }
+          if (ready.success) {
+            lastReadyServerInstanceId = nextServerInstanceId
+          }
+          // If the initial connect attempt failed before ready, WsClient may still auto-reconnect.
+          // Treat 'ready' as the source of truth for connection status.
+          resetCodexActivityOverlay()
+          resetClaudeActivityOverlay()
+          resetAmplifierActivityOverlay()
+          resetOpencodeActivityOverlay()
+          dispatch(setError(undefined))
+          dispatch(setStatus('ready'))
+          // Restart detection (gaps F2/G10 + F10/G11). `bootId` stays OPTIONAL
+          // in ReadyMessageSchema on purpose: both live servers always emit it
+          // (legacy server/ws-handler.ts:1910-1915, rust freshell-ws/lib.rs:356),
+          // but the shared wire type and the frozen port-oracle contract mark
+          // it optional — hard-requiring it would fail the WHOLE ready frame
+          // against an older server and silently disable all ready handling.
+          // Instead: log loudly when absent and fall back to a
+          // serverInstanceId change as the restart signal. The fallback is
+          // DEFENSE-IN-DEPTH for unknown servers/forks: git archaeology shows
+          // no shipped server ever both omitted bootId and rotated
+          // serverInstanceId on restart (legacy's bootId-less window had a
+          // persistent instanceId; rust emits bootId unconditionally, even
+          // when its instanceId is ephemeral in no-home mode).
+          const previousBootId = appStore.getState().connection.bootId
+          const previousServerInstanceId = appStore.getState().connection.serverInstanceId
+          if (!ready.success) {
+            // A malformed ready frame must not wipe identity or fake a
+            // restart: keep the stored bootId/serverInstanceId and skip
+            // restart detection for this frame.
+            log.error('ready frame failed schema validation; skipping restart detection', ready.error.issues)
+          } else {
+            dispatch(setServerInstanceId(nextServerInstanceId))
+            const newBootId = ready.data.bootId
+            if (!newBootId) {
+              log.warn('ready frame carried no bootId; falling back to serverInstanceId for restart detection')
+            }
+            // Server-build mismatch detection: the server stamps the git
+            // commit it was built from (ready.buildId, additive/optional);
+            // we compare it against our own Vite-baked
+            // __FRESHELL_BUILD_ID__ and reload ONCE on a mismatch (sentinel
+            // loop-guard lives in src/lib/server-build-check.ts).
+            checkServerBuildId({ serverBuildId: ready.data.buildId })
+            const bootIdRestart = !!previousBootId && previousBootId !== newBootId
+            const instanceChanged = !!previousServerInstanceId
+              && !!nextServerInstanceId
+              && previousServerInstanceId !== nextServerInstanceId
+            const serverRestarted = bootIdRestart || (!newBootId && instanceChanged)
+            dispatch(setBootId(newBootId))
+            dispatch(setServerRestarted(serverRestarted))
+            if (serverRestarted) {
+              dispatch(setLiveTerminalIds([]))
+            }
+            // The fresh process replays nothing and may stamp a lower
+            // wall-clock `at` than a clamp-inflated pre-restart value; drop
+            // the per-terminal `at` baselines so a resumed durable session's
+            // next real completion is not swallowed. Fires on EITHER restart
+            // signal, and idempotently on the first parsed ready of the page
+            // lifetime (no-op while baselines are unpersisted; future-proofs
+            // against rehydrated baselines). Never on a plain reconnect with
+            // unchanged identity.
+            const firstReadyBaseline = !previousBootId && !previousServerInstanceId
+            if (serverRestarted || instanceChanged || firstReadyBaseline) {
+              dispatch(resetCompletionDedupeBaselines())
+            }
+            // pane.reconcile adoption: capability re-captured per connection,
+            // and the request re-sent on EVERY ready — a result is not
+            // guaranteed (deferral, drop, error frame), so reconnect covers
+            // loss windows. While active, the destructive inventory census is
+            // gated off and the terminal-restore latches report not-armed.
+            const paneReconcile = ready.data.capabilities?.paneReconcileV1 === true
+            const freshAgentReconcile = ready.data.capabilities?.paneReconcileFreshAgentV1 === true
+            paneReconcileActiveRef.current = paneReconcile
+            setPaneReconcileActive(paneReconcile)
+            setFreshAgentReconcileActive(freshAgentReconcile)
+            pendingReconcileRef.current = null
+            dispatch(clearAllReconcilePendingPanes())
+            if (paneReconcile) {
+              // ONE request covering terminal panes plus (iff the server
+              // advertised paneReconcileFreshAgentV1) fresh-agent panes.
+              // Frozen-client invariant: without the capability, fresh-agent
+              // panes stay on the legacy recovery path.
+              const req = buildReconcileRequest(appStore.getState(), { includeFreshAgent: freshAgentReconcile })
+              if (req) {
+                pendingReconcileRef.current = req
+                // Exactly the requested paneKeys wait for verdicts (Redux),
+                // and the sender hold narrows to exactly their creates.
+                dispatch(setReconcilePendingPanes({ paneKeys: req.panes.map((p) => p.paneKey), startedAt: Date.now() }))
+                ws.setReconcilePendingCreates(req.panes.map((p) => p.createRequestId))
+                ws.send(req)
+                clearReconcileResultWait()
+                reconcileResultTimerRef.current = window.setTimeout(() => {
+                  reconcileResultTimerRef.current = null
+                  if (!pendingReconcileRef.current) return
+                  // The result is unicast to THIS socket; if it was lost with
+                  // a dying socket, only ANOTHER ready would heal the wedge
+                  // (gray panes, zero chrome). Bound the wait and degrade to
+                  // the legacy census instead. This supersedes the earlier
+                  // deliberate no-timeout decision: the wedge it permits is
+                  // the reported gray-and-dead shape.
+                  log.warn('[reconcile] result wait expired — falling back to legacy census')
+                  pendingReconcileRef.current = null
+                  dispatch(clearAllReconcilePendingPanes())
+                  ws.clearReconcileCreateHold()
+                  fallBackToLegacyCensus()
+                }, RECONCILE_RESULT_WAIT_MS)
+              } else {
+                ws.clearReconcileCreateHold() // nothing to reconcile — release any held creates immediately
+              }
+            } else {
+              ws.clearReconcileCreateHold()
+            }
+            // Focused-episode-7 round 3 (Finding F2; round-4 widened to
+            // fresh-agent panes) — the per-ready open re-assertion sweep:
+            // assert every session pane the client is DISPLAYING, so the
+            // server consumes any standing close record that contradicts the
+            // displayed layout (the healed shape is a committed close whose
+            // ack was lost mid-socket-death — incl. across a page reload,
+            // which drops the send queue). One idempotent message per
+            // displayed pane EXCEPT a pane whose close acknowledgement is
+            // outstanding (round-5 F1: the queued close flushed immediately
+            // above, inside the ws-client's ready handling, and an
+            // open-assert behind it would consume the just-committed close
+            // evidence before its ack arrives). Each send listens for its
+            // bounded correlated `pane.opened.result` (round-5 F3): a failed
+            // consume is marked, logged, and retried by the next sweep.
+            reassertAllOpenPanes(appStore.getState().panes.layouts)
+          }
+          dispatch(resetWsSnapshotReceived())
+          // If App registered late and missed a prior invalidation, a fresh HTTP baseline
+          // from this bootstrap cycle is still safe for enabling follow-up refreshes.
+          promoteRecentHttpSessionsBaseline()
+          requestCodexActivityList()
+          requestClaudeActivityList()
+          requestAmplifierActivityList()
+          requestOpencodeActivityList()
+          // hoststats: the old socket's subscription died; keep last live/manual
+          // values and resubscribe iff any Host Stats panes are mounted.
+          dispatch(hostStatsReset())
+          // `?.` mirrors the state.freshAgent?.sessions precedent: App-level
+          // folds run against deliberately partial stores in App unit tests.
+          if ((appStore.getState().hostStats?.mountedPanes ?? 0) > 0) {
+            subscribeHostStats()
+            dispatch(hostStatsSubscribedSet(true))
+          }
+          lastSessionsRevision = -1
+          void recoverMissingStartupState()
+        }
+        if (msg.type === 'pane.reconcile.result') {
+          const pending = pendingReconcileRef.current
+          // Fold-ownership rule: App folds ONLY results whose reconcileId it
+          // minted; foreign ones belong to another requester (TerminalView
+          // exhaustion auto-resolve, warming-banner Retry) — skip silently.
+          if (!pending || (msg as { reconcileId?: unknown }).reconcileId !== pending.reconcileId) {
+            return
+          }
+          pendingReconcileRef.current = null
+          clearReconcileResultWait()
+          const parsed = PaneReconcileResultSchema.safeParse(msg)
+          if (!parsed.success) {
+            console.error('[reconcile] malformed result — falling back to legacy census', parsed.error.issues)
+            // A malformed result is terminal for this reconcile: no verdicts
+            // will fold, so release the pending panes and the sender hold
+            // (never a silent wedge).
+            dispatch(clearAllReconcilePendingPanes())
+            ws.clearReconcileCreateHold()
+            fallBackToLegacyCensus()
+            return
+          }
+          // Every folded pane's stale held create is retracted at the sender
+          // BEFORE the hold clears below (the fold-corrected create is re-sent
+          // by the view with the same requestId).
+          const outcome = foldVerdicts(dispatch, pending, parsed.data, {
+            onVerdictFolded: (createRequestId) => ws.cancelCreate(createRequestId),
+          })
+          // Fold reducers self-clear per-pane pending flags; these two catch
+          // what they can't — skipped verdicts and cardinality-violation
+          // outcomes where nothing folded.
+          dispatch(clearAllReconcilePendingPanes())
+          ws.clearReconcileCreateHold()
+          if (outcome.cardinalityViolation) {
+            console.error('[reconcile] cardinality violation — falling back to legacy census')
+            fallBackToLegacyCensus()
+            return
+          }
+          // Final-review finding 2: foldVerdicts only SETS the batched
+          // warming/dead-adjudication state (counts > 0) — it never clears
+          // it, so a later clean round (e.g. after a WS reconnect) would
+          // leave the warming banner or dead-sessions dialog up forever.
+          // App's request covers EVERY terminal pane, so its outcome is
+          // authoritative — clear whichever batched state this round
+          // reported none of. Deliberately NOT inside foldVerdicts:
+          // single-pane requesters (TerminalView exhaustion auto-resolve,
+          // warming-banner Retry) must not clear state about other panes.
+          if (outcome.warming === 0) {
+            dispatch(clearReconcileWarming())
+          }
+          if (outcome.dead === 0) {
+            dispatch(clearDeadSessionAdjudication())
+          }
+          return
+        }
+        if (msg.type === 'error') {
+          const pending = pendingReconcileRef.current
+          if (pending && (msg as { requestId?: unknown }).requestId === pending.reconcileId) {
+            // A RESULT IS NOT GUARANTEED: the server has live-socket
+            // error-instead-of-result paths (RECONCILE_TOO_LARGE,
+            // RECONCILE_UNAVAILABLE) carrying requestId = reconcileId. Such an
+            // error is TERMINAL for this reconcile — fall back to the legacy
+            // census from the cached inventory (which always precedes the
+            // result on the real wire).
+            console.error('[reconcile] server error — falling back to legacy census', (msg as { code?: unknown }).code)
+            // Terminal for this reconcile: no verdicts are coming — release
+            // the pending panes and the sender hold before the census.
+            clearReconcileResultWait()
+            dispatch(clearAllReconcilePendingPanes())
+            ws.clearReconcileCreateHold()
+            fallBackToLegacyCensus()
+          }
+        }
+        if (msg.type === 'sessions.changed') {
+          const rev = typeof msg.revision === 'number' ? msg.revision : -1
+          if (rev > lastSessionsRevision) {
+            lastSessionsRevision = rev
+            // Fire-and-forget refresh. queueActiveSessionWindowRefresh resolves even on
+            // failure (fetchSessionWindow records the error in Redux), so it cannot leak.
+            void appStore.dispatch(queueActiveSessionWindowRefresh() as any)
+          }
+        }
+        if (msg.type === 'settings.updated') {
+          dispatch(setServerSettings(msg.settings as ServerSettings))
+        }
+        if (msg.type === 'ui.command') {
+          handleUiCommand(msg as Record<string, unknown>, {
+            dispatch,
+            getState: appStore.getState,
+            send: (payload) => ws.send(payload),
+          })
+        }
+        if (terminalInvalidationHandler.handle(msg as any)) {
+          return
+        }
+        if (
+          (msg.type === 'terminal.session.associated'
+            || msg.type === 'terminal.created'
+            || msg.type === 'terminal.attach.ready')
+          && typeof (msg as any).terminalId === 'string'
+          && (msg as any).sessionRef
+        ) {
+          reconcileTerminalSessionAssociation({
+            dispatch,
+            getState: appStore.getState,
+            terminalId: (msg as any).terminalId,
+            sessionRef: (msg as any).sessionRef,
+            // Only terminal.session.associated frames carry the
+            // server-authoritative rebind token; other frames never rebind.
+            previousSessionId: msg.type === 'terminal.session.associated'
+              ? (msg as any).previousSessionId
+              : undefined,
+          })
+        }
+        if (msg.type === 'terminal.inventory') {
+          const terminals = Array.isArray(msg.terminals) ? msg.terminals : []
+          const terminalMeta = Array.isArray(msg.terminalMeta) ? msg.terminalMeta : []
+          const terminalMetaRequestedAt = Date.now()
+          const previousTerminalMeta = appStore.getState().terminalMeta?.byTerminalId ?? {}
+          const incomingTerminalMetaIds = new Set(
+            terminalMeta
+              .map((record: any) => record?.terminalId)
+              .filter((terminalId: unknown): terminalId is string => typeof terminalId === 'string'),
+          )
+          const removedTerminalMetaIds = Object.entries(previousTerminalMeta)
+            .filter(([terminalId, record]) => (
+              !incomingTerminalMetaIds.has(terminalId)
+              && !(typeof record?.updatedAt === 'number' && record.updatedAt > terminalMetaRequestedAt)
+            ))
+            .map(([terminalId]) => terminalId)
+          for (const terminal of terminals) {
+            if (terminal?.terminalId && terminal?.sessionRef) {
+              reconcileTerminalSessionAssociation({
+                dispatch,
+                getState: appStore.getState,
+                terminalId: terminal.terminalId,
+                sessionRef: terminal.sessionRef,
+              })
+            }
+          }
+          const liveIds = terminals
+            .filter((t: any) => t.status === 'running')
+            .map((t: any) => t.terminalId as string)
+          dispatch(setLiveTerminalIds(liveIds))
+          dispatch(setServerRestarted(false))
+          // Capability-gated census (council rule 11): while pane.reconcile is
+          // active on this connection the reconcile verdicts own pane adoption,
+          // so ONLY the destructive part is skipped — the cached liveTerminalIds
+          // and restart-flag reset above stay unconditional (and feed the
+          // fallback census if the reconcile later fails).
+          if (!paneReconcileActiveRef.current) {
+            runDestructiveTerminalCensus(liveIds)
+          }
+          dispatch(setTerminalMetaSnapshot({ terminals: terminalMeta, requestedAt: terminalMetaRequestedAt }))
+          dispatch(patchSessionRunningStateFromTerminalMeta({
+            upsert: terminalMeta,
+            remove: removedTerminalMetaIds,
+          }))
+          // fetchTerminalDirectoryWindow still re-throws on failure, so contain its
+          // rejection. queueActiveSessionWindowRefresh resolves even on failure.
+          void appStore.dispatch(fetchTerminalDirectoryWindow({
+            surface: 'sidebar',
+            priority: 'visible',
+          }) as any).catch((error: unknown) => log.debug('terminal directory background refresh failed', error))
+          void appStore.dispatch(queueActiveSessionWindowRefresh() as any)
+        }
+        if (msg.type === 'codex.activity.list.response') {
+          const requestId = typeof msg.requestId === 'string' ? msg.requestId : ''
+          if (!requestId) return
+          const requestSeq = codexActivityListRequestSeqRef.current.get(requestId)
+          codexActivityListRequestSeqRef.current.delete(requestId)
+          if (requestSeq === undefined) return
+          dispatch(setCodexActivitySnapshot({
+            terminals: msg.terminals || [],
+            requestSeq,
+          }))
+        }
+        if (msg.type === 'codex.activity.updated') {
+          const mutationSeq = ++codexActivityOrderRef.current
+          const upsert = Array.isArray(msg.upsert) ? msg.upsert : []
+          if (upsert.length > 0) {
+            dispatch(upsertCodexActivity({
+              terminals: upsert,
+              mutationSeq,
+            }))
+          }
+
+          const remove = Array.isArray(msg.remove) ? msg.remove : []
+          if (remove.length > 0) {
+            dispatch(removeCodexActivity({
+              terminalIds: remove,
+              mutationSeq,
+            }))
+          }
+        }
+        if (msg.type === 'claude.activity.list.response') {
+          const requestId = typeof msg.requestId === 'string' ? msg.requestId : ''
+          if (!requestId) return
+          const requestSeq = claudeActivityListRequestSeqRef.current.get(requestId)
+          claudeActivityListRequestSeqRef.current.delete(requestId)
+          if (requestSeq === undefined) return
+          dispatch(setClaudeActivitySnapshot({
+            terminals: msg.terminals || [],
+            requestSeq,
+          }))
+        }
+        if (msg.type === 'claude.activity.updated') {
+          const mutationSeq = ++claudeActivityOrderRef.current
+          const upsert = Array.isArray(msg.upsert) ? msg.upsert : []
+          if (upsert.length > 0) {
+            dispatch(upsertClaudeActivity({
+              terminals: upsert,
+              mutationSeq,
+            }))
+          }
+
+          const remove = Array.isArray(msg.remove) ? msg.remove : []
+          if (remove.length > 0) {
+            dispatch(removeClaudeActivity({
+              terminalIds: remove,
+              mutationSeq,
+            }))
+          }
+        }
+        if (msg.type === 'amplifier.activity.list.response') {
+          const requestId = typeof msg.requestId === 'string' ? msg.requestId : ''
+          if (!requestId) return
+          const requestSeq = amplifierActivityListRequestSeqRef.current.get(requestId)
+          amplifierActivityListRequestSeqRef.current.delete(requestId)
+          if (requestSeq === undefined) return
+          dispatch(setAmplifierActivitySnapshot({
+            terminals: msg.terminals || [],
+            requestSeq,
+          }))
+        }
+        if (msg.type === 'amplifier.activity.updated') {
+          const mutationSeq = ++amplifierActivityOrderRef.current
+          const upsert = Array.isArray(msg.upsert) ? msg.upsert : []
+          if (upsert.length > 0) {
+            dispatch(upsertAmplifierActivity({
+              terminals: upsert,
+              mutationSeq,
+            }))
+          }
+
+          const remove = Array.isArray(msg.remove) ? msg.remove : []
+          if (remove.length > 0) {
+            dispatch(removeAmplifierActivity({
+              terminalIds: remove,
+              mutationSeq,
+            }))
+          }
+        }
+        if (msg.type === 'opencode.activity.list.response') {
+          const requestId = typeof msg.requestId === 'string' ? msg.requestId : ''
+          if (!requestId) return
+          const requestSeq = opencodeActivityListRequestSeqRef.current.get(requestId)
+          opencodeActivityListRequestSeqRef.current.delete(requestId)
+          if (requestSeq === undefined) return
+          dispatch(setOpencodeActivitySnapshot({
+            terminals: msg.terminals || [],
+            requestSeq,
+          }))
+        }
+        if (msg.type === 'opencode.activity.updated') {
+          const mutationSeq = ++opencodeActivityOrderRef.current
+          const upsert = Array.isArray(msg.upsert) ? msg.upsert : []
+          if (upsert.length > 0) {
+            dispatch(upsertOpencodeActivity({
+              terminals: upsert,
+              mutationSeq,
+            }))
+          }
+
+          const remove = Array.isArray(msg.remove) ? msg.remove : []
+          if (remove.length > 0) {
+            dispatch(removeOpencodeActivity({
+              terminalIds: remove,
+              mutationSeq,
+            }))
+          }
+        }
+        // 'terminal.turn.complete' stays informational for terminal CLI panes:
+        // the client no longer rings/shades on it. The truly-idle edge below is
+        // the ONLY bell/shade trigger for claude/codex/opencode/amplifier panes.
+        if (msg.type === 'terminal.idle') {
+          const terminalId = typeof msg.terminalId === 'string' ? msg.terminalId : ''
+          const at = typeof msg.at === 'number' ? msg.at : Date.now()
+          const reason = msg.reason === 'queue-empty' ? 'queue-empty' : 'grace'
+          if (terminalId) {
+            dispatch(applyServerIdle({ terminalId, at, reason }) as any)
+          }
+        }
+        if (msg.type === 'terminal.exit') {
+          const terminalId = msg.terminalId
+          const code = msg.exitCode
+          log.debug('terminal exit', terminalId, code)
+          if (terminalId) {
+            dispatch(removeTerminalMeta(terminalId))
+          }
+        }
+        if (msg.type === 'session.status') {
+          // Log session repair status (silent for healthy/repaired, visible for problems)
+          const { sessionId, status, orphansFixed } = msg
+          if (status === 'missing') {
+            log.warn(`Session ${sessionId.slice(0, 8)}... file is missing`)
+          } else if (status === 'repaired') {
+            log.debug(`Session ${sessionId.slice(0, 8)}... repaired (${orphansFixed} orphans fixed)`)
+          }
+          // For 'healthy' status, no logging needed
+        }
+        if (msg.type === 'perf.logging') {
+          setClientPerfEnabled(!!msg.enabled, 'server')
+        }
+        if (msg.type === 'config.fallback') {
+          setConfigFallback({
+            reason: parseConfigFallbackReason(msg.reason),
+            backupExists: !!msg.backupExists,
+            backupPath: typeof msg.backupPath === 'string' ? msg.backupPath : undefined,
+          })
+        }
+
+        // Extension registry & lifecycle messages
+        if (msg.type === 'extensions.registry') {
+          dispatch(setRegistry(msg.extensions))
+        }
+        if (msg.type === 'extension.server.ready') {
+          dispatch(updateServerStatus({ name: msg.name, serverRunning: true, serverPort: msg.port }))
+        }
+        if (msg.type === 'extension.server.stopped') {
+          dispatch(updateServerStatus({ name: msg.name, serverRunning: false, serverPort: undefined }))
+        }
+
+        // hoststats.* frames are server-validated; the client trusts them and
+        // folds without runtime revalidation (shared/ws-protocol.ts header).
+        if (msg.type === 'hoststats.snapshot') {
+          const snapshot = msg as HostStatsSnapshotMessage
+          dispatch(hostStatsSnapshotReceived({
+            at: snapshot.at,
+            live: snapshot.live,
+            manualAt: snapshot.manualAt ?? null,
+            manual: snapshot.manual ?? null,
+          }))
+        }
+        if (msg.type === 'hoststats.refresh.response') {
+          const resp = msg as HostStatsRefreshResponseMessage
+          // Ref-map semantics keyed by requestId; unknown ids are ignored by
+          // the resolve/fail thunks without throwing.
+          const requestId = typeof resp.requestId === 'string' ? resp.requestId : ''
+          if (requestId) {
+            if (resp.ok === true && typeof resp.at === 'number' && resp.manual) {
+              dispatch(resolveHostStatsRefresh({ requestId, at: resp.at, manual: resp.manual }))
+            } else if (resp.ok === false) {
+              dispatch(failHostStatsRefresh({ requestId, error: typeof resp.error === 'string' ? resp.error : 'refresh failed' }))
+            }
+          }
+        }
+
+        handleFreshAgentMessage(dispatch, msg as Record<string, unknown>, ws)
+      })
+
+      cleanup = () => {
+        terminalInvalidationHandler.dispose()
+        stopWsDisconnectSync?.()
+        unsubscribe()
+      }
+      if (cleanedUp) cleanup()
+
+      // ── HTTP bootstrap (async) ────────────────────────────────────
+      if (!(await loadBootstrapData())) return
+
+      if (!(await ensureSidebarSessionsWindow())) return
+
+      if (!(await loadVersionInfo())) return
+
+      // Load network status for remote access wizard/settings
+      ensureNetworkStatusLoaded()
+
+      // ── WebSocket connection / reconciliation ─────────────────────
+      // Another component may have connected before App finished bootstrap.
+      // Reconcile state for the already-ready socket without waiting for a websocket-owned
+      // sidebar snapshot. The HTTP bootstrap window remains the source of truth.
+      if (ws.isReady) {
+        if (cancelled) return
+        const previousServerInstanceId = appStore.getState().connection.serverInstanceId
+        if (
+          previousServerInstanceId &&
+          ws.serverInstanceId &&
+          previousServerInstanceId !== ws.serverInstanceId
+        ) {
+          platformCapabilitiesLoaded = false
+        }
+        lastReadyServerInstanceId = ws.serverInstanceId
+        resetCodexActivityOverlay()
+        resetClaudeActivityOverlay()
+        resetAmplifierActivityOverlay()
+        resetOpencodeActivityOverlay()
+        dispatch(setError(undefined))
+        dispatch(setStatus('ready'))
+        dispatch(setServerInstanceId(ws.serverInstanceId))
+        dispatch(resetWsSnapshotReceived())
+
+        promoteRecentHttpSessionsBaseline()
+
+        if (!cancelled) {
+          requestCodexActivityList()
+          requestClaudeActivityList()
+          requestAmplifierActivityList()
+          requestOpencodeActivityList()
+        }
+        void recoverMissingStartupState()
+        return
+      }
+      dispatch(setError(undefined))
+      dispatch(setErrorCode(undefined))
+      dispatch(setStatus('connecting'))
+      try {
+        await ws.connect()
+        if (!cancelled) dispatch(setStatus('ready'))
+      } catch (err: any) {
+        if (!cancelled) {
+          resetCodexActivityOverlay()
+          resetClaudeActivityOverlay()
+          resetAmplifierActivityOverlay()
+          resetOpencodeActivityOverlay()
+          dispatch(setStatus('disconnected'))
+          dispatch(setError(err?.message || 'WebSocket connection failed'))
+          if (typeof err?.wsCloseCode === 'number') {
+            dispatch(setErrorCode(err.wsCloseCode))
+          }
+        }
+      }
+    }
+
+    const cleanupPromise = bootstrap()
+
+    // Foreground reconnect poke: mobile browsers freeze or silently kill the
+    // socket while backgrounded, so re-assert transport liveness whenever the
+    // page comes back to the front (visibilitychange/online/pageshow — the
+    // iOS bfcache restore only fires pageshow).
+    const ws = getWsClient()
+    const pokeWs = () => ws.poke()
+    const pokeWsWhenVisible = () => { if (document.visibilityState === 'visible') ws.poke() }
+    window.addEventListener('online', pokeWs)
+    window.addEventListener('pageshow', pokeWs)
+    document.addEventListener('visibilitychange', pokeWsWhenVisible)
+
+    return () => {
+      window.removeEventListener('online', pokeWs)
+      window.removeEventListener('pageshow', pokeWs)
+      document.removeEventListener('visibilitychange', pokeWsWhenVisible)
+      cancelled = true
+      cleanedUp = true
+      clearReconcileResultWait()
+      cleanup?.()
+      stopTabRegistrySync?.()
+      stopSessionGreyTouch?.()
+      stopWsDisconnectSync?.()
+      void cleanupPromise
+    }
+  }, [appStore, dispatch])
+
+  // Auto-show setup wizard on first run (unconfigured + localhost)
+  useEffect(() => {
+    if (
+      networkStatus
+      && !setupWizardAutoShownRef.current
+      && !setupWizardUserInteractedRef.current
+      && !hasDismissedAutoSetupWizard()
+      && !networkStatus.configured
+      && !isRemoteAccessEnabledStatus(networkStatus)
+    ) {
+      setupWizardAutoShownRef.current = true
+      setWizardInitialStep(1)
+      setShowSetupWizard(true)
+    }
+  }, [networkStatus])
+
+  // Watch for terminal to become ready, then send the pending firewall command.
+  // This respects the pane-owned terminal lifecycle in TerminalView.tsx —
+  // TerminalView sends terminal.create and handles terminal.created internally.
+  useEffect(() => {
+    if (!pendingFirewallCommand) return
+    const { tabId, command } = pendingFirewallCommand
+    const layout = paneLayouts[tabId]
+    if (!layout || layout.type !== 'leaf' || layout.content.kind !== 'terminal') return
+    const terminalId = layout.content.terminalId
+    if (!terminalId) return // terminal not ready yet
+
+    // Kata dtfn (ledger A7): defer until the transport is actually ready.
+    // WsClient.send can queue this frame un-ready or silently drop it
+    // (intentionalClose early-return; oldest-eviction at the queue cap), and
+    // the self-clear below destroys the only retry state. Leaving
+    // pendingFirewallCommand SET is the deferral: the reactive
+    // connectionStatus dependency re-runs this effect when readiness returns.
+    // `isReady` is a synchronous getter (property read, never a call) -- it
+    // covers the close race where Redux still says 'ready' (invariant 9).
+    const ws = getWsClient()
+    if (connectionStatus !== 'ready' || ws.isReady === false) return
+
+    // Terminal is running — send the firewall command
+    ws.send({ type: 'terminal.input', terminalId, data: command + '\n' })
+    setPendingFirewallCommand(null)
+  }, [pendingFirewallCommand, paneLayouts, connectionStatus])
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    function isTextInput(el: any): boolean {
+      if (!el) return false
+      const tag = (el.tagName || '').toLowerCase()
+      if (tag === 'input' || tag === 'textarea' || el.isContentEditable) return true
+      if (el.classList?.contains('xterm-helper-textarea')) return true
+      return false
+    }
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.defaultPrevented || e.repeat) return
+
+      const tabSwitchDirection = getTabSwitchShortcutDirection(e)
+      if (tabSwitchDirection) {
+        e.preventDefault()
+        dispatch(tabSwitchDirection === 'prev' ? switchToPrevTab() : switchToNextTab())
+        return
+      }
+
+      const lifecycleAction = getTabLifecycleAction(e)
+      if (lifecycleAction) {
+        e.preventDefault()
+        if (lifecycleAction === 'new') {
+          dispatch(addTab())
+        } else if (lifecycleAction === 'reopen') {
+          dispatch(reopenClosedTab())
+        } else {
+          const activeTabId = appStore.getState().tabs.activeTabId
+          if (activeTabId) dispatch(closeTab(activeTabId))
+        }
+        return
+      }
+
+      if (isTextInput(e.target)) return
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [dispatch, appStore])
+
+  // Ensure at least one tab exists for first-time users.
+  useEffect(() => {
+    if (tabs.length === 0) {
+      dispatch(addTab({ mode: 'shell' }))
+    }
+  }, [tabs.length, dispatch])
+
+  const handleTerminalChromeRevealTouchStart = useCallback((event: ReactTouchEvent<HTMLDivElement>) => {
+    if (!isMobile || view !== 'terminal') return
+    const touch = event.touches[0]
+    if (!touch) return
+    if (touch.clientY <= CHROME_REVEAL_TOP_EDGE_PX) {
+      fullscreenTouchStartYRef.current = touch.clientY
+    } else {
+      fullscreenTouchStartYRef.current = null
+    }
+  }, [isMobile, view])
+
+  const handleTerminalChromeRevealTouchEnd = useCallback((event: ReactTouchEvent<HTMLDivElement>) => {
+    const startY = fullscreenTouchStartYRef.current
+    fullscreenTouchStartYRef.current = null
+    if (!isMobile || view !== 'terminal') return
+    if (startY === null) return
+    const touch = event.changedTouches[0]
+    if (!touch) return
+    const deltaY = touch.clientY - startY
+    if (deltaY > CHROME_REVEAL_SWIPE_PX) {
+      if (isLandscapeTerminalView) {
+        triggerHapticFeedback()
+        setLandscapeTabBarRevealed(true)
+        return
+      }
+      if (!isFullscreen) return
+      triggerHapticFeedback()
+      void exitFullscreen()
+    }
+  }, [exitFullscreen, isFullscreen, isLandscapeTerminalView, isMobile, view])
+
+  const content = (() => {
+    if (view === 'sessions') {
+      return (
+        <ErrorBoundary label="Projects" onNavigate={() => setView('overview')}>
+          <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading sessions…</div>}>
+            <HistoryView onOpenSession={() => setView('terminal')} />
+          </Suspense>
+        </ErrorBoundary>
+      )
+    }
+    if (view === 'extensions') {
+      return (
+        <ErrorBoundary label="Extensions" onNavigate={() => setView('settings')}>
+          <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading extensions…</div>}>
+            <ExtensionsView onNavigate={setView} />
+          </Suspense>
+        </ErrorBoundary>
+      )
+    }
+    if (view === 'settings') {
+      return (
+        <ErrorBoundary label="Settings" onNavigate={() => setView('overview')}>
+          <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading settings…</div>}>
+            <SettingsView onNavigate={setView} onFirewallTerminal={setPendingFirewallCommand} onSharePanel={handleShare} />
+          </Suspense>
+        </ErrorBoundary>
+      )
+    }
+    if (view === 'overview') {
+      return (
+        <ErrorBoundary label="Panes">
+          <OverviewView onOpenTab={handleOpenTab} />
+        </ErrorBoundary>
+      )
+    }
+    if (view === 'tabs') {
+      return (
+        <ErrorBoundary label="Tabs">
+          <TabsView onOpenTab={handleOpenTab} />
+        </ErrorBoundary>
+      )
+    }
+    return (
+      <div className="h-full min-h-0 overflow-hidden flex flex-col">
+        {(!isLandscapeTerminalView || landscapeTabBarRevealed) && (
+          <TabBar sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebarCollapse} />
+        )}
+        <div
+          className="flex-1 min-h-0 relative bg-background"
+          data-testid="terminal-work-area"
+          onTouchStart={handleTerminalChromeRevealTouchStart}
+          onTouchEnd={handleTerminalChromeRevealTouchEnd}
+        >
+          <div
+            className="pointer-events-none absolute inset-x-0 top-0 z-10 h-[4px] bg-background"
+            data-testid="terminal-work-area-connector"
+            aria-hidden="true"
+          />
+          {tabs.map((t) => (
+            <TabContent key={t.id} tabId={t.id} hidden={t.id !== activeTabId} />
+          ))}
+        </div>
+      </div>
+    )
+  })()
+
+  return (
+    <ContextMenuProvider
+      view={view}
+      onViewChange={setView}
+      onToggleSidebar={toggleSidebarCollapse}
+      sidebarCollapsed={sidebarCollapsed}
+    >
+      <div
+        className="h-full min-h-0 overflow-hidden flex flex-col bg-background text-foreground"
+        data-context={ContextIds.Global}
+      >
+      {configFallback && (
+        <div className="px-3 md:px-4 py-2 border-b border-destructive/30 bg-destructive/10 text-destructive text-xs">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" aria-hidden="true" />
+            <div className="flex-1 min-w-0" role="status" aria-live="polite">
+              <p>
+                Config file was invalid ({describeConfigFallbackReason(configFallback.reason)}), so freshell loaded defaults.
+                {configFallback.backupExists
+                  ? ` Backup found at ${configFallback.backupPath ?? '~/.freshell/config.backup.json'}.`
+                  : ' No backup file was found.'}
+              </p>
+            </div>
+            <button
+              onClick={() => setConfigFallback(null)}
+              className="text-destructive/80 hover:text-destructive transition-colors"
+              aria-label="Dismiss config fallback warning"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+      {/* Main content area with sidebar */}
+      <div
+        className="flex-1 min-h-0 flex relative"
+        data-testid="app-main-content"
+        ref={mainContentRef}
+        {...(isMobile ? bindSidebarSwipe() : {})}
+        style={isMobile ? { touchAction: 'pan-y' } : undefined}
+      >
+        {/* Show-sidebar toggle is integrated into TabBar for terminal view,
+            and rendered inline below for non-terminal views */}
+        {/* Mobile overlay when sidebar is open */}
+        {isMobile && !sidebarCollapsed && (
+          <div
+            className="absolute inset-0 bg-black/50 z-10"
+            role="presentation"
+            onClick={toggleSidebarCollapse}
+            onTouchEnd={(e) => {
+              e.preventDefault()
+              toggleSidebarCollapse()
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') toggleSidebarCollapse()
+            }}
+            tabIndex={-1}
+          />
+        )}
+        {/* Sidebar - on mobile it overlays, on desktop it's inline */}
+        {!sidebarCollapsed && (
+          <div className={isMobile ? 'absolute inset-y-0 left-0 right-0 z-30' : 'contents'}>
+            <Sidebar
+              view={view}
+              onNavigate={(v) => {
+                setView(v)
+                // On mobile, collapse sidebar after navigation
+                if (isMobile) toggleSidebarCollapse()
+              }}
+              onToggleSidebar={toggleSidebarCollapse}
+              currentVersion={currentVersion}
+              updateAvailable={updateAvailable}
+              latestVersion={latestVersion}
+              onBrandClick={handleBrandClick}
+              onSharePanel={handleShare}
+              width={sidebarWidth}
+              fullWidth={isMobile}
+            />
+            {!isMobile && (
+              <PaneDivider
+                direction="horizontal"
+                onResize={handleSidebarResize}
+                onResizeEnd={handleSidebarResizeEnd}
+              />
+            )}
+          </div>
+        )}
+        <div
+          className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col"
+          data-testid="app-pane-column"
+          {...(isMobile ? bindTabSwipe() : {})}
+          style={isMobile ? { touchAction: 'pan-y' } : undefined}
+        >
+          {sidebarCollapsed && (view !== 'terminal' || (isLandscapeTerminalView && !landscapeTabBarRevealed) || tabs.length === 0) && (
+            <div className="shrink-0 flex items-center px-2 h-10 border-b border-border/30">
+              <button
+                onClick={toggleSidebarCollapse}
+                className="p-1.5 rounded-md hover:bg-muted transition-colors min-h-11 min-w-11 md:min-h-0 md:min-w-0 flex items-center justify-center"
+                title="Show sidebar"
+                aria-label="Show sidebar"
+                data-testid="show-sidebar-button"
+              >
+                <PanelLeft className="h-3.5 w-3.5 text-muted-foreground" />
+              </button>
+            </div>
+          )}
+          {content}
+        </div>
+      </div>
+
+      {showUpdateInstructions && currentVersion && updateAvailable && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60]"
+          role="presentation"
+          onClick={() => setShowUpdateInstructions(false)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setShowUpdateInstructions(false)
+          }}
+          tabIndex={-1}
+        >
+          {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions */}
+          <div
+            className="bg-background border border-border rounded-lg shadow-lg max-w-md w-full mx-4 p-6"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Update instructions"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-lg font-semibold">Update Available</h2>
+              <button
+                onClick={() => setShowUpdateInstructions(false)}
+                className="p-1 rounded hover:bg-muted transition-colors"
+                aria-label="Close update instructions"
+              >
+                <X className="h-4 w-4 text-muted-foreground" />
+              </button>
+            </div>
+            <p className="text-sm text-muted-foreground mb-3">
+              You are running v{currentVersion}. {latestVersion ? `v${latestVersion} is available.` : 'A newer release is available.'}
+            </p>
+            <p className="text-sm text-muted-foreground mb-2">From your freshell install directory:</p>
+            <pre className="bg-muted rounded-md p-3 text-xs overflow-x-auto mb-3">{`git pull
+npm install
+npm run build
+npm run serve`}</pre>
+            <p className="text-sm text-muted-foreground mb-4">
+              You can also restart and accept the startup auto-update prompt.
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              {releaseUrl && (
+                <a
+                  href={releaseUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="h-8 px-3 rounded-md border border-border hover:bg-muted transition-colors text-sm inline-flex items-center"
+                >
+                  Release notes
+                </a>
+              )}
+              <button
+                onClick={() => setShowUpdateInstructions(false)}
+                className="h-8 px-3 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors text-sm"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Network-aware share panel */}
+      {showSharePanel && networkStatus && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60]"
+          role="presentation"
+          onClick={() => setShowSharePanel(false)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setShowSharePanel(false)
+          }}
+          tabIndex={-1}
+        >
+          {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions */}
+          <div
+            className="bg-background border border-border rounded-lg shadow-lg max-w-md w-full mx-4 p-6"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Share freshell access"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">Share Access</h2>
+              <button
+                onClick={() => setShowSharePanel(false)}
+                className="p-1 rounded hover:bg-muted transition-colors"
+                aria-label="Close share panel"
+              >
+                <X className="h-4 w-4 text-muted-foreground" />
+              </button>
+            </div>
+            <p className="text-sm text-muted-foreground mb-4">
+              Share this link with devices on your local network or VPN.
+            </p>
+            {shareAccessUrl && (
+              <div className="flex justify-center mb-4">
+                <ShareQrCode url={shareAccessUrl} />
+              </div>
+            )}
+            <div className="bg-muted rounded-md p-3 mb-4">
+              <code className="text-sm break-all select-all">{shareAccessUrl ?? networkStatus.accessUrl}</code>
+            </div>
+            <button
+              onClick={handleCopyAccessUrl}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+            >
+              {copied ? (
+                <>
+                  <Check className="h-4 w-4" />
+                  Copied!
+                </>
+              ) : (
+                <>
+                  <Copy className="h-4 w-4" />
+                  Copy link
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+      <AuthRequiredModal />
+      <TerminalInterestReporter workspaceVisible={view === 'terminal'} />
+      <DeadSessionPanel />
+      <ReconcileWarmingBanner />
+      {showSetupWizard && (
+        <SetupWizard
+          initialStep={wizardInitialStep}
+          onNavigate={setView}
+          onFirewallTerminal={setPendingFirewallCommand}
+          onComplete={() => {
+            markAutoSetupWizardDismissed()
+            setupWizardAutoShownRef.current = true
+            setShowSetupWizard(false)
+            dispatch(fetchNetworkStatus())
+          }}
+        />
+      )}
+      {/* LANE B3 (recover-my-panes): self-gating recovery offer — see docs/plans/2026-07-26-recover-my-panes.md */}
+      <RecoveryOfferPanel />
+      {/* In-app Stream Deck emulator — self-hides unless deck.virtualDeckOpen */}
+      <VirtualDeckPanel />
+      </div>
+    </ContextMenuProvider>
+  )
+}

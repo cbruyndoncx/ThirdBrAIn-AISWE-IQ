@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#0f172a" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <title>freshell</title>
+  </head>
+  <body class="h-full">
+    <script>
+      // Capture console.error calls and uncaught errors from the very first
+      // moment the page loads.  Browser-use preflight checks query this array
+      // via `window.__consoleErrors` to abort early when the app is broken.
+      (function () {
+        var errors = (window.__consoleErrors = []);
+        var orig = console.error;
+        console.error = function () {
+          errors.push({
+            ts: Date.now(),
+            args: Array.prototype.slice.call(arguments).map(String),
+          });
+          return orig.apply(console, arguments);
+        };
+        window.addEventListener("error", function (e) {
+          errors.push({ ts: Date.now(), args: [e.message || "Unknown error"] });
+        });
+      })();
+    </script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

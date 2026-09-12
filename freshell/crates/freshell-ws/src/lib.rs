@@ -1,0 +1,1293 @@
+//! # freshell-ws
+//!
+//! WebSocket transport + connect-handshake dispatch for the freshell Rust port.
+//! A faithful port of the **handshake path** of `server/ws-handler.ts`:
+//!
+//! * mount `/ws` (an axum WebSocket upgrade — tokio-tungstenite-backed);
+//! * read the first `hello`, validate `protocolVersion == 10` **first**, then the
+//!   token with a **constant-time** compare (mirrors `auth.ts#timingSafeCompare`
+//!   and the `ws-handler.ts` ordering: version check precedes auth);
+//! * on success emit, IN ORDER, exactly what the original sends on a clean
+//!   isolated boot: `ready` → `settings.updated` → `perf.logging` →
+//!   `terminal.inventory`, with the `terminal.inventory.bootId`
+//!   **byte-identical** to the `ready.bootId` (the cross-message invariant the
+//!   oracle normalizer + determinism test pin).
+//!
+//! After the handshake, the connection is handed to [`terminal`], which serves the
+//! `terminal.*` shell path (create/attach/input/output/kill) over the same socket —
+//! the transport the oracle's T1 rung grades (`port/machine/specs/terminal-core.md`).
+//! Coding-cli, fresh-agent, backpressure, and keepalive ping remain out of scope.
+//! The crate emits the frozen [`freshell_protocol`] server-message types so its
+//! wire bytes are contract-locked.
+
+/// The git commit THIS binary was built from, baked into this crate at
+/// compile time by this crate's `build.rs` (`FRESHELL_WS_BUILD_COMMIT`).
+/// Falls back to the literal `"unknown"` when git was unavailable at build
+/// time (e.g. a source tarball or the Cloud Run image, which builds without
+/// git metadata) -- never a runtime failure. Build provenance is
+/// BUILD-scoped, so this deliberately does NOT ride on `WsState`.
+pub fn ready_build_id() -> Option<String> {
+    Some(
+        option_env!("FRESHELL_WS_BUILD_COMMIT")
+            .unwrap_or("unknown")
+            .to_string(),
+    )
+}
+
+pub mod activity;
+pub mod auto_resume;
+pub mod backpressure;
+pub mod claude_signal;
+pub mod claude_truth;
+pub mod codex_association;
+pub(crate) mod codex_identity;
+pub mod codex_proxy_route;
+pub(crate) mod codex_reconcile;
+pub mod create_dedupe;
+pub(crate) mod create_gate;
+pub mod create_limit;
+pub mod existence;
+pub mod host_stats_collector;
+pub mod host_stats_interest;
+pub mod identity;
+pub mod invariants;
+pub mod opencode_association;
+pub mod opencode_lane;
+pub mod opencode_signal;
+pub mod origin;
+pub mod pane_identity_binder;
+pub mod pane_ledger;
+pub mod reconcile;
+pub mod reconcile_freshagent;
+pub mod resume_validation;
+pub mod screenshot;
+pub mod spawn_gate;
+pub mod subagent_interest;
+pub mod tabs;
+pub mod tabs_persist;
+pub mod tabs_store;
+pub(crate) mod tabs_store_migrate;
+pub mod tabs_store_model;
+pub mod terminal;
+pub mod terminal_meta;
+
+pub use codex_identity::codex_sessions_root;
+pub use codex_reconcile::locate_codex_rollout;
+
+/// Sanitizing env-var parse shared by this crate's config knobs
+/// (`auto_resume`, `backpressure`, `create_limit`): unset, unparseable,
+/// zero, or negative -> `default`. Deliberately saner than legacy
+/// `Number(env || default)` — see `create_limit`'s module doc.
+/// Assumes `T::default()` is the invalid floor (true for the unsigned /
+/// positive-duration knobs here); don't instantiate with a type where the
+/// default is a meaningful value.
+pub(crate) fn env_parse<T: std::str::FromStr + PartialOrd + Default>(name: &str, default: T) -> T {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<T>().ok())
+        .filter(|v| *v > T::default())
+        .unwrap_or(default)
+}
+
+use std::sync::Arc;
+
+use axum::{
+    extract::{
+        ws::{Message, WebSocket},
+        State, WebSocketUpgrade,
+    },
+    response::Response,
+    routing::get,
+    Router,
+};
+use freshell_protocol::{
+    ConfigFallback, ErrorCode, ErrorMsg, PerfLogging, Ready, ServerMessage, ServerSettings,
+    SettingsUpdated, TerminalInventory, WS_PROTOCOL_VERSION,
+};
+
+/// Shared, cheaply-cloneable state the `/ws` handler needs. Boot-scoped ids are
+/// generated once by `freshell-server` and injected here so every connection in
+/// a boot reports the SAME `serverInstanceId`/`bootId` (matches the original,
+/// where they live on the single `WsHandler`).
+#[derive(Clone)]
+pub struct WsState {
+    /// The required WS auth token (`AUTH_TOKEN`).
+    pub auth_token: Arc<String>,
+    /// `srv-<uuid>` — stable for the life of this server process.
+    pub server_instance_id: Arc<String>,
+    /// `boot-<uuid>` — stable for the life of this server process.
+    pub boot_id: Arc<String>,
+    /// The default server settings tree. Boot-frozen snapshot, consumed ONLY
+    /// by `terminal.rs`'s create-time derivations (`cli_provider_settings`,
+    /// the codex launch plan, `resolve_create_cwd`'s `defaultCwd` fallback).
+    /// CFG-06 owns making those NEW-OPERATION consumers resolve live values;
+    /// do NOT repoint this field at [`WsState::handshake_settings`] — the
+    /// per-consumer proof obligations are CFG-06's, and the boundary is
+    /// pinned by `handshake_settings_updated_reflects_live_writes_between_
+    /// connections`.
+    pub settings: Arc<ServerSettings>,
+    /// CFG-12: the LIVE server-settings tree, resolved on EVERY `/ws`
+    /// connection for the handshake's `settings.updated` frame (legacy
+    /// parity: the original's `handshakeSnapshotProvider` awaits
+    /// `configStore.getSettings()` per connection (`server/index.ts:415-427`,
+    /// sent via `ws-handler.ts:1815-1845`). Freshell-server wires
+    /// `SettingsStore::shared_settings_lock()` in here, so a value committed
+    /// by `PATCH /api/settings` is exactly what the next (re)connecting
+    /// client's handshake carries — with the client's last-write-wins
+    /// application of that frame, a boot-frozen copy here would erase the
+    /// fresh value `/api/bootstrap` already delivered. Read-only from this
+    /// crate's perspective: the owning `SettingsStore` is the only writer.
+    pub handshake_settings: Arc<tokio::sync::RwLock<ServerSettings>>,
+    /// GAP1 (CFG-03 checklist follow-up): the boot-time `config.fallback`
+    /// notice, if the primary configuration needed to fall back (corrupt
+    /// primary -> backup restore or defaults) at boot -- `None` for a
+    /// healthy config or an ordinary fresh install. Boot-frozen, exactly
+    /// like `settings` above (the original recomputes both `settings` AND
+    /// `configFallback` fresh on every connection, `server/index.ts:369-381`;
+    /// this crate already snapshots `settings` once at boot into `WsState`,
+    /// so this field follows that SAME established precedent rather than
+    /// inventing new live-recompute plumbing). Sent as part of
+    /// [`build_handshake`]'s ordered handshake on EVERY `/ws` connection --
+    /// not just the first -- so a client that connects minutes after boot
+    /// still receives it (mirrors the original's per-connection
+    /// `sendHandshakeSnapshot`, `ws-handler.ts:1723-1749`, which is how it
+    /// achieves late-connect delivery without a separate broadcast).
+    pub config_fallback: Option<ConfigFallback>,
+    /// The shared server→client broadcast bus (pre-serialized JSON frames). REST
+    /// handlers (e.g. fresh-agent create/send) push here; every authenticated `/ws`
+    /// connection fans the frames out to its socket (the original `WsHandler.broadcast`).
+    /// Carries `ui.command` / `freshAgent.session.materialized` / `sessions.changed`
+    /// during a fresh-agent turn, which the oracle's capture socket records.
+    pub broadcast_tx: Arc<tokio::sync::broadcast::Sender<String>>,
+    /// Lane D1: natural-exit crash events for the auto-resume hub. The
+    /// receiver half is consumed by `auto_resume::spawn_auto_resume_hub`
+    /// (Task 5); until then tests drain it directly (construction sites
+    /// without a consumer drop the receiver — sends are best-effort).
+    pub auto_resume_tx: tokio::sync::mpsc::UnboundedSender<crate::auto_resume::CrashEvent>,
+    /// Pending user cancels for planned auto-resumes, keyed by the OLD
+    /// (crashed) terminal id (znhn item 2). Inserted by the WS handler
+    /// ONLY after registry validation (unknown ids never enter — D-4),
+    /// consumed by the hub's post-sleep guard, which re-emits the settle
+    /// frame so a consumed cancel is always loud. Bounded: one
+    /// registry-known entry per cancel click, removed on consumption (every
+    /// hub settle/replaced tail) and on the kill path (`kill_and_broadcast`
+    /// — a killed terminal never produces the CrashEvent that would consume
+    /// it).
+    pub auto_resume_cancels: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// The freshcodex WS fresh-agent slice: the post-handshake loop dispatches
+    /// `freshAgent.create` / `freshAgent.send` (codex) here, which spawns the codex
+    /// app-server sidecar and broadcasts `freshAgent.created` / `freshAgent.send.accepted`
+    /// / `freshAgent.event` (session.snapshot + the status-guarded turn.complete edge).
+    pub fresh_codex: freshell_freshagent::FreshCodexState,
+    /// The freshclaude WS fresh-agent slice: the post-handshake loop dispatches
+    /// `freshAgent.create` / `freshAgent.send` (claude/kilroy) here, which spawns the ONE
+    /// sanctioned Node sidecar wrapping `@anthropic-ai/claude-agent-sdk` and broadcasts
+    /// `freshAgent.created` / `freshAgent.send.accepted` / `freshAgent.event`
+    /// (session.init + stream + assistant + result + the success-guarded turn.complete edge).
+    /// Gated by the SHARED `settings.freshAgent.enabled` flag (owned by `fresh_codex`).
+    pub fresh_claude: freshell_freshagent::FreshClaudeState,
+    /// The freshopencode WS fresh-agent slice (Batch D PR-2): the post-handshake loop
+    /// dispatches `freshAgent.create` / `freshAgent.send` / `freshAgent.kill` /
+    /// `freshAgent.interrupt` (opencode) here. Wraps the SAME `FreshAgentState` the REST
+    /// `/api/tabs` + `/api/panes/:id/send-keys` surface uses, so both share exactly ONE
+    /// `opencode serve` sidecar. Streaming (`freshAgent.event`) is PR-3.
+    pub fresh_opencode: freshell_freshagent::FreshOpencodeState,
+    /// The shared, connection-independent terminal registry (the port of
+    /// `server/terminal-registry.ts` plus the broker fan-out). Terminals are owned here
+    /// by `terminalId`, NOT by the connection that created them, so a second/reconnected
+    /// socket re-attaches to a running PTY and replays its scrollback. This is what makes
+    /// the multi-client / reconnection / hot-across-reload flows work
+    /// (`port/machine/specs/terminal-core.md` §1).
+    pub registry: freshell_terminal::TerminalRegistry,
+    /// The shared, in-memory tabs registry (the `tabs.sync.*` slice of
+    /// `server/ws-handler.ts` + `server/tabs-registry/store.ts`). Owned here by
+    /// `(deviceId, clientInstanceId)` so every `/ws` connection — and the REST
+    /// `client-retire` beacon — shares one cross-device tab view. This is what makes
+    /// a closed device's tab disappear from other clients' Tabs UI.
+    pub tabs: crate::tabs::TabsRegistry,
+    /// The shared server-side layout store (AUTO-01 spine, Task 13):
+    /// `ui.layout.sync` client frames REPLACE the sending CONNECTION'S
+    /// snapshot (`terminal::handle_client_text`'s `ClientMessage::UiLayoutSync`
+    /// arm -> `LayoutStore::update_from_ui` -- the port of
+    /// `this.layoutStore.updateFromUi(m, ws.connectionId || 'unknown')`,
+    /// `server/ws-handler.ts:2024-2027`; intentional divergence: the store is
+    /// multi-client keyed by connection id, where Node keeps ONE
+    /// last-writer-wins snapshot). A connection's snapshot is evicted on
+    /// close. No reply frame (Node sends none). `freshell-server`'s `main.rs`
+    /// constructs ONE store and clones it into BOTH this state and
+    /// `freshell_freshagent::FreshAgentState` (via `with_layout`), so the
+    /// REST automation surface (Tasks 14-16) reads the SAME snapshots the
+    /// socket path ingests.
+    pub layout: freshell_freshagent::layout_store::LayoutStore,
+    /// The shared terminal-identity registry (Fix Spec: Session Naming Cluster --
+    /// the port-side closure of `TerminalMetadataService`'s provider/sessionId
+    /// association slice, see [`crate::identity`]). Populated at terminal-create
+    /// time alongside the `terminal.meta.updated` broadcast, retired (not removed)
+    /// on kill/exit so post-exit rename cascades still resolve. Shared into the
+    /// `freshell-server` REST states (`TerminalsState`/`SessionsState`/
+    /// `SessionDirectoryState`) that read it for the rename cascades and the
+    /// session-directory live-terminal join.
+    pub identity: crate::identity::TerminalIdentityRegistry,
+    /// The shared terminal-metadata registry (DEV-0008 closure, Task 18 -- the
+    /// port of `server/terminal-metadata-service.ts`, see
+    /// [`crate::terminal_meta`]): the git-enriched per-terminal records behind
+    /// `terminal.inventory.terminalMeta` and the `terminal.meta.updated`
+    /// broadcasts. Seeded (async-enriched) by the `terminal.create` path,
+    /// updated by the amplifier/opencode association drains and by
+    /// `freshell-server`'s auto-title sweep, retired on kill/exit. Distinct
+    /// from `identity` above: identity is the narrow provider/sessionId slice
+    /// the rename cascades consume; this is the full wire-record store.
+    pub terminal_meta: crate::terminal_meta::TerminalMetaRegistry,
+    /// The shared UI-screenshot broker (`ws-handler.ts#requestUiScreenshot`). A
+    /// connection that advertised `capabilities.uiScreenshotV1` is counted here so
+    /// `POST /api/screenshots` knows a capable UI exists, and its inbound
+    /// `ui.screenshot.result` is routed back to the waiting REST handler.
+    pub screenshots: crate::screenshot::ScreenshotBroker,
+    /// Per-connection `includeSubagents` listing interest (amplifier watch
+    /// reduction): `sessions.prefs` client frames overwrite the sending
+    /// connection's entry; the connection-teardown block clears it. The
+    /// amplifier subagent rescan cadence (`freshell-server`, Task 9) runs while
+    /// `any()` is true. See [`crate::subagent_interest`].
+    pub subagent_interest: crate::subagent_interest::SubagentInterestRegistry,
+    /// HOST-PRESSURE PANE (Task 9, `docs/plans/2026-08-25-host-pressure-pane.md`):
+    /// per-connection `hoststats.subscribe` interest + the injected concrete
+    /// collector (`Arc<dyn HostStatsCollector>`, freshell-server). Bundled as
+    /// ONE sub-struct so the ~35 `WsState { ... }` literals across crates
+    /// gain exactly one `host_stats: Default::default()` arm each (the plan's
+    /// >~6-site sweep rule). See [`crate::host_stats_collector`].
+    pub host_stats: crate::host_stats_collector::WsHostStatsState,
+    /// The handler-scoped monotonic `terminals.changed` revision counter
+    /// (`ws-handler.ts:566` `terminalsRevision`). SHARED with the REST
+    /// `/api/terminals` PATCH/DELETE broadcasts (`terminals::TerminalsState`),
+    /// so WS create/kill and REST override changes stamp ONE monotonic sequence,
+    /// exactly like the original's single per-handler counter.
+    pub terminals_revision: Arc<std::sync::atomic::AtomicI64>,
+    /// SESSION-09: the monotonic `sessions.changed` revision counter for the
+    /// periodic session-directory sweep (`freshell-server`'s
+    /// `spawn_sessions_sweep`, `main.rs`). Legacy's `SessionsSyncService`
+    /// (`server/sessions-sync/service.ts:31-73`) owns ONE such counter per
+    /// server process and stamps it on every coalesced directory-change
+    /// broadcast (`ws-handler.ts:3662-3668` `broadcastAuthenticated`); this
+    /// field is that same per-process counter for the port. NOTE: this is
+    /// deliberately independent of `freshell-freshagent`'s own internal
+    /// `sessions_revision` (used only for the narrower
+    /// placeholder-\u2192durable materialization broadcast on a fresh-agent
+    /// turn) -- the two are not unified in this slice; see
+    /// `crate::terminal::broadcast_sessions_changed`'s doc comment for the
+    /// known consequence.
+    pub sessions_revision: Arc<std::sync::atomic::AtomicI64>,
+    /// The registered coding-CLI command specs (`claude`/`codex`/`opencode`/...),
+    /// used to resolve `terminal.create { mode: <cli> }` into a real CLI launch
+    /// (`resolveCodingCliCommand`). Populated from the extension registry at boot;
+    /// empty in unit tests (shell-only).
+    pub cli_commands: Arc<Vec<freshell_platform::CliCommandSpec>>,
+    /// Graceful-shutdown signal (`ws-handler.ts:1087` / `:3843`): on SIGTERM/SIGINT
+    /// the server notifies every live connection, which closes with
+    /// `4009 "Server shutting down"` (CLOSE_CODES.SERVER_SHUTDOWN) — live-pinned
+    /// 2026-07-13: the original's client observes {code:4009, reason:'Server
+    /// shutting down'}; the port previously died with an abnormal 1006.
+    pub shutdown: Arc<tokio::sync::Notify>,
+    /// WS protocol-level keepalive ping interval, milliseconds (`ws-handler.ts:224`
+    /// `pingIntervalMs: Number(process.env.PING_INTERVAL_MS || 30_000)`). Every
+    /// `/ws` connection's serve loop (`terminal::run`) pings on this cadence and
+    /// terminates the socket if no pong arrived since the previous tick (mirrors
+    /// `ws.isAlive` / `ws.terminate()`, `ws-handler.ts:745-755`). Without this, an
+    /// idle connection carries zero traffic and a silent intermediary (NAT/proxy/
+    /// dead network path) can black-hole it — the client's `readyState` stays
+    /// `OPEN` while every broadcast frame the server sends is lost. A small value
+    /// here (e.g. in tests) makes the keepalive cadence observable without a real
+    /// 30s wait.
+    pub ping_interval_ms: u64,
+    /// SAFE-05: hello-handshake deadline, milliseconds (`ws-handler.ts:223`
+    /// `helloTimeoutMs: Number(process.env.HELLO_TIMEOUT_MS || 5_000)`). A
+    /// connection that never completes its `hello` within this window is
+    /// closed with `CLOSE_HELLO_TIMEOUT` (4002), mirroring `ws-handler.ts:1167-1171`
+    /// (`state.helloTimer = setTimeout(() => { if (!state.authenticated)
+    /// ws.close(CLOSE_CODES.HELLO_TIMEOUT, 'Hello timeout') }, helloTimeoutMs)`).
+    /// A small value here (e.g. in tests) makes the deadline observable
+    /// without a real multi-second wait.
+    pub hello_timeout_ms: u64,
+    /// SAFE-03 WS Origin policy allow-list (resolved once at boot from
+    /// `ALLOWED_ORIGINS`/`EXTRA_ALLOWED_ORIGINS`, see [`crate::origin`]). A
+    /// connection whose `Origin` is present but neither same-origin (Host
+    /// match) nor on this list is rejected before any session state is sent.
+    pub allowed_origins: Arc<Vec<String>>,
+    /// TERM-09: bounded per-connection output-queue + catastrophic-backpressure
+    /// tunables (legacy parity: `server/terminal-stream/constants.ts` +
+    /// `client-output-queue.ts`). See [`crate::backpressure::Term09Config`].
+    pub term09: crate::backpressure::Term09Config,
+    /// terminal.create protection knobs (rate limit + spawn gate). See
+    /// [`crate::create_limit::CreateProtectConfig`].
+    pub create_protect: crate::create_limit::CreateProtectConfig,
+    /// Server-wide requestId -> terminal dedupe for `terminal.create`
+    /// (legacy `createdByRequestId` parity — see
+    /// [`crate::create_dedupe::CreateDedupe`]).
+    pub create_dedupe: std::sync::Arc<crate::create_dedupe::CreateDedupe>,
+    /// Server-wide PTY spawn gate (restart-storm / WSL-outage RCA §6.3
+    /// protection). One per server process, shared across all WS
+    /// connections. See [`crate::spawn_gate::SpawnGate`].
+    pub spawn_gate: std::sync::Arc<crate::spawn_gate::SpawnGate>,
+    /// Latched `true` the instant a shutdown signal is received (before the
+    /// WS notify). Gated creates re-check it around `registry.create` so a
+    /// create racing shutdown never leaves a live PTY that `kill_all`'s
+    /// one-shot id snapshot (`freshell-terminal/src/registry.rs:889-892`)
+    /// would miss (A10/V3).
+    pub shutdown_started: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// SAFE-06: inbound WS frame/message size bound (legacy parity:
+    /// `ws-handler.ts:226` `wsMaxPayloadBytes: Number(process.env.WS_MAX_PAYLOAD_BYTES
+    /// || 16 * 1024 * 1024)`, passed to the `ws` library's `maxPayload` at
+    /// `ws-handler.ts:728`, which aborts a connection whose message exceeds
+    /// it). Configured once at boot (mirrors `ping_interval_ms`) and applied
+    /// to the `WebSocketUpgrade` before `.on_upgrade()` in [`ws_handler`], so
+    /// both the `hello` frame and every later `terminal.*` frame on this
+    /// connection are bounded identically.
+    pub ws_max_payload_bytes: usize,
+    /// Reconciliation handshake (design §5.1): the disk-truth probe behind the
+    /// `pane.reconcile.request` verdict derivation — "does `provider:sessionId`
+    /// exist on disk?" with defined Present/Absent/Unknown semantics. Backed by
+    /// the shared session index in `freshell-server::main` (the exact precedent
+    /// of `identity` and the locator handles); [`crate::existence::NoIndexProbe`]
+    /// when no provider home resolves.
+    pub session_existence: crate::existence::SharedExistenceProbe,
+    /// Reconciliation handshake (design §5.3 row 5): the budget, in
+    /// milliseconds, for `handle_pane_reconcile`'s ONE bounded deferral when
+    /// a derivation comes back `error{index_warming}` — wait at most this
+    /// long, re-derive once, answer. Never loops. Default
+    /// [`crate::reconcile::RECONCILE_DEFERRAL_BUDGET_MS_DEFAULT`] (2000ms);
+    /// tests shrink it so the warming paths are observable without a real
+    /// 2s wait (mirrors `ping_interval_ms` / `hello_timeout_ms`).
+    pub reconcile_deferral_budget_ms: u64,
+    /// Per-boot fresh-agent respawn-answer counter, keyed `(provider,
+    /// sessionId)` (campaign §4.3, V2/A7). Counts RESPAWN ANSWERS only —
+    /// incremented by [`crate::reconcile_freshagent::build_snapshot`] when an
+    /// answer goes out as `respawn`, and CLEARED when the session's presence
+    /// resolves Live (a successful respawn is OBSERVED as the session going
+    /// live), so healthy sessions are never exhausted by reconnect/reload
+    /// storms. In-memory only: a server restart intentionally resets it.
+    pub fresh_agent_respawn_counts:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<(String, String), u32>>>,
+    /// The opencode terminal-pane session locator (restore-across-restart fix,
+    /// `docs/plans/2026-07-18-opencode-terminal-restore-spec.md`): correlates a
+    /// fresh opencode PTY's first Enter/submit (or a row written at spawn) with
+    /// the new root `session` row opencode writes into its SQLite
+    /// `opencode.db`, so the terminal can be bound to a session identity and
+    /// `terminal.rs`'s generic resume-id derivation can drive
+    /// `opencode --session <id>` on restart. `None` when the data home
+    /// couldn't be resolved — every [`crate::opencode_association`] entry
+    /// point no-ops in that case. Sibling to the deleted amplifier locator
+    /// (spec §8: a provider-parameterized locator was explicitly rejected;
+    /// amplifier identity is now launcher-assigned at create time, kata qmpk).
+    pub opencode_locator: Option<Arc<freshell_sessions::opencode_locator::OpencodeLocator>>,
+    /// The codex terminal-pane rollout locator (Lane B2): correlates a fresh
+    /// codex PTY's first Enter with the new rollout JSONL codex writes under
+    /// the sessions root — real codex materializes the file only at the first
+    /// user prompt, so the locator's windows are Enter-anchored (no spawn
+    /// window) — so the terminal can be bound to a session identity and
+    /// `terminal.rs`'s generic resume derivation can drive `codex resume <id>`
+    /// on restart. `None` when HOME/CODEX_HOME are unresolvable — every
+    /// [`crate::codex_association`] entry point no-ops in that case. Sibling
+    /// to `opencode_locator` (a provider-parameterized locator was explicitly
+    /// rejected there; same call here).
+    pub codex_locator: Option<Arc<freshell_sessions::codex_locator::CodexLocator>>,
+    /// TERM-15/TERM-16: the terminal-mode CLI activity hub (claude/codex/
+    /// amplifier trackers + the truly-idle gate + the amplifier events
+    /// lanes). `None` in unit tests that never exercise activity; always
+    /// `Some` on a real boot (`freshell-server` constructs it and installs
+    /// its registry observer). `*.activity.list` requests answer with empty
+    /// lists when `None` — same wire shape as "no busy terminals".
+    pub activity: Option<crate::activity::ActivityHub>,
+    /// P1.8: the durable pane-identity ledger (spec §4.2). Constructed once
+    /// in `freshell-server::main` (root `<home>/.freshell/pane-ledger`,
+    /// `PaneLedger::disabled()` when no home resolves) and shared with the
+    /// existence probe. Arc'd: identity events write it durably before they
+    /// are answered (async paths wrap the sync API in awaited spawn_blocking).
+    pub pane_ledger: std::sync::Arc<crate::pane_ledger::PaneLedger>,
+}
+
+/// The `/ws` sub-router, pre-bound to its state (mergeable into the server app).
+pub fn router(state: WsState) -> Router {
+    Router::new()
+        .route("/ws", get(ws_handler))
+        .with_state(state)
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
+    State(state): State<WsState>,
+) -> Response {
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    // SAFE-06: bound BOTH the frame size and the reassembled-message size to
+    // the same value (legacy's `ws` library only exposes one `maxPayload`
+    // knob, applied to the fully-reassembled message; this protocol never
+    // fragments a JSON frame across multiple WS frames, so a single shared
+    // bound is a faithful, simpler mapping). Applied on the upgrade itself so
+    // it governs every read on this connection, including the pre-handshake
+    // `hello` frame.
+    let max_payload = state.ws_max_payload_bytes;
+    ws.max_message_size(max_payload)
+        .max_frame_size(max_payload)
+        .on_upgrade(move |socket| handle_socket(socket, state, origin, host))
+}
+
+/// Constant-time byte-slice equality. Mirrors `auth.ts#timingSafeCompare`:
+/// unequal lengths short-circuit to `false`, equal lengths XOR-accumulate so the
+/// comparison time does not depend on WHERE the first mismatch is.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Current time as an ISO-8601 / RFC-3339 string with millisecond precision and
+/// a `Z` suffix — byte-shape-compatible with JS `new Date().toISOString()`.
+pub fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// The shared minimal-but-structurally-valid `ServerSettings` fixture every
+/// in-crate unit test seeds `WsState` from (the exact default tree is pinned
+/// by freshell-server's fixture test; here we only need SOMETHING to emit).
+/// Crate-visible so `terminal.rs` / `*_association.rs` / `codex_proxy_route.rs`
+/// test modules build from ONE literal instead of five byte-identical copies
+/// (hoisted when CFG-12 gave `WsState` a second settings-carrying field).
+#[cfg(test)]
+pub(crate) fn test_settings() -> ServerSettings {
+    serde_json::from_value(serde_json::json!({
+        "ai": {},
+        "codingCli": { "enabledProviders": [], "mcpServer": true, "providers": {} },
+        "editor": { "externalEditor": "auto" },
+        "extensions": { "disabled": [] },
+        "freshAgent": { "defaultPlugins": [], "enabled": false, "providers": {} },
+        "logging": { "debug": false },
+        "network": { "configured": true, "host": "127.0.0.1" },
+        "panes": { "defaultNewPane": "ask" },
+        "safety": { "autoKillIdleMinutes": 15 },
+        "sidebar": {
+            "autoGenerateTitles": true,
+            "excludeFirstChatMustStart": false,
+            "excludeFirstChatSubstrings": []
+        },
+        "terminal": { "scrollback": 10000 }
+    }))
+    .unwrap()
+}
+
+/// Run `f` on a repeating `interval` cadence, forever, on a spawned tokio task.
+/// The generic scheduling primitive behind `spawn_idle_monitor` -- split out so
+/// the ticker cadence itself (the actual new logic: a `tokio::time::interval`
+/// loop) is unit-testable with a fast interval + a plain counter, independent
+/// of any terminal-registry domain behavior (which
+/// `freshell_terminal::TerminalRegistry::enforce_idle_kills` already tests
+/// exhaustively).
+fn spawn_periodic(interval: std::time::Duration, mut f: impl FnMut() + Send + 'static) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            f();
+        }
+    });
+}
+
+/// Start the background idle-reaper task (TERM-11, `autoKillIdleMinutes`):
+/// legacy `startIdleMonitor` + `enforceIdleKills` (`terminal-registry.ts:1335-1425`),
+/// a 30s sweep cadence in production (`tr:1339`). Lives here, not
+/// `freshell-terminal` (deliberately tokio-free -- see that crate's module
+/// docs), for the same reason the WS keepalive ping ticker lives in
+/// `terminal.rs`: the periodic timer needs an async runtime.
+///
+/// Call once at boot (`freshell-server`'s `main`), after `TerminalRegistry::new()`
+/// and after seeding `registry.set_auto_kill_idle_minutes(settings.safety.auto_kill_idle_minutes)`
+/// from the loaded settings -- the registry itself owns the CURRENT threshold
+/// (`TerminalRegistry::auto_kill_idle_minutes`), so this sweep always reads
+/// whatever value was most recently set, with zero coupling to settings types.
+pub fn spawn_idle_monitor(
+    registry: freshell_terminal::TerminalRegistry,
+    sweep_interval: std::time::Duration,
+) {
+    spawn_periodic(sweep_interval, move || {
+        registry.enforce_idle_kills();
+    });
+}
+
+/// Build the ordered connect-handshake the original emits on a clean isolated
+/// boot. The `bootId` is shared by value between `ready` and `terminal.inventory`
+/// so both normalize to the same placeholder (the cross-message invariant).
+///
+/// `terminal.inventory.terminals` is sourced from the shared [`WsState::registry`]
+/// (`registry.list()`, `ws-handler.ts:1737-1745`): a reconnecting/second socket
+/// learns which PTYs are still alive so the SPA re-attaches to them instead of
+/// treating its persisted terminals as dead (`clearDeadTerminals` → recreate, which
+/// would lose scrollback). On a truly fresh boot the registry is empty, so this stays
+/// byte-identical to the clean-boot handshake the oracle's T0/determinism tiers pin.
+pub async fn build_handshake(state: &WsState) -> Vec<ServerMessage> {
+    build_handshake_with_capabilities(state, false, false, false).await
+}
+
+/// [`build_handshake`], parameterized on the connection's negotiated
+/// `hello.capabilities.paneReconcileV1` (reconciliation design §4.2): the
+/// `ready.capabilities` advertisement is emitted **only when the client's
+/// `hello` opted in** — today's frozen client doesn't, so that field stays
+/// omitted for it (frozen-client inertness). The handshake overall is no
+/// longer byte-for-byte identical to the pinned clean-boot shape: `ready`
+/// now always stamps `buildId`, an additive change old clients ignore as
+/// an unknown field.
+///
+/// CFG-12: `settings.updated` resolves [`WsState::handshake_settings`] — the
+/// LIVE tree — fresh on every call (one call per `/ws` connection), matching
+/// the original's per-connection snapshot provider. On a clean boot the lock
+/// contents equal the old frozen snapshot, so the emitted bytes are
+/// unchanged; what changes is that a PATCH committed after boot now reaches
+/// the NEXT connection.
+pub async fn build_handshake_with_capabilities(
+    state: &WsState,
+    pane_reconcile_v1: bool,
+    pane_reconcile_fresh_agent_v1: bool,
+    terminal_interest_v1: bool,
+) -> Vec<ServerMessage> {
+    let boot_id = state.boot_id.as_ref().clone();
+    let mut messages = vec![
+        ServerMessage::Ready(Ready {
+            timestamp: now_iso(),
+            boot_id: Some(boot_id.clone()),
+            server_instance_id: Some(state.server_instance_id.as_ref().clone()),
+            build_id: ready_build_id(),
+            capabilities: (pane_reconcile_v1
+                || pane_reconcile_fresh_agent_v1
+                || terminal_interest_v1)
+                .then_some(freshell_protocol::ReadyCapabilities {
+                    pane_reconcile_v1: pane_reconcile_v1.then_some(true),
+                    pane_reconcile_fresh_agent_v1: pane_reconcile_fresh_agent_v1.then_some(true),
+                    terminal_interest_v1: terminal_interest_v1.then_some(true),
+                }),
+        }),
+        ServerMessage::SettingsUpdated(SettingsUpdated {
+            settings: state.handshake_settings.read().await.clone(),
+        }),
+        ServerMessage::PerfLogging(PerfLogging { enabled: false }),
+    ];
+    // GAP1 (CFG-03 checklist follow-up): `config.fallback` slots in right
+    // after `perf.logging`, mirroring the original's exact ordering
+    // (`ws-handler.ts:1730-1735`: `settings.updated` -> `perf.logging` ->
+    // `config.fallback` -> `terminal.inventory`). Sent on EVERY connection
+    // this `build_handshake` call produces (called fresh per `/ws` upgrade
+    // in `handle_socket`), so a late-connecting client sees it too --
+    // exactly like the original's per-connection `sendHandshakeSnapshot`.
+    if let Some(config_fallback) = state.config_fallback.clone() {
+        messages.push(ServerMessage::ConfigFallback(config_fallback));
+    }
+    // STATE-SYNC FIX 1 increment 2a: stamp each inventory row with the
+    // canonical identity from the shared registry (create-time resume ids AND
+    // locator-associated ids both live there) -- the frozen client's
+    // reconnect reconcile loop (`src/App.tsx:976-985`) keys off this field
+    // and was dead code against this port while the rows hardcoded `None`
+    // (`crates/freshell-terminal/src/registry.rs` `inventory()`;
+    // `docs/plans/2026-07-19-state-sync-cartography.md` §1.4). Shell
+    // terminals have no identity entry and stay unstamped.
+    let mut terminals = state.registry.inventory();
+    for terminal in &mut terminals {
+        if terminal.session_ref.is_none() {
+            terminal.session_ref = state.identity.session_ref_for(&terminal.terminal_id);
+        }
+        if terminal.session_ref.is_none() {
+            // P1.8 (spec §4.2 reads + precedence): the ledger's bound rows
+            // are the durable second rung of the identity authority chain —
+            // consulted only when live process truth is absent.
+            terminal.session_ref = state
+                .pane_ledger
+                .bound_session_ref_for_terminal(&terminal.terminal_id);
+        }
+    }
+    messages.push(ServerMessage::TerminalInventory(TerminalInventory {
+        boot_id,
+        terminals,
+        // DEV-0008 closure (Task 18): ship the live (non-retired) metadata
+        // records, `ws-handler.ts:1737-1745`'s `terminalMeta:
+        // this.terminalMetadata.list()` -- a reconnecting client's pane
+        // headers re-hydrate their git/session badges from this snapshot.
+        terminal_meta: state.terminal_meta.list(crate::terminal::now_ms()),
+    }));
+    messages
+}
+
+/// Outcome of validating a `hello` frame. `Accept` carries no data; the reject
+/// arms carry the error to surface to the client before closing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HelloOutcome {
+    Accept,
+    /// Not a `hello` frame, or unparseable — the original closes NOT_AUTHENTICATED.
+    NotHello,
+    /// `protocolVersion != 10` — checked BEFORE the token (matches ws-handler.ts).
+    ProtocolMismatch,
+    /// Bad/missing token (constant-time compared).
+    BadToken,
+}
+
+/// Validate a parsed `hello` payload against the auth contract, in the original's
+/// order: it must be a `hello`, then `protocolVersion` must match, then the token
+/// must pass a constant-time compare.
+pub fn evaluate_hello(value: &serde_json::Value, expected_token: &str) -> HelloOutcome {
+    if value.get("type").and_then(|v| v.as_str()) != Some("hello") {
+        return HelloOutcome::NotHello;
+    }
+    // protocolVersion FIRST — a mismatch is reported before we ever look at auth.
+    if value.get("protocolVersion").and_then(|v| v.as_u64()) != Some(WS_PROTOCOL_VERSION as u64) {
+        return HelloOutcome::ProtocolMismatch;
+    }
+    let token = value.get("token").and_then(|v| v.as_str()).unwrap_or("");
+    if !constant_time_eq(token.as_bytes(), expected_token.as_bytes()) {
+        return HelloOutcome::BadToken;
+    }
+    HelloOutcome::Accept
+}
+
+async fn handle_socket(
+    mut socket: WebSocket,
+    state: WsState,
+    origin: Option<String>,
+    host: Option<String>,
+) {
+    // SAFE-03 Origin policy: evaluated BEFORE the first frame is even read, so
+    // a rejected connection observes zero session state (no ready/settings/
+    // terminal.inventory) — just an error frame + close. See [`crate::origin`]
+    // for why this is deliberate hardening beyond the (advisory-only) original.
+    let origin_decision =
+        crate::origin::evaluate_origin(origin.as_deref(), host.as_deref(), &state.allowed_origins);
+    if origin_decision == crate::origin::OriginDecision::Rejected {
+        let _ = send_error(&mut socket, ErrorCode::Unauthorized, "Origin not allowed").await;
+        let _ = close_with(&mut socket, CLOSE_ORIGIN_REJECTED, "Origin not allowed").await;
+        return;
+    }
+    // DIAG-01: the origin allowed-kind for the `ws.connection.established`
+    // event `terminal::run` emits once this connection is authenticated
+    // (Rejected already returned above, so only these two remain).
+    let origin_kind = match origin_decision {
+        crate::origin::OriginDecision::NoOrigin => "no_origin",
+        crate::origin::OriginDecision::Allowed => "allowed",
+        crate::origin::OriginDecision::Rejected => unreachable!("handled above"),
+    };
+
+    // Read the first client frame (the hello), skipping any control frames.
+    // SAFE-05: bounded by `hello_timeout_ms` (`ws-handler.ts:1167-1171` --
+    // `state.helloTimer = setTimeout(() => { if (!state.authenticated)
+    // ws.close(CLOSE_CODES.HELLO_TIMEOUT, 'Hello timeout') }, helloTimeoutMs)`).
+    // The original's timer starts the instant the connection opens and is
+    // cleared only once a VALID hello authenticates it (`ws-handler.ts:1856`);
+    // a connection that never sends anything, or that sends only control
+    // frames forever, must still be reaped -- so the deadline wraps the whole
+    // read-loop, not a single `recv()` call.
+    let hello_deadline = std::time::Duration::from_millis(state.hello_timeout_ms.max(1));
+    let first = match tokio::time::timeout(hello_deadline, async {
+        loop {
+            match socket.recv().await {
+                Some(Ok(Message::Text(text))) => break Some(text),
+                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
+                // Closed / binary / error before a hello — nothing to do.
+                _ => break None,
+            }
+        }
+    })
+    .await
+    {
+        Ok(Some(text)) => text,
+        Ok(None) => return,
+        Err(_elapsed) => {
+            // DIAG-01-style: no `connection_id` exists yet at this point (it's
+            // minted by `terminal::run` only after a successful handshake), so
+            // this logs without one -- matches the original, which likewise
+            // has no per-connection identity to report until `hello` succeeds.
+            tracing::warn!(reason = "hello_timeout", "ws.hello.rejected");
+            let _ = close_with(&mut socket, CLOSE_HELLO_TIMEOUT, "Hello timeout").await;
+            return;
+        }
+    };
+
+    let value: serde_json::Value = match serde_json::from_str(first.as_str()) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = send_error(&mut socket, ErrorCode::InvalidMessage, "Invalid JSON").await;
+            return;
+        }
+    };
+
+    // Subscribe to the broadcast bus BEFORE the handshake so a REST-driven broadcast
+    // can never slip through the window between "authenticated" and "streaming" (the
+    // oracle's capture socket must observe every fresh-agent broadcast).
+    let bcast_rx = state.broadcast_tx.subscribe();
+
+    match evaluate_hello(&value, &state.auth_token) {
+        HelloOutcome::Accept => {}
+        HelloOutcome::NotHello => {
+            // DIAG-01: `reason` only -- a `NotHello` frame couldn't have
+            // carried a valid token anyway, but we never touch the field.
+            tracing::warn!(reason = "not_hello", "ws.hello.rejected");
+            let _ = send_error(&mut socket, ErrorCode::NotAuthenticated, "Send hello first").await;
+            let _ = close_with(&mut socket, CLOSE_NOT_AUTHENTICATED, "Invalid token").await;
+            return;
+        }
+        HelloOutcome::ProtocolMismatch => {
+            tracing::warn!(reason = "protocol_mismatch", "ws.hello.rejected");
+            let msg =
+                format!("Expected protocol version {WS_PROTOCOL_VERSION}. Please reload the page.");
+            let _ = send_error(&mut socket, ErrorCode::ProtocolMismatch, &msg).await;
+            // S3: the original closes with a real WS close frame (code 4010,
+            // reason "Protocol version mismatch") \u2014 without it the client only
+            // observes an abnormal 1006 closure.
+            let _ = close_with(
+                &mut socket,
+                CLOSE_PROTOCOL_MISMATCH,
+                "Protocol version mismatch",
+            )
+            .await;
+            return;
+        }
+        HelloOutcome::BadToken => {
+            // DIAG-01: `reason` only -- covers both a wrong AND a missing
+            // token (both evaluate to `BadToken`); the presented value is
+            // NEVER logged, whether it was right, wrong, or absent.
+            tracing::warn!(reason = "bad_token", "ws.hello.rejected");
+            let _ = send_error(&mut socket, ErrorCode::NotAuthenticated, "Invalid token").await;
+            // S3: covers both a wrong AND a missing token (both evaluate to
+            // `BadToken`) \u2014 the original closes 4001 "Invalid token" in both cases.
+            let _ = close_with(&mut socket, CLOSE_NOT_AUTHENTICATED, "Invalid token").await;
+            return;
+        }
+    }
+
+    // Reconciliation handshake negotiation (§4.1/§4.2): the `ready`
+    // advertisement is gated on the client's `hello` opt-in, so a frozen
+    // client's handshake stays byte-for-byte unchanged.
+    let pane_reconcile_v1 = value
+        .get("capabilities")
+        .and_then(|c| c.get("paneReconcileV1"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Fresh-agent restart resilience: same opt-in gate as `paneReconcileV1`,
+    // for the fresh-agent verdict families. The frozen client never sends it,
+    // so its handshake stays byte-for-byte unchanged.
+    let pane_reconcile_fresh_agent_v1 = value
+        .get("capabilities")
+        .and_then(|c| c.get("paneReconcileFreshAgentV1"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let terminal_interest_v1 = value
+        .get("capabilities")
+        .and_then(|caps| caps.get("terminalInterestV1"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    // Authenticated: emit the ordered handshake. CFG-12: the builder is
+    // async + per-connection so its `settings.updated` frame resolves the
+    // LIVE settings tree (see `build_handshake_with_capabilities`).
+    for msg in build_handshake_with_capabilities(
+        &state,
+        pane_reconcile_v1,
+        pane_reconcile_fresh_agent_v1,
+        terminal_interest_v1,
+    )
+    .await
+    {
+        let json = match serde_json::to_string(&msg) {
+            Ok(json) => json,
+            Err(_) => return,
+        };
+        if socket.send(Message::Text(json.into())).await.is_err() {
+            return;
+        }
+    }
+
+    // Capability negotiation (`ws-handler.ts:1846-1848`): the connection's
+    // `hello.capabilities.terminalOutputBatchV1` gates whether its terminal output is
+    // framed as `terminal.output.batch` (on) or legacy `terminal.output` (off, default).
+    let terminal_output_batch_v1 = value
+        .get("capabilities")
+        .and_then(|c| c.get("terminalOutputBatchV1"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // `capabilities.uiScreenshotV1` (`ws-handler.ts:1846`) marks this socket as able
+    // to answer a `screenshot.capture` command. `terminal::run` registers the
+    // connection's id + direct sink for its lifetime, allowing restore to bind both
+    // tab delivery and acknowledgement to this exact socket.
+    let ui_screenshot_v1 = value
+        .get("capabilities")
+        .and_then(|c| c.get("uiScreenshotV1"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // D8 (restore-open-sessions-only): the connection's client identity rides
+    // the `hello` frame as additive optional top-level fields (older clients
+    // omit them; an absent hello identity simply leaves ledger rows
+    // unstamped). Read from the raw payload exactly like the capability bools
+    // above; `tabs.sync.push` frames refresh it inside the serve loop.
+    let conn_identity = terminal::ConnectionIdentity {
+        device_id: value
+            .get("deviceId")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        client_instance_id: value
+            .get("clientInstanceId")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+    };
+    // Handshake done: serve the terminal.* shell path (and fan out broadcast-bus
+    // frames) until the client closes.
+    terminal::run(
+        socket,
+        &state,
+        bcast_rx,
+        terminal_output_batch_v1,
+        ui_screenshot_v1,
+        pane_reconcile_v1,
+        pane_reconcile_fresh_agent_v1,
+        origin_kind,
+        conn_identity,
+        terminal_interest_v1,
+    )
+    .await;
+}
+
+/// WS close codes (`ws-handler.ts`'s `CLOSE_CODES`). S3: the original always
+/// follows an auth/protocol reject error frame with a real close frame carrying
+/// one of these codes + a short reason; the port previously just dropped the
+/// connection, which a client observes as an abnormal `1006` closure.
+const CLOSE_NOT_AUTHENTICATED: u16 = 4001;
+/// SAFE-05: `ws-handler.ts:255` `HELLO_TIMEOUT: 4002` -- a connection that
+/// never completes `hello` within `hello_timeout_ms` is closed with this code.
+const CLOSE_HELLO_TIMEOUT: u16 = 4002;
+const CLOSE_PROTOCOL_MISMATCH: u16 = 4010;
+/// SAFE-03: a NEW code (4011) -- the original has no Origin-rejection close
+/// code at all (its Origin handling never rejects, see [`crate::origin`]), so
+/// this doesn't collide with any of `server/ws-handler.ts`'s `CLOSE_CODES`
+/// (4001/4002/4003/4008/4009/4010).
+const CLOSE_ORIGIN_REJECTED: u16 = 4011;
+
+/// Send a WS close frame with the given code/reason, best-effort (the socket
+/// may already be gone).
+async fn close_with(
+    socket: &mut WebSocket,
+    code: u16,
+    reason: &'static str,
+) -> Result<(), axum::Error> {
+    use axum::extract::ws::CloseFrame;
+    socket
+        .send(Message::Close(Some(CloseFrame {
+            code,
+            reason: reason.into(),
+        })))
+        .await
+}
+
+/// Best-effort structured error (used only on the non-graded reject paths). The
+/// happy path never sends an error; the client closes the socket itself.
+async fn send_error(
+    socket: &mut WebSocket,
+    code: ErrorCode,
+    message: &str,
+) -> Result<(), axum::Error> {
+    let msg = ServerMessage::Error(ErrorMsg {
+        code,
+        message: message.to_string(),
+        timestamp: now_iso(),
+        actual_session_ref: None,
+        expected_session_ref: None,
+        request_id: None,
+        retry_after_ms: None,
+        terminal_exit_code: None,
+        terminal_id: None,
+        live_terminal_id: None,
+    });
+    match serde_json::to_string(&msg) {
+        Ok(json) => socket.send(Message::Text(json.into())).await,
+        Err(_) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_ws_state() -> WsState {
+    let auth_token = Arc::new("s3cr3t-token-abcdef".to_string());
+    let broadcast_tx = Arc::new(tokio::sync::broadcast::channel::<String>(16).0);
+    WsState {
+        pane_ledger: std::sync::Arc::new(crate::pane_ledger::PaneLedger::disabled()),
+        layout: Default::default(),
+        identity: crate::identity::TerminalIdentityRegistry::new(),
+        terminal_meta: Default::default(),
+        auth_token: Arc::clone(&auth_token),
+        server_instance_id: Arc::new("srv-1111".to_string()),
+        boot_id: Arc::new("boot-2222".to_string()),
+        settings: Arc::new(test_settings()),
+        handshake_settings: Arc::new(tokio::sync::RwLock::new(test_settings())),
+        broadcast_tx: Arc::clone(&broadcast_tx),
+        auto_resume_tx: tokio::sync::mpsc::unbounded_channel().0,
+        auto_resume_cancels: Default::default(),
+        fresh_codex: freshell_freshagent::FreshCodexState::new(
+            Arc::clone(&auth_token),
+            Arc::clone(&broadcast_tx),
+            serde_json::json!({ "freshAgent": { "enabled": false } }),
+        ),
+        fresh_claude: freshell_freshagent::FreshClaudeState::new(Arc::clone(&broadcast_tx)),
+        fresh_opencode: freshell_freshagent::FreshOpencodeState::new(
+            freshell_freshagent::FreshAgentState::new(auth_token, Arc::clone(&broadcast_tx)),
+        ),
+        registry: freshell_terminal::TerminalRegistry::new(),
+        shutdown: Arc::new(tokio::sync::Notify::new()),
+        tabs: crate::tabs::TabsRegistry::new(),
+        screenshots: crate::screenshot::ScreenshotBroker::new(broadcast_tx),
+        subagent_interest: Default::default(),
+        host_stats: Default::default(),
+        terminals_revision: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        sessions_revision: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        cli_commands: Arc::new(Vec::new()),
+        ping_interval_ms: 30_000,
+        hello_timeout_ms: 5_000,
+        allowed_origins: Arc::new(crate::origin::default_allowed_origins()),
+        ws_max_payload_bytes: 16 * 1024 * 1024,
+        term09: crate::backpressure::Term09Config::default(),
+        create_protect: crate::create_limit::CreateProtectConfig::default(),
+        spawn_gate: std::sync::Arc::new(crate::spawn_gate::SpawnGate::new(4, 64)),
+        shutdown_started: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        create_dedupe: std::sync::Arc::new(crate::create_dedupe::CreateDedupe::default()),
+        config_fallback: None,
+        opencode_locator: None,
+        codex_locator: None,
+        activity: None,
+        session_existence: std::sync::Arc::new(crate::existence::NoIndexProbe::default()),
+        reconcile_deferral_budget_ms: crate::reconcile::RECONCILE_DEFERRAL_BUDGET_MS_DEFAULT,
+        fresh_agent_respawn_counts: Default::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn state() -> WsState {
+        test_ws_state()
+    }
+
+    #[test]
+    fn constant_time_eq_matches_semantics() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"abcd")); // length mismatch
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn now_iso_is_iso8601_millis_z() {
+        let ts = now_iso();
+        // yyyy-mm-ddThh:mm:ss.mmmZ
+        assert!(ts.contains('T'), "{ts}");
+        assert!(ts.ends_with('Z'), "{ts}");
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[10..11], "T");
+    }
+
+    #[test]
+    fn evaluate_hello_checks_version_before_token() {
+        // Wrong version AND wrong token -> version wins (checked first).
+        let v = json!({ "type": "hello", "protocolVersion": 6, "token": "nope" });
+        assert_eq!(
+            evaluate_hello(&v, "s3cr3t-token-abcdef"),
+            HelloOutcome::ProtocolMismatch
+        );
+
+        // Right version, wrong token.
+        let v = json!({ "type": "hello", "protocolVersion": WS_PROTOCOL_VERSION, "token": "nope" });
+        assert_eq!(
+            evaluate_hello(&v, "s3cr3t-token-abcdef"),
+            HelloOutcome::BadToken
+        );
+
+        // Right version, right token.
+        let v = json!({ "type": "hello", "protocolVersion": WS_PROTOCOL_VERSION, "token": "s3cr3t-token-abcdef" });
+        assert_eq!(
+            evaluate_hello(&v, "s3cr3t-token-abcdef"),
+            HelloOutcome::Accept
+        );
+
+        // Not a hello.
+        let v = json!({ "type": "ping" });
+        assert_eq!(
+            evaluate_hello(&v, "s3cr3t-token-abcdef"),
+            HelloOutcome::NotHello
+        );
+    }
+
+    /// Reconciliation §4.2: the `ready.capabilities` advertisement is emitted
+    /// ONLY for a hello that opted in — the default handshake stays
+    /// byte-identical to the pinned clean-boot shape (frozen-client inertness
+    /// at the source).
+    #[tokio::test]
+    async fn handshake_advertises_pane_reconcile_only_when_negotiated() {
+        let s = state();
+        let negotiated = build_handshake_with_capabilities(&s, true, false, false).await;
+        let ready = serde_json::to_value(&negotiated[0]).unwrap();
+        assert_eq!(
+            ready["capabilities"],
+            serde_json::json!({ "paneReconcileV1": true })
+        );
+
+        let default = build_handshake(&s).await;
+        let ready = serde_json::to_value(&default[0]).unwrap();
+        assert!(
+            ready.get("capabilities").is_none(),
+            "non-negotiating hello must not change ready's shape: {ready}"
+        );
+        // Same shape as an explicit `false` negotiation.
+        let unnegotiated = build_handshake_with_capabilities(&s, false, false, false).await;
+        let ready2 = serde_json::to_value(&unnegotiated[0]).unwrap();
+        assert!(ready2.get("capabilities").is_none());
+    }
+
+    #[tokio::test]
+    async fn handshake_is_ordered_with_shared_bootid() {
+        let msgs = build_handshake(&state()).await;
+        let wire: Vec<serde_json::Value> = msgs
+            .iter()
+            .map(|m| serde_json::to_value(m).unwrap())
+            .collect();
+
+        let types: Vec<&str> = wire.iter().map(|v| v["type"].as_str().unwrap()).collect();
+        assert_eq!(
+            types,
+            vec![
+                "ready",
+                "settings.updated",
+                "perf.logging",
+                "terminal.inventory"
+            ]
+        );
+
+        // ready carries the boot-scoped ids + an ISO timestamp.
+        assert_eq!(wire[0]["serverInstanceId"], "srv-1111");
+        assert_eq!(wire[0]["bootId"], "boot-2222");
+        assert!(wire[0]["timestamp"].as_str().unwrap().contains('T'));
+
+        // perf.logging is disabled by default.
+        assert_eq!(wire[2]["enabled"], json!(false));
+
+        // terminal.inventory is empty and its bootId is BYTE-IDENTICAL to ready.
+        assert_eq!(wire[3]["bootId"], wire[0]["bootId"]);
+        assert_eq!(wire[3]["terminals"], json!([]));
+        assert_eq!(wire[3]["terminalMeta"], json!([]));
+    }
+
+    /// The handshake `ready` stamps the build identity baked into THIS crate
+    /// by its `build.rs` (`FRESHELL_WS_BUILD_COMMIT`, the git commit the
+    /// binary was built from) so the browser client can detect a client/
+    /// server build mismatch and reload once. Never absent on the wire from
+    /// a real server: the baked value is always `Some` (sha or `"unknown"`).
+    #[tokio::test]
+    async fn handshake_ready_stamps_build_id() {
+        let msgs = build_handshake(&state()).await;
+        let ready = serde_json::to_value(&msgs[0]).unwrap();
+        assert!(
+            ready.get("buildId").is_some(),
+            "ready must stamp buildId: {ready}"
+        );
+        let build_id = ready["buildId"].as_str().expect("buildId is a string");
+        assert!(
+            !build_id.is_empty(),
+            "buildId must be non-empty: {build_id}"
+        );
+    }
+
+    /// GAP1 (CFG-03 checklist follow-up) RED/GREEN target: when boot fell
+    /// back, `config.fallback` slots into the ordered handshake right after
+    /// `perf.logging` and before `terminal.inventory` -- mirrors the
+    /// original's exact ordering (`ws-handler.ts:1730-1735`).
+    #[tokio::test]
+    async fn handshake_includes_config_fallback_when_boot_fell_back_and_in_correct_order() {
+        let mut s = state();
+        s.config_fallback = Some(freshell_protocol::ConfigFallback {
+            reason: freshell_protocol::ConfigFallbackReason::ParseError,
+            backup_exists: true,
+        });
+        let msgs = build_handshake(&s).await;
+        let wire: Vec<serde_json::Value> = msgs
+            .iter()
+            .map(|m| serde_json::to_value(m).unwrap())
+            .collect();
+        let types: Vec<&str> = wire.iter().map(|v| v["type"].as_str().unwrap()).collect();
+        assert_eq!(
+            types,
+            vec![
+                "ready",
+                "settings.updated",
+                "perf.logging",
+                "config.fallback",
+                "terminal.inventory"
+            ]
+        );
+        assert_eq!(wire[3]["reason"], "PARSE_ERROR");
+        assert_eq!(wire[3]["backupExists"], true);
+    }
+
+    /// GAP1: a healthy boot (no fallback) must NOT inject a `config.fallback`
+    /// frame at all -- the clean-boot handshake shape must stay byte-
+    /// identical to before this fix (proves `handshake_is_ordered_with_
+    /// shared_bootid` above, asserting the 4-message shape, keeps passing
+    /// unchanged).
+    #[tokio::test]
+    async fn handshake_omits_config_fallback_when_boot_was_healthy() {
+        let msgs = build_handshake(&state()).await;
+        assert!(
+            !msgs
+                .iter()
+                .any(|m| matches!(m, ServerMessage::ConfigFallback(_))),
+            "a healthy boot must never emit a config.fallback frame"
+        );
+    }
+
+    /// GAP1 late-connect delivery: `build_handshake` is called fresh on
+    /// EVERY `/ws` connection (`handle_socket` -> `sendHandshakeSnapshot`
+    /// equivalent), so a client that connects long after boot still
+    /// receives the SAME notice as the first connection -- this is how the
+    /// original achieves late-connect delivery too (per-connection
+    /// `sendHandshakeSnapshot`, `ws-handler.ts:1723-1749`, recomputed on
+    /// every hello rather than broadcast once at boot).
+    #[tokio::test]
+    async fn handshake_delivers_config_fallback_identically_across_multiple_connections() {
+        let mut s = state();
+        s.config_fallback = Some(freshell_protocol::ConfigFallback {
+            reason: freshell_protocol::ConfigFallbackReason::Enoent,
+            backup_exists: false,
+        });
+
+        let first_connection = build_handshake(&s).await;
+        // Simulate a client connecting much later: with no settings mutation
+        // between connections, the live resolution produces an identical
+        // handshake on a second, independent call.
+        let late_connection = build_handshake(&s).await;
+
+        // DEFLAKE (f3wp): `ready.timestamp` is wall-clock at build time, so
+        // two handshakes built across a millisecond boundary legitimately
+        // differ in that one field (flipped twice under cargo-workspace
+        // load: left/right identical except `.725Z` vs `.726Z`). Neutralize
+        // ONLY the timestamp; every other field must still match exactly.
+        // Assert the timestamp is RFC3339-parseable BEFORE blanking it below --
+        // otherwise a malformed/missing timestamp would silently pass through
+        // the "<normalized>" substitution instead of failing the test.
+        if let Some(ServerMessage::Ready(r)) = first_connection
+            .iter()
+            .find(|m| matches!(m, ServerMessage::Ready(_)))
+        {
+            chrono::DateTime::parse_from_rfc3339(&r.timestamp)
+                .expect("ready.timestamp must be RFC3339-parseable");
+        }
+        let normalize = |msgs: Vec<ServerMessage>| -> Vec<ServerMessage> {
+            msgs.into_iter()
+                .map(|m| match m {
+                    ServerMessage::Ready(mut r) => {
+                        r.timestamp = String::from("<normalized>");
+                        ServerMessage::Ready(r)
+                    }
+                    other => other,
+                })
+                .collect()
+        };
+        let late_connection = normalize(late_connection);
+        assert_eq!(normalize(first_connection), late_connection);
+        assert!(
+            late_connection
+                .iter()
+                .any(|m| matches!(m, ServerMessage::ConfigFallback(_))),
+            "a late-connecting client must still receive the config.fallback notice"
+        );
+    }
+
+    /// CFG-12 RED/GREEN target: the handshake's `settings.updated` frame
+    /// resolves the LIVE settings tree per connection (the original's
+    /// per-connection `handshakeSnapshotProvider` awaits
+    /// `configStore.getSettings()` on EVERY `/ws` hello, `server/index.ts:
+    /// 415-427` + `ws-handler.ts:1815-1845`). A settings write committed
+    /// after boot (the PATCH path's committed value) must reach the NEXT
+    /// connection's handshake; a boot-frozen snapshot would leave every
+    /// later (re)connecting client resolving the pre-PATCH tree, and the
+    /// client's last-write-wins application of that frame erases the correct
+    /// value it already learned from `/api/bootstrap`.
+    #[tokio::test]
+    async fn handshake_settings_updated_reflects_live_writes_between_connections() {
+        let s = state();
+        let settings_of = |msgs: &Vec<ServerMessage>| -> serde_json::Value {
+            serde_json::to_value(
+                msgs.iter()
+                    .find_map(|m| match m {
+                        ServerMessage::SettingsUpdated(u) => Some(u),
+                        _ => None,
+                    })
+                    .expect("handshake carries settings.updated"),
+            )
+            .unwrap()
+        };
+
+        let first = build_handshake(&s).await;
+        assert!(
+            settings_of(&first)["settings"].get("defaultCwd").is_none(),
+            "the clean-boot fixture has no defaultCwd"
+        );
+
+        // The PATCH-committed write lands in the SAME live tree the handshake
+        // reads (freshell-server wires `SettingsStore::shared_settings_lock()`
+        // here -- one lock, no copies).
+        s.handshake_settings.write().await.default_cwd = Some("/tmp/shared-cwd".to_string());
+
+        let second = build_handshake(&s).await;
+        assert_eq!(
+            settings_of(&second)["settings"]["defaultCwd"],
+            json!("/tmp/shared-cwd"),
+            "a later connection's handshake must resolve the live tree, not the boot snapshot"
+        );
+
+        // Boundary pin (CFG-06 ownership): the create-time view stays
+        // boot-scoped -- `terminal.rs`'s create derivations keep reading the
+        // frozen field; merging the two fields is CFG-06's separate,
+        // per-consumer-proven move, not a side effect of this fix.
+        assert!(
+            s.settings.default_cwd.is_none(),
+            "the frozen create-time settings view must NOT follow the live lock"
+        );
+    }
+
+    // `spawn_periodic` (TERM-11 idle-reaper scheduling primitive): proves the
+    // REAL tokio ticker cadence, decoupled from `enforce_idle_kills`' domain
+    // logic (already exhaustively unit-tested in `freshell-terminal`).
+
+    #[tokio::test(start_paused = true)]
+    async fn spawn_periodic_invokes_callback_on_every_tick() {
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count2 = std::sync::Arc::clone(&count);
+        spawn_periodic(std::time::Duration::from_millis(10), move || {
+            count2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        // Paused tokio time: advance deterministically instead of sleeping wall
+        // time. Five 10ms ticks elapse; `tokio::time::advance` also yields so
+        // the spawned task actually runs between ticks.
+        for _ in 0..5 {
+            tokio::time::advance(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::task::yield_now().await;
+
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 5);
+    }
+}

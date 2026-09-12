@@ -1,0 +1,193 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Provider } from 'react-redux'
+import { configureStore } from '@reduxjs/toolkit'
+import { render, screen, waitFor, cleanup } from '@testing-library/react'
+import App from '@/App'
+import settingsReducer, { defaultSettings } from '@/store/settingsSlice'
+import tabsReducer from '@/store/tabsSlice'
+import connectionReducer from '@/store/connectionSlice'
+import sessionsReducer from '@/store/sessionsSlice'
+import panesReducer from '@/store/panesSlice'
+import tabRegistryReducer from '@/store/tabRegistrySlice'
+import { networkReducer } from '@/store/networkSlice'
+import {
+  composeResolvedSettings,
+  createDefaultServerSettings,
+  resolveLocalSettings,
+} from '@shared/settings'
+
+const wsMocks = vi.hoisted(() => ({
+  send: vi.fn(),
+  connect: vi.fn().mockResolvedValue(undefined),
+  onMessage: vi.fn(() => () => {}),
+  // Interest is transient and negotiated; this suite does not exercise it.
+  sendTerminalInterest: vi.fn(() => false),
+  onReconnect: vi.fn(() => () => {}),
+  setHelloExtensionProvider: vi.fn(),
+}))
+
+const apiGet = vi.hoisted(() => vi.fn())
+
+vi.mock('@/lib/ws-client', () => ({
+  getWsClient: () => ({
+    send: wsMocks.send,
+    connect: wsMocks.connect,
+    sendTerminalInterest: wsMocks.sendTerminalInterest,
+    onMessage: wsMocks.onMessage,
+    onReconnect: wsMocks.onReconnect,
+    setHelloExtensionProvider: wsMocks.setHelloExtensionProvider,
+  }),
+}))
+
+vi.mock('@/lib/api', () => ({
+  getRecoveryInventory: async () => ({ recoverable: false, contentId: 'test', device: null, otherDevices: [], ledgerOnly: [] }),
+  api: {
+    get: (url: string) => apiGet(url),
+    patch: vi.fn().mockResolvedValue({}),
+    post: vi.fn().mockResolvedValue({}),
+  },
+  isApiUnauthorizedError: (err: unknown) => !!err && typeof err === 'object' && (err as { status?: number }).status === 401,
+  isTransientRequestFailure: (err: unknown) =>
+    !!err &&
+    ((err as Error).name === 'NetworkError' ||
+      (err as Error).name === 'AbortError' ||
+      [502, 503, 504].includes((err as { status?: number }).status as number)),
+}))
+
+vi.mock('@/components/Sidebar', () => ({
+  default: () => <div data-testid="mock-sidebar">Sidebar</div>,
+  AppView: {} as never,
+}))
+vi.mock('@/components/TabContent', () => ({
+  default: () => <div data-testid="mock-tab-content">Tab Content</div>,
+}))
+vi.mock('@/components/HistoryView', () => ({
+  default: () => <div data-testid="mock-history-view">History View</div>,
+}))
+vi.mock('@/components/SettingsView', () => ({
+  default: () => <div data-testid="mock-settings-view">Settings View</div>,
+}))
+vi.mock('@/components/OverviewView', () => ({
+  default: () => <div data-testid="mock-overview-view">Overview View</div>,
+}))
+vi.mock('@/components/SetupWizard', () => ({
+  SetupWizard: () => <div data-testid="mock-setup-wizard">Setup Wizard</div>,
+}))
+vi.mock('@/hooks/useTheme', () => ({
+  useThemeEffect: () => undefined,
+}))
+
+function createStore() {
+  const serverSettings = createDefaultServerSettings({
+    loggingDebug: defaultSettings.logging.debug,
+  })
+  const localSettings = resolveLocalSettings()
+
+  return configureStore({
+    reducer: {
+      settings: settingsReducer,
+      tabs: tabsReducer,
+      connection: connectionReducer,
+      sessions: sessionsReducer,
+      panes: panesReducer,
+      tabRegistry: tabRegistryReducer,
+      network: networkReducer,
+    },
+    middleware: (getDefault) =>
+      getDefault({
+        serializableCheck: {
+          ignoredPaths: ['sessions.expandedProjects'],
+        },
+      }),
+    preloadedState: {
+      settings: {
+        serverSettings,
+        localSettings,
+        settings: composeResolvedSettings(serverSettings, localSettings),
+        loaded: false,
+        lastSavedAt: undefined,
+      },
+      tabs: {
+        tabs: [{ id: 'tab-1', title: 'Tab 1', mode: 'shell', createRequestId: 'tab-1', status: 'creating' }],
+        activeTabId: 'tab-1',
+      },
+      connection: {
+        status: 'disconnected' as const,
+        lastError: undefined,
+      },
+      sessions: {
+        projects: [],
+        expandedProjects: new Set<string>(),
+        wsSnapshotReceived: false,
+        isLoading: false,
+        error: null,
+      },
+      panes: {
+        layouts: {},
+        activePane: {},
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      },
+      tabRegistry: {
+        deviceId: 'device-test',
+        deviceLabel: 'device-test',
+        deviceAliases: {},
+        dismissedDeviceIds: [],
+        localOpen: [],
+        remoteOpen: [],
+        closed: [],
+        localClosed: {},
+        searchRangeDays: 30,
+        loading: false,
+      },
+      network: {
+        status: null,
+        loading: false,
+        configuring: false,
+        error: null,
+      },
+    },
+  })
+}
+
+function readPerfAuditSnapshot() {
+  return window.__FRESHELL_TEST_HARNESS__?.getPerfAuditSnapshot() ?? null
+}
+
+describe('App perf audit milestones', () => {
+  beforeEach(() => {
+    cleanup()
+    window.history.replaceState({}, '', '/?e2e=1&perfAudit=1')
+    apiGet.mockReset()
+    wsMocks.connect.mockClear()
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/bootstrap') {
+        return Promise.reject({ status: 401, message: 'Unauthorized' })
+      }
+      return Promise.resolve({})
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    window.history.replaceState({}, '', '/')
+  })
+
+  it('marks auth-required visibility when the auth modal is shown in perf-audit mode', async () => {
+    render(
+      <Provider store={createStore()}>
+        <App />
+      </Provider>,
+    )
+
+    expect(await screen.findByText(/authentication required/i)).toBeVisible()
+
+    await waitFor(() => {
+      expect(readPerfAuditSnapshot()?.milestones['app.auth_required_visible']).toBeTypeOf('number')
+    })
+  })
+})

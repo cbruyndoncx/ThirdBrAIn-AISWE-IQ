@@ -1,0 +1,21 @@
+{
+  "name": "opencode",
+  "version": "1.0.0",
+  "label": "OpenCode",
+  "description": "OpenCode CLI agent",
+  "category": "cli",
+  "cli": {
+    "command": "opencode",
+    "envVar": "OPENCODE_CMD",
+    "resumeArgs": ["--session", "{{sessionId}}"],
+    "modelArgs": ["--model", "{{model}}"],
+    "supportsModel": true,
+    "terminalBehavior": {
+      "preferredRenderer": "canvas",
+      "scrollInputPolicy": "native"
+    }
+  },
+  "picker": {
+    "group": "agents"
+  }
+}

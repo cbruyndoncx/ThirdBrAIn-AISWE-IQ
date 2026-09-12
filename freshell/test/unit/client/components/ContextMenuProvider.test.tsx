@@ -1,0 +1,3034 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { act, render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { configureStore } from '@reduxjs/toolkit'
+import { Provider } from 'react-redux'
+
+import tabsReducer from '@/store/tabsSlice'
+import panesReducer, { initLayout, updatePaneContent } from '@/store/panesSlice'
+import sessionsReducer, { commitSessionWindowVisibleRefresh } from '@/store/sessionsSlice'
+import connectionReducer from '@/store/connectionSlice'
+import settingsReducer from '@/store/settingsSlice'
+import extensionsReducer from '@/store/extensionsSlice'
+import tabRecencyReducer from '@/store/tabRecencySlice'
+import freshAgentReducer, { sessionInit } from '@/store/freshAgentSlice'
+import tabRegistryReducer, { setTabRegistrySnapshot } from '@/store/tabRegistrySlice'
+import { terminalDetachMiddleware } from '@/store/terminalDetachMiddleware'
+import { ContextMenuProvider } from '@/components/context-menu/ContextMenuProvider'
+import { registerFreshAgentTurnItems } from '@/lib/pane-action-registry'
+import type { ClientExtensionEntry } from '@shared/extension-types'
+
+const defaultCliExtensions: ClientExtensionEntry[] = [
+  {
+    name: 'claude', version: '1.0.0', label: 'Claude CLI', description: '', category: 'cli',
+    picker: { shortcut: 'L' },
+    cli: { supportsPermissionMode: true, supportsResume: true, resumeCommandTemplate: ['claude', '--resume', '{{sessionId}}'] },
+  },
+  {
+    name: 'codex', version: '1.0.0', label: 'Codex CLI', description: '', category: 'cli',
+    picker: { shortcut: 'X' },
+    cli: { supportsModel: true, supportsSandbox: true, supportsResume: true, resumeCommandTemplate: ['codex', 'resume', '{{sessionId}}'] },
+  },
+  {
+    name: 'opencode', version: '1.0.0', label: 'OpenCode CLI', description: '', category: 'cli',
+    picker: { shortcut: 'O' },
+    cli: { supportsResume: true, resumeCommandTemplate: ['opencode', 'run', '--session', '{{sessionId}}'] },
+  },
+]
+import { ContextIds } from '@/components/context-menu/context-menu-constants'
+import TabBar from '@/components/TabBar'
+import Pane from '@/components/panes/Pane'
+
+const clipboardMocks = vi.hoisted(() => ({
+  copyText: vi.fn().mockResolvedValue(undefined),
+}))
+
+const wsMocks = vi.hoisted(() => {
+  const handlers = new Set<(msg: unknown) => void>()
+  return {
+    send: vi.fn(),
+    connect: vi.fn().mockResolvedValue(undefined),
+    handlers,
+    onMessage: vi.fn((handler: (msg: unknown) => void) => {
+      handlers.add(handler)
+      return () => {
+        handlers.delete(handler)
+      }
+    }),
+    onReconnect: vi.fn().mockReturnValue(() => {}),
+    setHelloExtensionProvider: vi.fn(),
+  }
+})
+
+/** Answer every in-flight pane.closed with a success result (delta-r7-r3, F2: the healthy-server close acknowledgment). */
+function ackPendingPaneCloses() {
+  for (const [msg] of wsMocks.send.mock.calls) {
+    const m = msg as { type?: string; createRequestId?: string }
+    if (m?.type === 'pane.closed' && m.createRequestId) {
+      for (const handler of [...wsMocks.handlers]) {
+        handler({ type: 'pane.closed.result', createRequestId: m.createRequestId, success: true })
+      }
+    }
+  }
+}
+
+/** Answer every in-flight kill the provider sent with a successful durable close. */
+function ackPendingKills() {
+  for (const [msg] of wsMocks.send.mock.calls) {
+    const m = msg as { type?: string; requestId?: string; terminalId?: string; sessionId?: string; sessionType?: string; provider?: string }
+    if (m?.type === 'terminal.kill' && m.requestId && m.terminalId) {
+      for (const handler of [...wsMocks.handlers]) {
+        handler({ type: 'terminal.killed', requestId: m.requestId, terminalId: m.terminalId, success: true })
+      }
+    }
+    if (m?.type === 'freshAgent.kill' && m.sessionId) {
+      for (const handler of [...wsMocks.handlers]) {
+        handler({
+          type: 'freshAgent.killed',
+          sessionId: m.sessionId,
+          sessionType: m.sessionType,
+          provider: m.provider,
+          success: true,
+        })
+      }
+    }
+  }
+}
+
+const apiMocks = vi.hoisted(() => ({
+  get: vi.fn().mockResolvedValue([]),
+  post: vi.fn().mockResolvedValue({}),
+  patch: vi.fn().mockResolvedValue({}),
+  put: vi.fn().mockResolvedValue({}),
+  delete: vi.fn().mockResolvedValue({}),
+  setSessionMetadata: vi.fn().mockResolvedValue(undefined),
+}))
+
+vi.mock('@/lib/ws-client', () => ({
+  getWsClient: () => wsMocks,
+}))
+
+vi.mock('@/lib/api', () => ({
+  api: {
+    get: apiMocks.get,
+    post: apiMocks.post,
+    patch: apiMocks.patch,
+    put: apiMocks.put,
+    delete: apiMocks.delete,
+  },
+  setSessionMetadata: apiMocks.setSessionMetadata,
+}))
+
+vi.mock('@/lib/clipboard', () => ({
+  copyText: clipboardMocks.copyText,
+}))
+
+const VALID_SESSION_ID = '550e8400-e29b-41d4-a716-446655440000'
+const CODEX_THREAD_ID = '019ec8c9-2b12-7001-a11d-e2e089860320'
+const OPENCODE_SESSION_ID = 'ses_context_reopen'
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+function createTestStore(options?: { platform?: string | null }) {
+  return configureStore({
+    reducer: {
+      tabs: tabsReducer,
+      panes: panesReducer,
+      sessions: sessionsReducer,
+      connection: connectionReducer,
+      settings: settingsReducer,
+      extensions: extensionsReducer,
+      freshAgent: freshAgentReducer,
+    },
+    middleware: (getDefaultMiddleware) =>
+      getDefaultMiddleware({ serializableCheck: false }),
+    preloadedState: {
+      tabs: {
+        tabs: [
+          {
+            id: 'tab-1',
+            createRequestId: 'tab-1',
+            title: 'Tab One',
+            status: 'running',
+            mode: 'shell',
+            shell: 'system',
+            createdAt: 1,
+          },
+          {
+            id: 'tab-2',
+            createRequestId: 'tab-2',
+            title: 'Tab Two',
+            status: 'running',
+            mode: 'shell',
+            shell: 'system',
+            createdAt: 2,
+          },
+        ],
+        activeTabId: 'tab-1',
+        renameRequestTabId: null,
+      },
+      panes: {
+        layouts: {},
+        activePane: {},
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      },
+      sessions: {
+        projects: [],
+        expandedProjects: new Set<string>(),
+      },
+      extensions: {
+        entries: defaultCliExtensions,
+      },
+      connection: {
+        status: 'ready',
+        platform: options?.platform ?? null,
+      },
+    },
+  })
+}
+
+function renderWithProvider(ui: React.ReactNode, options?: { platform?: string | null }) {
+  const store = createTestStore(options)
+  const utils = render(
+    <Provider store={store}>
+      <ContextMenuProvider
+        view="terminal"
+        onViewChange={() => {}}
+        onToggleSidebar={() => {}}
+        sidebarCollapsed={false}
+      >
+        {ui}
+      </ContextMenuProvider>
+    </Provider>
+  )
+  return { store, ...utils }
+}
+
+function createStoreWithSession() {
+  return configureStore({
+    reducer: {
+      tabs: tabsReducer,
+      panes: panesReducer,
+      sessions: sessionsReducer,
+      settings: settingsReducer,
+      extensions: extensionsReducer,
+    },
+    middleware: (getDefaultMiddleware) =>
+      getDefaultMiddleware({ serializableCheck: false }),
+    preloadedState: {
+      tabs: {
+        tabs: [
+          {
+            id: 'tab-1',
+            createRequestId: 'tab-1',
+            title: 'Tab One',
+            status: 'running',
+            mode: 'shell',
+            shell: 'system',
+            createdAt: 1,
+          },
+        ],
+        activeTabId: 'tab-1',
+        renameRequestTabId: null,
+      },
+      panes: {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'shell',
+              status: 'running',
+              terminalId: 'term-1',
+            },
+          },
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      },
+      sessions: {
+        projects: [
+          {
+            projectPath: '/test/project',
+            sessions: [
+              {
+                sessionId: VALID_SESSION_ID,
+                provider: 'claude',
+                title: 'Test Session',
+                cwd: '/test/project',
+                createdAt: 1000,
+                lastActivityAt: 2000,
+                messageCount: 5,
+              },
+            ],
+          },
+        ],
+        expandedProjects: new Set<string>(),
+      },
+      extensions: {
+        entries: defaultCliExtensions,
+      },
+    },
+  })
+}
+
+function createStoreWithSidebarWindowAgentSession() {
+  return configureStore({
+    reducer: {
+      tabs: tabsReducer,
+      panes: panesReducer,
+      sessions: sessionsReducer,
+      connection: connectionReducer,
+      settings: settingsReducer,
+      extensions: extensionsReducer,
+    },
+    middleware: (getDefaultMiddleware) =>
+      getDefaultMiddleware({ serializableCheck: false }),
+    preloadedState: {
+      tabs: {
+        tabs: [
+          {
+            id: 'tab-1',
+            createRequestId: 'tab-1',
+            title: 'Shell',
+            status: 'running',
+            mode: 'shell',
+            shell: 'system',
+            createdAt: 1,
+          },
+        ],
+        activeTabId: 'tab-1',
+        renameRequestTabId: null,
+      },
+      panes: {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'shell',
+              status: 'running',
+              terminalId: 'term-1',
+            },
+          },
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      },
+      sessions: {
+        projects: [
+          {
+            projectPath: '/history/project',
+            sessions: [
+              {
+                sessionId: 'history-only',
+                provider: 'claude',
+                title: 'History Only',
+                cwd: '/history/project',
+                createdAt: 1000,
+                updatedAt: 2000,
+              },
+            ],
+          },
+        ],
+        activeSurface: 'history',
+        windows: {
+          history: {
+            projects: [
+              {
+                projectPath: '/history/project',
+                sessions: [
+                  {
+                    sessionId: 'history-only',
+                    provider: 'claude',
+                    title: 'History Only',
+                    cwd: '/history/project',
+                    createdAt: 1000,
+                    updatedAt: 2000,
+                  },
+                ],
+              },
+            ],
+            lastLoadedAt: 1,
+          },
+          sidebar: {
+            projects: [
+              {
+                projectPath: '/sidebar/project',
+                sessions: [
+                  {
+                    sessionId: VALID_SESSION_ID,
+                    provider: 'claude',
+                    sessionType: 'freshclaude',
+                    title: 'Sidebar Agent Session',
+                    cwd: '/sidebar/project',
+                    createdAt: 1000,
+                    updatedAt: 2000,
+                  },
+                ],
+              },
+            ],
+            lastLoadedAt: 1,
+          },
+        },
+        expandedProjects: new Set<string>(),
+      },
+      extensions: {
+        entries: defaultCliExtensions,
+      },
+      connection: {
+        status: 'ready',
+        platform: null,
+      },
+    },
+  })
+}
+
+function createStoreWithOverlappingSessionWindows() {
+  return configureStore({
+    reducer: {
+      tabs: tabsReducer,
+      panes: panesReducer,
+      sessions: sessionsReducer,
+      connection: connectionReducer,
+      settings: settingsReducer,
+      extensions: extensionsReducer,
+    },
+    middleware: (getDefaultMiddleware) =>
+      getDefaultMiddleware({ serializableCheck: false }),
+    preloadedState: {
+      tabs: {
+        tabs: [
+          {
+            id: 'tab-1',
+            createRequestId: 'tab-1',
+            title: 'Shell',
+            status: 'running',
+            mode: 'shell',
+            shell: 'system',
+            createdAt: 1,
+          },
+        ],
+        activeTabId: 'tab-1',
+        renameRequestTabId: null,
+      },
+      panes: {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'shell',
+              status: 'running',
+              terminalId: 'term-1',
+            },
+          },
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+        refreshRequestsByPane: {},
+      },
+      sessions: {
+        projects: [
+          {
+            projectPath: '/shared/project',
+            sessions: [
+              {
+                sessionId: VALID_SESSION_ID,
+                provider: 'claude',
+                sessionType: 'freshclaude',
+                title: 'Sidebar Agent Session',
+                cwd: '/shared/project/sidebar',
+                createdAt: 1000,
+                updatedAt: 2000,
+              },
+            ],
+          },
+        ],
+        activeSurface: 'history',
+        windows: {
+          sidebar: {
+            projects: [
+              {
+                projectPath: '/shared/project',
+                sessions: [
+                  {
+                    sessionId: VALID_SESSION_ID,
+                    provider: 'claude',
+                    sessionType: 'freshclaude',
+                    title: 'Sidebar Agent Session',
+                    cwd: '/shared/project/sidebar',
+                    createdAt: 1000,
+                    updatedAt: 2000,
+                  },
+                ],
+              },
+            ],
+            lastLoadedAt: 1,
+          },
+          history: {
+            projects: [
+              {
+                projectPath: '/shared/project',
+                sessions: [
+                  {
+                    sessionId: VALID_SESSION_ID,
+                    provider: 'claude',
+                    title: 'History Terminal Session',
+                    cwd: '/shared/project/history',
+                    createdAt: 1000,
+                    updatedAt: 2000,
+                  },
+                  {
+                    sessionId: 'history-extra',
+                    provider: 'claude',
+                    title: 'History Extra Session',
+                    cwd: '/shared/project/history',
+                    createdAt: 1000,
+                    updatedAt: 2000,
+                  },
+                ],
+              },
+            ],
+            lastLoadedAt: 1,
+          },
+        },
+        expandedProjects: new Set<string>(),
+      },
+      extensions: {
+        entries: defaultCliExtensions,
+      },
+      connection: {
+        status: 'ready',
+        platform: null,
+      },
+    },
+  })
+}
+
+function createStoreWithBrowserPane(options?: { zoomedPaneId?: string }) {
+  return configureStore({
+    reducer: {
+      tabs: tabsReducer,
+      panes: panesReducer,
+      sessions: sessionsReducer,
+      connection: connectionReducer,
+      settings: settingsReducer,
+      extensions: extensionsReducer,
+    },
+    middleware: (getDefaultMiddleware) =>
+      getDefaultMiddleware({ serializableCheck: false }),
+    preloadedState: {
+      tabs: {
+        tabs: [
+          {
+            id: 'tab-1',
+            createRequestId: 'tab-1',
+            title: 'Tab One',
+            status: 'running',
+            mode: 'shell',
+            shell: 'system',
+            createdAt: 1,
+          },
+        ],
+        activeTabId: 'tab-1',
+        renameRequestTabId: null,
+      },
+      panes: {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'browser',
+              browserInstanceId: 'browser-1',
+              url: 'https://example.com',
+              devToolsOpen: false,
+            },
+          },
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Browser' } },
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: options?.zoomedPaneId ? { 'tab-1': options.zoomedPaneId } : {},
+        refreshRequestsByPane: {},
+      },
+      sessions: {
+        projects: [],
+        expandedProjects: new Set<string>(),
+      },
+      extensions: {
+        entries: defaultCliExtensions,
+      },
+      connection: {
+        status: 'ready',
+        platform: null,
+      },
+    },
+  })
+}
+
+function createStoreWithTerminalPane() {
+  return configureStore({
+    reducer: {
+      tabs: tabsReducer,
+      panes: panesReducer,
+      sessions: sessionsReducer,
+      connection: connectionReducer,
+      settings: settingsReducer,
+      extensions: extensionsReducer,
+    },
+    middleware: (getDefaultMiddleware) =>
+      getDefaultMiddleware({ serializableCheck: false }).concat(terminalDetachMiddleware),
+    preloadedState: {
+      tabs: {
+        tabs: [
+          {
+            id: 'tab-1',
+            createRequestId: 'tab-1',
+            title: 'Shell',
+            status: 'running',
+            mode: 'shell',
+            shell: 'system',
+            createdAt: 1,
+          },
+        ],
+        activeTabId: 'tab-1',
+        renameRequestTabId: null,
+      },
+      panes: {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'shell',
+              status: 'running',
+              terminalId: 'term-1',
+              createRequestId: 'req-replace-1',
+            },
+          },
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: { 'tab-1': { 'pane-1': 'Shell' } },
+      },
+      sessions: {
+        projects: [],
+        expandedProjects: new Set<string>(),
+      },
+      extensions: {
+        entries: defaultCliExtensions,
+      },
+      connection: {
+        status: 'ready',
+        platform: 'linux',
+      },
+    },
+  })
+}
+
+function createStoreWithTabRegistry() {
+  const store = configureStore({
+    reducer: {
+      tabs: tabsReducer,
+      panes: panesReducer,
+      sessions: sessionsReducer,
+      connection: connectionReducer,
+      settings: settingsReducer,
+      tabRegistry: tabRegistryReducer,
+    },
+    middleware: (getDefaultMiddleware) => getDefaultMiddleware({ serializableCheck: false }),
+    preloadedState: {
+      tabs: {
+        tabs: [
+          { id: 'tab-1', createRequestId: 'tab-1', title: 'Tab One', status: 'running', mode: 'shell', shell: 'system', createdAt: 1 },
+        ],
+        activeTabId: 'tab-1',
+        renameRequestTabId: null,
+      },
+      panes: { layouts: {}, activePane: {}, paneTitles: {} },
+      sessions: { projects: [], expandedProjects: new Set<string>() },
+      connection: { status: 'ready', platform: null },
+    },
+  })
+  store.dispatch(setTabRegistrySnapshot({
+    localOpen: [],
+    remoteOpen: [{
+      tabKey: 'remote:open-1',
+      tabId: 'open-1',
+      serverInstanceId: 'srv-remote',
+      deviceId: 'remote-device',
+      deviceLabel: 'Remote Device',
+      tabName: 'remote open',
+      status: 'open',
+      revision: 1,
+      createdAt: 1,
+      updatedAt: 2,
+      paneCount: 1,
+      titleSetByUser: false,
+      panes: [],
+    }],
+    closed: [],
+  }))
+  return store
+}
+
+describe('ContextMenuProvider', () => {
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+    apiMocks.setSessionMetadata.mockResolvedValue(undefined)
+  })
+
+  it('does not emit selector instability warnings when feature flags are absent', () => {
+    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const { store } = renderWithProvider(
+        <div data-context={ContextIds.Global}>Global area</div>,
+      )
+
+      store.dispatch({ type: 'test/unrelated' })
+
+      expect(consoleWarnSpy.mock.calls.map((call) => String(call[0])).join('\n')).not.toContain('Selector')
+    } finally {
+      consoleWarnSpy.mockRestore()
+    }
+  })
+
+  it('opens menu on right click and dispatches close tab', async () => {
+    const user = userEvent.setup()
+    const { store } = renderWithProvider(
+      <div data-context={ContextIds.Tab} data-tab-id="tab-1">
+        Tab One
+      </div>
+    )
+
+    await user.pointer({ target: screen.getByText('Tab One'), keys: '[MouseRight]' })
+
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+    await user.click(screen.getByText('Close tab'))
+
+    expect(store.getState().tabs.tabs).toHaveLength(1)
+    expect(store.getState().tabs.tabs[0].id).toBe('tab-2')
+  })
+
+  it('closes menu on outside click', async () => {
+    const user = userEvent.setup()
+    renderWithProvider(
+      <div>
+        <div data-context={ContextIds.Tab} data-tab-id="tab-1">
+          Tab One
+        </div>
+        <button type="button">Outside</button>
+      </div>
+    )
+
+    await user.pointer({ target: screen.getByText('Tab One'), keys: '[MouseRight]' })
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+
+    await user.click(screen.getByText('Outside'))
+    expect(screen.queryByRole('menu')).toBeNull()
+  })
+
+  it('closes the menu when the user scrolls after the post-open grace period', async () => {
+    const user = userEvent.setup()
+    renderWithProvider(
+      <div data-context={ContextIds.Tab} data-tab-id="tab-1">
+        Tab One
+      </div>
+    )
+
+    await user.pointer({ target: screen.getByText('Tab One'), keys: '[MouseRight]' })
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+
+    // Wait out the 500ms post-open grace window (the OUTER suite uses real
+    // timers by design — only the nested 'hybrid-input long-press' describe
+    // uses fake timers, scoped by its own setup/cleanup).
+    await new Promise((resolve) => setTimeout(resolve, 550))
+
+    act(() => {
+      window.dispatchEvent(new Event('scroll'))
+    })
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull())
+  })
+
+  it('respects native menu for input-like elements', async () => {
+    const user = userEvent.setup()
+    renderWithProvider(
+      <div data-context={ContextIds.Global}>
+        <input aria-label="Name" />
+      </div>
+    )
+
+    await user.pointer({ target: screen.getByLabelText('Name'), keys: '[MouseRight]' })
+    expect(screen.queryByRole('menu')).toBeNull()
+  })
+
+  it('allows native menu for links inside non-global contexts', async () => {
+    const user = userEvent.setup()
+    renderWithProvider(
+      <div data-context={ContextIds.FreshAgent} data-session-id="sess-1">
+        <a href="https://example.com">Example Link</a>
+      </div>
+    )
+
+    await user.pointer({ target: screen.getByText('Example Link'), keys: '[MouseRight]' })
+    expect(screen.queryByRole('menu')).toBeNull()
+  })
+
+  it('allows native menu when Shift is held', async () => {
+    const user = userEvent.setup()
+    renderWithProvider(
+      <div data-context={ContextIds.Tab} data-tab-id="tab-1">
+        Tab One
+      </div>
+    )
+
+    await user.keyboard('{Shift>}')
+    await user.pointer({ target: screen.getByText('Tab One'), keys: '[MouseRight]' })
+    await user.keyboard('{/Shift}')
+    expect(screen.queryByRole('menu')).toBeNull()
+  })
+
+  it('opens menu via keyboard context key', async () => {
+    const user = userEvent.setup()
+    renderWithProvider(
+      <div data-context={ContextIds.Tab} data-tab-id="tab-1" tabIndex={0}>
+        Tab One
+      </div>
+    )
+
+    const target = screen.getByText('Tab One')
+    await user.click(target)
+    fireEvent.keyDown(document, { key: 'F10', shiftKey: true })
+
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+  })
+
+  it('refreshes a tab from the tab context menu and clears zoom first', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithBrowserPane({ zoomedPaneId: 'pane-1' })
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div data-context={ContextIds.Tab} data-tab-id="tab-1">
+            Tab One
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Tab One'), keys: '[MouseRight]' })
+    await user.click(screen.getByRole('menuitem', { name: 'Refresh tab' }))
+
+    expect(store.getState().panes.zoomedPane['tab-1']).toBeUndefined()
+    expect(store.getState().panes.refreshRequestsByPane['tab-1']?.['pane-1']).toMatchObject({
+      target: { kind: 'browser', browserInstanceId: 'browser-1' },
+    })
+  })
+
+  it('opens the pane menu from the pane shell keyboard target and queues Refresh pane', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithBrowserPane()
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <Pane
+            tabId="tab-1"
+            paneId="pane-1"
+            isActive={true}
+            isOnlyPane={true}
+            title="Browser"
+            content={{
+              kind: 'browser',
+              browserInstanceId: 'browser-1',
+              url: 'https://example.com',
+              devToolsOpen: false,
+            }}
+            onClose={() => {}}
+            onFocus={() => {}}
+          >
+            <div>Pane body</div>
+          </Pane>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    const paneShell = screen.getByRole('group', { name: 'Pane: Browser' })
+    paneShell.focus()
+    expect(document.activeElement).toBe(paneShell)
+
+    fireEvent.keyDown(document, { key: 'F10', shiftKey: true })
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('menuitem', { name: 'Refresh pane' }))
+
+    expect(store.getState().panes.refreshRequestsByPane['tab-1']?.['pane-1']).toMatchObject({
+      target: { kind: 'browser', browserInstanceId: 'browser-1' },
+    })
+  })
+
+  it('Rename tab from context menu enters inline rename mode (no prompt)', async () => {
+    const user = userEvent.setup()
+    const promptSpy = vi.spyOn(window, 'prompt')
+
+    const store = createTestStore()
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <TabBar />
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Tab One'), keys: '[MouseRight]' })
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+    await user.click(screen.getByText('Rename tab'))
+
+    // Inline rename input should appear with the current display title
+    const input = await screen.findByRole('textbox')
+    expect(input.tagName).toBe('INPUT')
+    expect((input as HTMLInputElement).value).toBe('Tab One')
+    expect(promptSpy).not.toHaveBeenCalled()
+    promptSpy.mockRestore()
+  })
+
+  it('open in this tab splits the pane instead of replacing the layout', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithSession()
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="history"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.SidebarSession}
+            data-session-id={VALID_SESSION_ID}
+            data-provider="claude"
+          >
+            Test Session
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    // Verify initial state has one pane
+    const initialLayout = store.getState().panes.layouts['tab-1']
+    expect(initialLayout?.type).toBe('leaf')
+
+    // Open context menu and click "Open in this tab"
+    await user.pointer({ target: screen.getByText('Test Session'), keys: '[MouseRight]' })
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+    await user.click(screen.getByText('Open in this tab'))
+
+    // After clicking, the layout should be a split with two panes
+    const newLayout = store.getState().panes.layouts['tab-1']
+    expect(newLayout?.type).toBe('split')
+    if (newLayout?.type === 'split') {
+      expect(newLayout.children).toHaveLength(2)
+      // Original pane should still exist
+      const originalPane = newLayout.children.find(
+        (child) => child.type === 'leaf' && child.id === 'pane-1'
+      )
+      expect(originalPane).toBeDefined()
+      // New pane should have the session info
+      const newPane = newLayout.children.find(
+        (child) => child.type === 'leaf' && child.id !== 'pane-1'
+      )
+      expect(newPane).toBeDefined()
+      if (newPane?.type === 'leaf') {
+        expect(newPane.content.kind).toBe('terminal')
+        if (newPane.content.kind === 'terminal') {
+          expect(newPane.content.mode).toBe('claude')
+          expect(newPane.content.sessionRef).toEqual({
+            provider: 'claude',
+            sessionId: VALID_SESSION_ID,
+          })
+        }
+      }
+    }
+  })
+
+  it('reopens a CLI terminal session as a FreshAgent pane', async () => {
+    const user = userEvent.setup()
+    const store = createTestStore()
+    store.dispatch(initLayout({
+      tabId: 'tab-1',
+      paneId: 'pane-1',
+      content: {
+        kind: 'terminal',
+        mode: 'claude',
+        status: 'running',
+        terminalId: 'term-1',
+        sessionRef: {
+          provider: 'claude',
+          sessionId: VALID_SESSION_ID,
+        },
+        initialCwd: '/test/project',
+      },
+    }))
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.Terminal}
+            data-tab-id="tab-1"
+            data-pane-id="pane-1"
+          >
+            Terminal body
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Terminal body'), keys: '[MouseRight]' })
+    await user.click(await screen.findByRole('menuitem', { name: 'Reopen as freshclaude' }))
+
+    await waitFor(() => {
+      expect(apiMocks.setSessionMetadata).toHaveBeenCalledWith(
+        'claude',
+        VALID_SESSION_ID,
+        'freshclaude',
+        { sessionTypeSource: 'explicit' },
+      )
+    })
+    await waitFor(() => {
+      expect(wsMocks.send).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'terminal.kill', terminalId: 'term-1' }),
+      )
+    })
+    // The replacement conversation starts only once the old one's durable
+    // close is acknowledged (focused-episode-6 round 2 close-and-replace).
+    ackPendingKills()
+
+    await waitFor(() => {
+      expect(store.getState().panes.layouts['tab-1']).toMatchObject({
+      type: 'leaf',
+      content: {
+        kind: 'fresh-agent',
+        provider: 'claude',
+        sessionType: 'freshclaude',
+        resumeSessionId: VALID_SESSION_ID,
+        sessionRef: {
+          provider: 'claude',
+          sessionId: VALID_SESSION_ID,
+        },
+        initialCwd: '/test/project',
+      },
+    })
+    })
+    expect(store.getState().tabs.tabs[0].sessionMetadataByKey).toEqual({
+      [`claude:${VALID_SESSION_ID}`]: {
+        sessionType: 'freshclaude',
+      },
+    })
+  })
+
+  it('reopens a FreshAgent pane as its CLI terminal session', async () => {
+    const user = userEvent.setup()
+    const store = createTestStore()
+    store.dispatch(initLayout({
+      tabId: 'tab-1',
+      paneId: 'pane-1',
+      content: {
+        kind: 'fresh-agent',
+        provider: 'claude',
+        sessionType: 'freshclaude',
+        sessionId: 'runtime-sdk-session-id',
+        status: 'idle',
+        resumeSessionId: VALID_SESSION_ID,
+        sessionRef: {
+          provider: 'claude',
+          sessionId: VALID_SESSION_ID,
+        },
+        initialCwd: '/test/project',
+      },
+    }))
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.FreshAgent}
+            data-session-id="runtime-sdk-session-id"
+            data-tab-id="tab-1"
+            data-pane-id="pane-1"
+            data-provider="claude"
+            data-session-type="freshclaude"
+          >
+            FreshAgent body
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('FreshAgent body'), keys: '[MouseRight]' })
+    await user.click(await screen.findByRole('menuitem', { name: 'Reopen as Claude CLI' }))
+
+    await waitFor(() => {
+      expect(apiMocks.setSessionMetadata).toHaveBeenCalledWith(
+        'claude',
+        VALID_SESSION_ID,
+        'claude',
+        { sessionTypeSource: 'explicit' },
+      )
+    })
+    await waitFor(() => {
+      expect(wsMocks.send).toHaveBeenCalledWith({
+        type: 'freshAgent.kill',
+        sessionId: 'runtime-sdk-session-id',
+        sessionType: 'freshclaude',
+        provider: 'claude',
+      })
+    })
+    // As above: the replacement starts only once the old fresh-agent
+    // session's durable close is acknowledged.
+    ackPendingKills()
+
+    await waitFor(() => {
+      expect(store.getState().panes.layouts['tab-1']).toMatchObject({
+        type: 'leaf',
+        content: {
+          kind: 'terminal',
+          mode: 'claude',
+          sessionRef: {
+            provider: 'claude',
+            sessionId: VALID_SESSION_ID,
+          },
+          initialCwd: '/test/project',
+        },
+      })
+    })
+    expect(store.getState().tabs.tabs[0].sessionMetadataByKey).toEqual({
+      [`claude:${VALID_SESSION_ID}`]: {
+        sessionType: 'claude',
+      },
+    })
+  })
+
+  it('reopens a restored FreshCodex pane when right-clicking transcript body content', async () => {
+    const user = userEvent.setup()
+    const store = createTestStore()
+    store.dispatch(initLayout({
+      tabId: 'tab-1',
+      paneId: 'pane-1',
+      content: {
+        kind: 'fresh-agent',
+        provider: 'codex',
+        sessionType: 'freshcodex',
+        status: 'idle',
+        createRequestId: 'req-freshcodex',
+        sessionRef: {
+          provider: 'codex',
+          sessionId: CODEX_THREAD_ID,
+        },
+        initialCwd: '/test/project',
+      },
+    }))
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.FreshAgent}
+            data-tab-id="tab-1"
+            data-pane-id="pane-1"
+            data-provider="codex"
+            data-session-type="freshcodex"
+          >
+            <div data-context="fresh-agent-transcript">FreshCodex transcript body</div>
+          </div>
+        </ContextMenuProvider>
+      </Provider>,
+    )
+
+    await user.pointer({ target: screen.getByText('FreshCodex transcript body'), keys: '[MouseRight]' })
+    await user.click(await screen.findByRole('menuitem', { name: 'Reopen as Codex CLI' }))
+
+    await waitFor(() => {
+      expect(apiMocks.setSessionMetadata).toHaveBeenCalledWith(
+        'codex',
+        CODEX_THREAD_ID,
+        'codex',
+        { sessionTypeSource: 'explicit' },
+      )
+    })
+
+    expect(store.getState().panes.layouts['tab-1']).toMatchObject({
+      type: 'leaf',
+      content: {
+        kind: 'terminal',
+        mode: 'codex',
+        sessionRef: {
+          provider: 'codex',
+          sessionId: CODEX_THREAD_ID,
+        },
+        initialCwd: '/test/project',
+      },
+    })
+    expect(store.getState().tabs.tabs[0].sessionMetadataByKey).toEqual({
+      [`codex:${CODEX_THREAD_ID}`]: {
+        sessionType: 'codex',
+      },
+    })
+  })
+
+  it('reopens a recovered FreshOpenCode pane with session-state cwd and kills the old pane route', async () => {
+    const user = userEvent.setup()
+    const store = createTestStore()
+    store.dispatch(initLayout({
+      tabId: 'tab-1',
+      paneId: 'pane-1',
+      content: {
+        kind: 'fresh-agent',
+        provider: 'opencode',
+        sessionType: 'freshopencode',
+        status: 'idle',
+        createRequestId: 'req-freshopencode',
+        sessionId: OPENCODE_SESSION_ID,
+        sessionRef: {
+          provider: 'opencode',
+          sessionId: OPENCODE_SESSION_ID,
+        },
+      },
+    }))
+    store.dispatch(sessionInit({
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      sessionId: OPENCODE_SESSION_ID,
+      cwd: '/repo/session-state',
+    }))
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.FreshAgent}
+            data-tab-id="tab-1"
+            data-pane-id="pane-1"
+            data-provider="opencode"
+            data-session-type="freshopencode"
+          >
+            <div data-context="fresh-agent-transcript">FreshOpenCode transcript body</div>
+          </div>
+        </ContextMenuProvider>
+      </Provider>,
+    )
+
+    await user.pointer({ target: screen.getByText('FreshOpenCode transcript body'), keys: '[MouseRight]' })
+    await user.click(await screen.findByRole('menuitem', { name: 'Reopen as OpenCode CLI' }))
+
+    await waitFor(() => {
+      expect(apiMocks.setSessionMetadata).toHaveBeenCalledWith(
+        'opencode',
+        OPENCODE_SESSION_ID,
+        'opencode',
+        { sessionTypeSource: 'explicit' },
+      )
+    })
+    await waitFor(() => {
+      expect(wsMocks.send).toHaveBeenCalledWith({
+        type: 'freshAgent.kill',
+        sessionId: OPENCODE_SESSION_ID,
+        sessionType: 'freshopencode',
+        provider: 'opencode',
+        cwd: '/repo/session-state',
+      })
+    })
+    ackPendingKills()
+
+    await waitFor(() => {
+      expect(store.getState().panes.layouts['tab-1']).toMatchObject({
+        type: 'leaf',
+        content: {
+          kind: 'terminal',
+          mode: 'opencode',
+          sessionRef: {
+            provider: 'opencode',
+            sessionId: OPENCODE_SESSION_ID,
+          },
+          initialCwd: '/repo/session-state',
+        },
+      })
+    })
+  })
+
+  it('does not kill or replace a pane when reopen metadata persistence fails', async () => {
+    const user = userEvent.setup()
+    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    apiMocks.setSessionMetadata.mockRejectedValueOnce(new Error('persist failed'))
+    const store = createTestStore()
+    store.dispatch(initLayout({
+      tabId: 'tab-1',
+      paneId: 'pane-1',
+      content: {
+        kind: 'terminal',
+        mode: 'claude',
+        status: 'running',
+        terminalId: 'term-1',
+        sessionRef: {
+          provider: 'claude',
+          sessionId: VALID_SESSION_ID,
+        },
+        initialCwd: '/test/project',
+      },
+    }))
+
+    try {
+      render(
+        <Provider store={store}>
+          <ContextMenuProvider
+            view="terminal"
+            onViewChange={() => {}}
+            onToggleSidebar={() => {}}
+            sidebarCollapsed={false}
+          >
+            <div
+              data-context={ContextIds.Terminal}
+              data-tab-id="tab-1"
+              data-pane-id="pane-1"
+            >
+              Terminal body
+            </div>
+          </ContextMenuProvider>
+        </Provider>
+      )
+
+      await user.pointer({ target: screen.getByText('Terminal body'), keys: '[MouseRight]' })
+      await user.click(await screen.findByRole('menuitem', { name: 'Reopen as freshclaude' }))
+
+      await waitFor(() => {
+        expect(apiMocks.setSessionMetadata).toHaveBeenCalledWith(
+          'claude',
+          VALID_SESSION_ID,
+          'freshclaude',
+          { sessionTypeSource: 'explicit' },
+        )
+      })
+      await waitFor(() => {
+        expect(consoleWarnSpy).toHaveBeenCalled()
+      })
+
+      expect(wsMocks.send).not.toHaveBeenCalled()
+      expect(store.getState().panes.layouts['tab-1']).toMatchObject({
+        type: 'leaf',
+        content: {
+          kind: 'terminal',
+          mode: 'claude',
+          status: 'running',
+          terminalId: 'term-1',
+          sessionRef: {
+            provider: 'claude',
+            sessionId: VALID_SESSION_ID,
+          },
+          initialCwd: '/test/project',
+        },
+      })
+    } finally {
+      consoleWarnSpy.mockRestore()
+    }
+  })
+
+  it('does not kill or overwrite a pane that changes while reopen metadata is pending', async () => {
+    const user = userEvent.setup()
+    const deferred = createDeferred<void>()
+    apiMocks.setSessionMetadata.mockReturnValueOnce(deferred.promise)
+    const store = createTestStore()
+    store.dispatch(initLayout({
+      tabId: 'tab-1',
+      paneId: 'pane-1',
+      content: {
+        kind: 'terminal',
+        mode: 'claude',
+        status: 'running',
+        terminalId: 'term-1',
+        sessionRef: {
+          provider: 'claude',
+          sessionId: VALID_SESSION_ID,
+        },
+        initialCwd: '/test/project',
+      },
+    }))
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.Terminal}
+            data-tab-id="tab-1"
+            data-pane-id="pane-1"
+          >
+            Terminal body
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Terminal body'), keys: '[MouseRight]' })
+    await user.click(await screen.findByRole('menuitem', { name: 'Reopen as freshclaude' }))
+
+    await waitFor(() => {
+      expect(apiMocks.setSessionMetadata).toHaveBeenCalledWith(
+        'claude',
+        VALID_SESSION_ID,
+        'freshclaude',
+        { sessionTypeSource: 'explicit' },
+      )
+    })
+
+    store.dispatch(updatePaneContent({
+      tabId: 'tab-1',
+      paneId: 'pane-1',
+      content: {
+        kind: 'browser',
+        url: 'https://example.com',
+        devToolsOpen: false,
+      },
+    }))
+
+    await act(async () => {
+      deferred.resolve()
+      await deferred.promise
+      await Promise.resolve()
+    })
+
+    expect(wsMocks.send).not.toHaveBeenCalled()
+    expect(store.getState().panes.layouts['tab-1']).toMatchObject({
+      type: 'leaf',
+      content: {
+        kind: 'browser',
+        url: 'https://example.com',
+      },
+    })
+    expect(store.getState().tabs.tabs[0].sessionMetadataByKey).toBeUndefined()
+  })
+
+  it('uses the sidebar session window for sidebar actions and preserves fresh-agent session type', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithSidebarWindowAgentSession()
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.SidebarSession}
+            data-session-id={VALID_SESSION_ID}
+            data-provider="claude"
+            data-session-type="freshclaude"
+          >
+            Sidebar Agent Session
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Sidebar Agent Session'), keys: '[MouseRight]' })
+    await user.click(screen.getByText('Open in this tab'))
+
+    const newLayout = store.getState().panes.layouts['tab-1']
+    expect(newLayout?.type).toBe('split')
+    if (newLayout?.type === 'split') {
+      const newPane = newLayout.children.find(
+        (child) => child.type === 'leaf' && child.id !== 'pane-1',
+      )
+      expect(newPane).toBeDefined()
+      if (newPane?.type === 'leaf') {
+        expect(newPane.content).toMatchObject({
+          kind: 'fresh-agent',
+          provider: 'claude',
+          sessionType: 'freshclaude',
+          resumeSessionId: VALID_SESSION_ID,
+          sessionRef: {
+            provider: 'claude',
+            sessionId: VALID_SESSION_ID,
+          },
+        })
+      }
+    }
+
+    expect(store.getState().tabs.tabs[0].sessionMetadataByKey).toEqual({
+      [`claude:${VALID_SESSION_ID}`]: {
+        sessionType: 'freshclaude',
+      },
+    })
+  })
+
+  it('uses the history session window for history-session actions even when sidebar has a conflicting session snapshot', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithOverlappingSessionWindows()
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="history"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.HistorySession}
+            data-session-id={VALID_SESSION_ID}
+            data-provider="claude"
+          >
+            History Terminal Session
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('History Terminal Session'), keys: '[MouseRight]' })
+    await user.click(screen.getByText('Open session'))
+
+    const openedTab = store.getState().tabs.tabs.find((tab) => tab.id !== 'tab-1')
+    expect(openedTab).toMatchObject({
+      title: 'History Terminal Session',
+      initialCwd: '/shared/project/history',
+      sessionRef: {
+        provider: 'claude',
+        sessionId: VALID_SESSION_ID,
+      },
+    })
+    expect(store.getState().panes.layouts[openedTab!.id]).toMatchObject({
+      type: 'leaf',
+      content: {
+        kind: 'terminal',
+        mode: 'claude',
+        initialCwd: '/shared/project/history',
+        sessionRef: {
+          provider: 'claude',
+          sessionId: VALID_SESSION_ID,
+        },
+        status: 'creating',
+      },
+    })
+  })
+
+  it('uses the history project window for history-project actions even when sidebar has a conflicting project snapshot', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithOverlappingSessionWindows()
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="history"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.HistoryProject}
+            data-project-path="/shared/project"
+          >
+            Shared Project
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Shared Project'), keys: '[MouseRight]' })
+    await user.click(screen.getByText('Open all sessions in tabs'))
+    await user.click(await screen.findByRole('button', { name: 'Open tabs' }))
+
+    const openedTabs = store.getState().tabs.tabs.filter((tab) => tab.id !== 'tab-1')
+    expect(openedTabs).toHaveLength(2)
+    expect(openedTabs.map((tab) => tab.title)).toEqual([
+      'History Terminal Session',
+      'History Extra Session',
+    ])
+  })
+
+  it('copies resume command from sidebar session context menu', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithSession()
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.SidebarSession}
+            data-session-id={VALID_SESSION_ID}
+            data-provider="claude"
+          >
+            Sidebar Session
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Sidebar Session'), keys: '[MouseRight]' })
+    await user.click(screen.getByRole('menuitem', { name: 'Copy resume command' }))
+
+    expect(clipboardMocks.copyText).toHaveBeenCalledWith(`claude --resume ${VALID_SESSION_ID}`)
+  })
+
+  it('deletes a sidebar session and removes it from store state immediately without waiting for a refresh', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithSession()
+    // The sidebar window has the session committed too — the delete must
+    // propagate to BOTH top-level projects and the window.
+    store.dispatch(commitSessionWindowVisibleRefresh({
+      surface: 'sidebar',
+      projects: store.getState().sessions.projects,
+      totalSessions: 1,
+      hasMore: false,
+      oldestLoadedTimestamp: 2000,
+      oldestLoadedSessionId: `claude:${VALID_SESSION_ID}`,
+    } as any))
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.SidebarSession}
+            data-session-id={VALID_SESSION_ID}
+            data-provider="claude"
+          >
+            Sidebar Session
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Sidebar Session'), keys: '[MouseRight]' })
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+
+    await waitFor(() => {
+      expect(apiMocks.delete).toHaveBeenCalledWith(
+        `/api/sessions/${encodeURIComponent(`claude:${VALID_SESSION_ID}`)}`,
+      )
+    })
+
+    // The removal is dispatched directly after the API call — the session is
+    // gone from both top-level projects and the sidebar window without any
+    // refresh having resolved.
+    await waitFor(() => {
+      const sessions = store.getState().sessions
+      expect(
+        sessions.projects.flatMap((p: any) => p.sessions).some((s: any) => s.sessionId === VALID_SESSION_ID),
+      ).toBe(false)
+      expect(
+        (sessions.windows?.sidebar?.projects ?? []).flatMap((p: any) => p.sessions)
+          .some((s: any) => s.sessionId === VALID_SESSION_ID),
+      ).toBe(false)
+    })
+  })
+
+  it('keeps the confirm dialog open with an error when the delete request fails', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithSession()
+    store.dispatch(commitSessionWindowVisibleRefresh({
+      surface: 'sidebar',
+      projects: store.getState().sessions.projects,
+      totalSessions: 1,
+      hasMore: false,
+      oldestLoadedTimestamp: 2000,
+      oldestLoadedSessionId: `claude:${VALID_SESSION_ID}`,
+    } as any))
+    apiMocks.delete.mockRejectedValueOnce(new Error('boom'))
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.SidebarSession}
+            data-session-id={VALID_SESSION_ID}
+            data-provider="claude"
+          >
+            Sidebar Session
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Sidebar Session'), keys: '[MouseRight]' })
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+
+    // SESSION-03: a failed delete must not LOOK like a success — the dialog
+    // stays open and announces the failure instead of silently closing with
+    // the row intact.
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('Failed to delete session: boom')
+    })
+    expect(screen.getByRole('dialog', { name: 'Delete session?' })).toBeInTheDocument()
+
+    // Nothing was removed from either the top-level projects or the window.
+    const sessions = store.getState().sessions
+    expect(
+      sessions.projects.flatMap((p: any) => p.sessions).some((s: any) => s.sessionId === VALID_SESSION_ID),
+    ).toBe(true)
+    expect(
+      (sessions.windows?.sidebar?.projects ?? []).flatMap((p: any) => p.sessions)
+        .some((s: any) => s.sessionId === VALID_SESSION_ID),
+    ).toBe(true)
+  })
+
+  it('keeps built-in sidebar resume command available before extension registry hydration', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithSession()
+    store.dispatch({ type: 'extensions/setRegistry', payload: [] })
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.SidebarSession}
+            data-session-id={VALID_SESSION_ID}
+            data-provider="claude"
+          >
+            Sidebar Session
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Sidebar Session'), keys: '[MouseRight]' })
+    await user.click(screen.getByRole('menuitem', { name: 'Copy resume command' }))
+
+    expect(clipboardMocks.copyText).toHaveBeenCalledWith(`claude --resume ${VALID_SESSION_ID}`)
+  })
+
+  it('copies session metadata with minute-bucketed open-tab recency', async () => {
+    const user = userEvent.setup()
+    const store = configureStore({
+      reducer: {
+        tabs: tabsReducer,
+        panes: panesReducer,
+        sessions: sessionsReducer,
+        connection: connectionReducer,
+        settings: settingsReducer,
+        extensions: extensionsReducer,
+        tabRecency: tabRecencyReducer,
+      },
+      middleware: (getDefaultMiddleware) =>
+        getDefaultMiddleware({ serializableCheck: false }),
+      preloadedState: {
+        tabs: {
+          tabs: [
+            {
+              id: 'tab-1',
+              createRequestId: 'tab-1',
+              title: 'Claude Tab',
+              status: 'running',
+              mode: 'claude',
+              createdAt: 1_740_000_000_000,
+              updatedAt: 1_740_000_999_999,
+              sessionRef: {
+                provider: 'claude',
+                sessionId: VALID_SESSION_ID,
+              },
+            },
+          ],
+          activeTabId: 'tab-1',
+          renameRequestTabId: null,
+        },
+        panes: {
+          layouts: {
+            'tab-1': {
+              type: 'leaf',
+              id: 'pane-1',
+              content: {
+                kind: 'terminal',
+                mode: 'claude',
+                status: 'running',
+                createRequestId: 'req-1',
+                sessionRef: {
+                  provider: 'claude',
+                  sessionId: VALID_SESSION_ID,
+                },
+              },
+            },
+          },
+          activePane: { 'tab-1': 'pane-1' },
+          paneTitles: { 'tab-1': { 'pane-1': 'Claude Tab' } },
+          paneTitleSetByUser: {},
+          renameRequestTabId: null,
+          renameRequestPaneId: null,
+          zoomedPane: {},
+          refreshRequestsByPane: {},
+        },
+        tabRecency: {
+          paneLastInputAt: {
+            'pane-1': 1_740_000_080_000,
+          },
+        },
+        sessions: {
+          projects: [
+            {
+              projectPath: '/test/project',
+              sessions: [
+                {
+                  sessionId: VALID_SESSION_ID,
+                  provider: 'claude',
+                  title: 'Test Session',
+                  cwd: '/test/project',
+                  createdAt: 1000,
+                  lastActivityAt: 2000,
+                  messageCount: 5,
+                },
+              ],
+            },
+          ],
+          expandedProjects: new Set<string>(),
+        },
+        extensions: {
+          entries: defaultCliExtensions,
+        },
+        connection: {
+          status: 'ready',
+          platform: null,
+        },
+      },
+    })
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.SidebarSession}
+            data-session-id={VALID_SESSION_ID}
+            data-provider="claude"
+          >
+            Sidebar Session
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Sidebar Session'), keys: '[MouseRight]' })
+    await user.click(screen.getByRole('menuitem', { name: 'Copy full metadata' }))
+
+    const copied = JSON.parse(clipboardMocks.copyText.mock.calls.at(-1)?.[0] ?? '{}')
+    expect(copied.tabLastInputAt).toBe(1_740_000_060_000)
+    expect(copied.tabLastInputAtIso).toBe(new Date(1_740_000_060_000).toISOString())
+  })
+
+  it('copies session metadata when open-tab recency is the zero bucket', async () => {
+    const user = userEvent.setup()
+    const store = configureStore({
+      reducer: {
+        tabs: tabsReducer,
+        panes: panesReducer,
+        sessions: sessionsReducer,
+        connection: connectionReducer,
+        settings: settingsReducer,
+        extensions: extensionsReducer,
+        tabRecency: tabRecencyReducer,
+      },
+      middleware: (getDefaultMiddleware) =>
+        getDefaultMiddleware({ serializableCheck: false }),
+      preloadedState: {
+        tabs: {
+          tabs: [
+            {
+              id: 'tab-1',
+              createRequestId: 'tab-1',
+              title: 'Claude Tab',
+              status: 'running',
+              mode: 'claude',
+              createdAt: 0,
+              updatedAt: 999_999,
+              sessionRef: {
+                provider: 'claude',
+                sessionId: VALID_SESSION_ID,
+              },
+            },
+          ],
+          activeTabId: 'tab-1',
+          renameRequestTabId: null,
+        },
+        panes: {
+          layouts: {
+            'tab-1': {
+              type: 'leaf',
+              id: 'pane-1',
+              content: {
+                kind: 'terminal',
+                mode: 'claude',
+                status: 'running',
+                createRequestId: 'req-1',
+                sessionRef: {
+                  provider: 'claude',
+                  sessionId: VALID_SESSION_ID,
+                },
+              },
+            },
+          },
+          activePane: { 'tab-1': 'pane-1' },
+          paneTitles: { 'tab-1': { 'pane-1': 'Claude Tab' } },
+          paneTitleSetByUser: {},
+          renameRequestTabId: null,
+          renameRequestPaneId: null,
+          zoomedPane: {},
+          refreshRequestsByPane: {},
+        },
+        tabRecency: {
+          paneLastInputAt: {
+            'pane-1': 0,
+          },
+        },
+        sessions: {
+          projects: [
+            {
+              projectPath: '/test/project',
+              sessions: [
+                {
+                  sessionId: VALID_SESSION_ID,
+                  provider: 'claude',
+                  title: 'Test Session',
+                  cwd: '/test/project',
+                  createdAt: 1000,
+                  lastActivityAt: 2000,
+                  messageCount: 5,
+                },
+              ],
+            },
+          ],
+          expandedProjects: new Set<string>(),
+        },
+        extensions: {
+          entries: defaultCliExtensions,
+        },
+        connection: {
+          status: 'ready',
+          platform: null,
+        },
+      },
+    })
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div
+            data-context={ContextIds.SidebarSession}
+            data-session-id={VALID_SESSION_ID}
+            data-provider="claude"
+          >
+            Sidebar Session
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Sidebar Session'), keys: '[MouseRight]' })
+    await user.click(screen.getByRole('menuitem', { name: 'Copy full metadata' }))
+
+    const copied = JSON.parse(clipboardMocks.copyText.mock.calls.at(-1)?.[0] ?? '{}')
+    expect(copied.tabLastInputAt).toBe(0)
+    expect(copied.tabLastInputAtIso).toBe(new Date(0).toISOString())
+  })
+
+  it('copies resume command from terminal pane context menu for codex pane', async () => {
+    const user = userEvent.setup()
+    const store = configureStore({
+      reducer: {
+        tabs: tabsReducer,
+        panes: panesReducer,
+        sessions: sessionsReducer,
+        connection: connectionReducer,
+        settings: settingsReducer,
+        extensions: extensionsReducer,
+      },
+      middleware: (getDefaultMiddleware) =>
+        getDefaultMiddleware({ serializableCheck: false }),
+      preloadedState: {
+        tabs: {
+          tabs: [
+            {
+              id: 'tab-1',
+              createRequestId: 'tab-1',
+              title: 'Codex',
+              status: 'running',
+              mode: 'codex',
+              createdAt: 1,
+            },
+          ],
+          activeTabId: 'tab-1',
+          renameRequestTabId: null,
+        },
+        extensions: {
+          entries: defaultCliExtensions,
+        },
+        panes: {
+          layouts: {
+            'tab-1': {
+              type: 'leaf',
+              id: 'pane-1',
+              content: {
+                kind: 'terminal',
+                mode: 'codex',
+                status: 'running',
+                resumeSessionId: 'codex-session-123',
+              },
+            },
+          },
+          activePane: { 'tab-1': 'pane-1' },
+          paneTitles: {},
+        },
+        sessions: {
+          projects: [],
+          expandedProjects: new Set<string>(),
+        },
+        connection: {
+          status: 'ready',
+          platform: null,
+        },
+      },
+    })
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div data-context={ContextIds.Terminal} data-tab-id="tab-1" data-pane-id="pane-1">
+            Codex Pane
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Codex Pane'), keys: '[MouseRight]' })
+    await user.click(screen.getByRole('menuitem', { name: 'Copy resume command' }))
+
+    expect(clipboardMocks.copyText).toHaveBeenCalledWith('codex resume codex-session-123')
+  })
+
+  it('copies resume command from pane header context menu for cli panes', async () => {
+    const user = userEvent.setup()
+    const store = configureStore({
+      reducer: {
+        tabs: tabsReducer,
+        panes: panesReducer,
+        sessions: sessionsReducer,
+        connection: connectionReducer,
+        settings: settingsReducer,
+        extensions: extensionsReducer,
+      },
+      middleware: (getDefaultMiddleware) =>
+        getDefaultMiddleware({ serializableCheck: false }),
+      preloadedState: {
+        tabs: {
+          tabs: [
+            {
+              id: 'tab-1',
+              createRequestId: 'tab-1',
+              title: 'Claude',
+              status: 'running',
+              mode: 'claude',
+              createdAt: 1,
+            },
+          ],
+          activeTabId: 'tab-1',
+          renameRequestTabId: null,
+        },
+        extensions: {
+          entries: defaultCliExtensions,
+        },
+        panes: {
+          layouts: {
+            'tab-1': {
+              type: 'leaf',
+              id: 'pane-1',
+              content: {
+                kind: 'terminal',
+                mode: 'claude',
+                status: 'running',
+                resumeSessionId: VALID_SESSION_ID,
+              },
+            },
+          },
+          activePane: { 'tab-1': 'pane-1' },
+          paneTitles: {},
+        },
+        sessions: {
+          projects: [],
+          expandedProjects: new Set<string>(),
+        },
+        connection: {
+          status: 'ready',
+          platform: null,
+        },
+      },
+    })
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div data-context={ContextIds.Pane} data-tab-id="tab-1" data-pane-id="pane-1">
+            Pane Header
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Pane Header'), keys: '[MouseRight]' })
+    await user.click(screen.getByRole('menuitem', { name: 'Copy resume command' }))
+
+    expect(clipboardMocks.copyText).toHaveBeenCalledWith(`claude --resume ${VALID_SESSION_ID}`)
+  })
+
+  it('keeps built-in pane header resume command available before extension registry hydration', async () => {
+    const user = userEvent.setup()
+    const store = configureStore({
+      reducer: {
+        tabs: tabsReducer,
+        panes: panesReducer,
+        sessions: sessionsReducer,
+        connection: connectionReducer,
+        settings: settingsReducer,
+        extensions: extensionsReducer,
+      },
+      middleware: (getDefaultMiddleware) =>
+        getDefaultMiddleware({ serializableCheck: false }),
+      preloadedState: {
+        tabs: {
+          tabs: [
+            {
+              id: 'tab-1',
+              createRequestId: 'tab-1',
+              title: 'Codex',
+              status: 'running',
+              mode: 'codex',
+              createdAt: 1,
+            },
+          ],
+          activeTabId: 'tab-1',
+          renameRequestTabId: null,
+        },
+        extensions: {
+          entries: [],
+        },
+        panes: {
+          layouts: {
+            'tab-1': {
+              type: 'leaf',
+              id: 'pane-1',
+              content: {
+                kind: 'terminal',
+                mode: 'codex',
+                status: 'running',
+                resumeSessionId: 'codex-session-123',
+              },
+            },
+          },
+          activePane: { 'tab-1': 'pane-1' },
+          paneTitles: {},
+        },
+        sessions: {
+          projects: [],
+          expandedProjects: new Set<string>(),
+        },
+        connection: {
+          status: 'ready',
+          platform: null,
+        },
+      },
+    })
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div data-context={ContextIds.Pane} data-tab-id="tab-1" data-pane-id="pane-1">
+            Pane Header
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Pane Header'), keys: '[MouseRight]' })
+    await user.click(screen.getByRole('menuitem', { name: 'Copy resume command' }))
+
+    expect(clipboardMocks.copyText).toHaveBeenCalledWith('codex resume codex-session-123')
+  })
+
+  it('does not show resume command on shell pane header context menu', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithSession()
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div data-context={ContextIds.Pane} data-tab-id="tab-1" data-pane-id="pane-1">
+            Shell Pane Header
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Shell Pane Header'), keys: '[MouseRight]' })
+    expect(screen.queryByRole('menuitem', { name: 'Copy resume command' })).toBeNull()
+  })
+
+  it('does not show resume command on shell pane context menu', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithSession()
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div data-context={ContextIds.Terminal} data-tab-id="tab-1" data-pane-id="pane-1">
+            Shell Pane
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Shell Pane'), keys: '[MouseRight]' })
+    expect(screen.queryByRole('menuitem', { name: 'Copy resume command' })).toBeNull()
+  })
+
+  it('shows resume command on tab context menu only when tab has a single CLI pane', async () => {
+    const user = userEvent.setup()
+    const store = configureStore({
+      reducer: {
+        tabs: tabsReducer,
+        panes: panesReducer,
+        sessions: sessionsReducer,
+        connection: connectionReducer,
+        settings: settingsReducer,
+        extensions: extensionsReducer,
+      },
+      middleware: (getDefaultMiddleware) =>
+        getDefaultMiddleware({ serializableCheck: false }),
+      preloadedState: {
+        tabs: {
+          tabs: [
+            {
+              id: 'tab-1',
+              createRequestId: 'tab-1',
+              title: 'Claude',
+              status: 'running',
+              mode: 'claude',
+              createdAt: 1,
+            },
+            {
+              id: 'tab-2',
+              createRequestId: 'tab-2',
+              title: 'Split',
+              status: 'running',
+              mode: 'shell',
+              createdAt: 2,
+            },
+          ],
+          activeTabId: 'tab-1',
+          renameRequestTabId: null,
+        },
+        panes: {
+          layouts: {
+            'tab-1': {
+              type: 'leaf',
+              id: 'pane-1',
+              content: {
+                kind: 'terminal',
+                mode: 'claude',
+                status: 'running',
+                resumeSessionId: VALID_SESSION_ID,
+              },
+            },
+            'tab-2': {
+              type: 'split',
+              id: 'split-1',
+              direction: 'horizontal',
+              sizes: [0.5, 0.5],
+              children: [
+                {
+                  type: 'leaf',
+                  id: 'pane-2a',
+                  content: { kind: 'terminal', mode: 'claude', status: 'running', resumeSessionId: VALID_SESSION_ID },
+                },
+                {
+                  type: 'leaf',
+                  id: 'pane-2b',
+                  content: { kind: 'terminal', mode: 'shell', status: 'running' },
+                },
+              ],
+            },
+          },
+          activePane: { 'tab-1': 'pane-1', 'tab-2': 'pane-2a' },
+          paneTitles: {},
+        },
+        sessions: {
+          projects: [],
+          expandedProjects: new Set<string>(),
+        },
+        extensions: {
+          entries: defaultCliExtensions,
+        },
+        connection: {
+          status: 'ready',
+          platform: null,
+        },
+      },
+    })
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div>
+            <div data-context={ContextIds.Tab} data-tab-id="tab-1">Single CLI Tab</div>
+            <div data-context={ContextIds.Tab} data-tab-id="tab-2">Split Tab</div>
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Single CLI Tab'), keys: '[MouseRight]' })
+    await user.click(screen.getByRole('menuitem', { name: 'Copy resume command' }))
+    expect(clipboardMocks.copyText).toHaveBeenCalledWith(`claude --resume ${VALID_SESSION_ID}`)
+
+    await user.pointer({ target: screen.getByText('Split Tab'), keys: '[MouseRight]' })
+    expect(screen.queryByRole('menuitem', { name: 'Copy resume command' })).toBeNull()
+  })
+
+  describe('platform-specific tab-add menu', () => {
+    it('shows Shell option on non-Windows platforms', async () => {
+      const user = userEvent.setup()
+      renderWithProvider(
+        <div data-context={ContextIds.TabAdd}>Add Tab</div>,
+        { platform: 'darwin' }
+      )
+
+      await user.pointer({ target: screen.getByText('Add Tab'), keys: '[MouseRight]' })
+
+      expect(screen.getByText('New Shell tab')).toBeInTheDocument()
+      expect(screen.queryByText('New CMD tab')).not.toBeInTheDocument()
+      expect(screen.queryByText('New PowerShell tab')).not.toBeInTheDocument()
+      expect(screen.queryByText('New WSL tab')).not.toBeInTheDocument()
+    })
+
+    it('shows Windows shell options on win32 platform', async () => {
+      const user = userEvent.setup()
+      renderWithProvider(
+        <div data-context={ContextIds.TabAdd}>Add Tab</div>,
+        { platform: 'win32' }
+      )
+
+      await user.pointer({ target: screen.getByText('Add Tab'), keys: '[MouseRight]' })
+
+      expect(screen.getByText('New CMD tab')).toBeInTheDocument()
+      expect(screen.getByText('New PowerShell tab')).toBeInTheDocument()
+      expect(screen.getByText('New WSL tab')).toBeInTheDocument()
+      expect(screen.queryByText('New Shell tab')).not.toBeInTheDocument()
+    })
+
+    it('shows Windows shell options on wsl platform', async () => {
+      const user = userEvent.setup()
+      renderWithProvider(
+        <div data-context={ContextIds.TabAdd}>Add Tab</div>,
+        { platform: 'wsl' }
+      )
+
+      await user.pointer({ target: screen.getByText('Add Tab'), keys: '[MouseRight]' })
+
+      expect(screen.getByText('New CMD tab')).toBeInTheDocument()
+      expect(screen.getByText('New PowerShell tab')).toBeInTheDocument()
+      expect(screen.getByText('New WSL tab')).toBeInTheDocument()
+      expect(screen.queryByText('New Shell tab')).not.toBeInTheDocument()
+    })
+
+    it('shows Shell option when platform is null', async () => {
+      const user = userEvent.setup()
+      renderWithProvider(
+        <div data-context={ContextIds.TabAdd}>Add Tab</div>,
+        { platform: null }
+      )
+
+      await user.pointer({ target: screen.getByText('Add Tab'), keys: '[MouseRight]' })
+
+      expect(screen.getByText('New Shell tab')).toBeInTheDocument()
+      expect(screen.queryByText('New CMD tab')).not.toBeInTheDocument()
+    })
+
+    it('always shows Browser and Editor options', async () => {
+      const user = userEvent.setup()
+      renderWithProvider(
+        <div data-context={ContextIds.TabAdd}>Add Tab</div>,
+        { platform: 'win32' }
+      )
+
+      await user.pointer({ target: screen.getByText('Add Tab'), keys: '[MouseRight]' })
+
+      expect(screen.getByText('New Browser tab')).toBeInTheDocument()
+      expect(screen.getByText('New Editor tab')).toBeInTheDocument()
+    })
+  })
+
+  it('renders Copy, Paste, and Select all as the first terminal menu section with icons', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithTerminalPane()
+
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <div data-context={ContextIds.Terminal} data-tab-id="tab-1" data-pane-id="pane-1">
+            Terminal Content
+          </div>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('Terminal Content'), keys: '[MouseRight]' })
+
+    const menu = screen.getByRole('menu')
+    const children = Array.from(menu.children)
+    expect(
+      children.slice(0, 4).map((node) =>
+        node.getAttribute('role') === 'menuitem'
+          ? node.textContent?.replace(/\s+/g, ' ').trim()
+          : node.getAttribute('role'),
+      ),
+    ).toEqual(['Copy', 'Paste', 'Select all', 'separator'])
+
+    for (const node of children.slice(0, 3)) {
+      expect(node.querySelector('svg')).not.toBeNull()
+    }
+  })
+
+  describe('Replace pane', () => {
+    it('detaches terminal and replaces pane with picker via context menu', async () => {
+      const user = userEvent.setup()
+      wsMocks.send.mockClear()
+
+      const store = createStoreWithTerminalPane()
+
+      render(
+        <Provider store={store}>
+          <ContextMenuProvider
+            view="terminal"
+            onViewChange={() => {}}
+            onToggleSidebar={() => {}}
+            sidebarCollapsed={false}
+          >
+            <div data-context={ContextIds.Terminal} data-tab-id="tab-1" data-pane-id="pane-1">
+              Terminal Content
+            </div>
+          </ContextMenuProvider>
+        </Provider>
+      )
+
+      await user.pointer({ target: screen.getByText('Terminal Content'), keys: '[MouseRight]' })
+      expect(screen.getByRole('menu')).toBeInTheDocument()
+
+      await user.click(screen.getByRole('menuitem', { name: 'Replace pane' }))
+
+      // F2 (delta-r7-r3): the gate sends the close evidence and AWAITS the
+      // correlated server answer BEFORE the pane becomes a picker.
+      expect(wsMocks.send).toHaveBeenCalledWith({
+        type: 'pane.closed',
+        createRequestId: 'req-replace-1',
+        terminalId: 'term-1',
+      })
+      ackPendingPaneCloses()
+      await waitFor(() => {
+        const layout = store.getState().panes.layouts['tab-1']
+        expect(layout.type === 'leaf' && layout.content.kind === 'picker').toBe(true)
+      })
+
+      // Verify the plain identity-driven terminal.detach was sent (F1: the
+      // close evidence now rides its own pane.closed message, above)
+      expect(wsMocks.send).toHaveBeenCalledWith({ type: 'terminal.detach', terminalId: 'term-1' })
+
+      // Verify pane content is now picker
+      const layout = store.getState().panes.layouts['tab-1']
+      expect(layout.type).toBe('leaf')
+      if (layout.type === 'leaf') {
+        expect(layout.content).toEqual({ kind: 'picker' })
+      }
+
+      // Verify pane content no longer has the old terminal
+      // (tab.terminalId was removed; terminal ownership is in pane content only)
+    })
+
+    it('sends exactly one terminal.detach when replacing a pane via context menu', async () => {
+      const user = userEvent.setup()
+      wsMocks.send.mockClear()
+
+      const store = createStoreWithTerminalPane()
+
+      render(
+        <Provider store={store}>
+          <ContextMenuProvider
+            view="terminal"
+            onViewChange={() => {}}
+            onToggleSidebar={() => {}}
+            sidebarCollapsed={false}
+          >
+            <div data-context={ContextIds.Terminal} data-tab-id="tab-1" data-pane-id="pane-1">
+              Terminal Content
+            </div>
+          </ContextMenuProvider>
+        </Provider>
+      )
+
+      await user.pointer({ target: screen.getByText('Terminal Content'), keys: '[MouseRight]' })
+      expect(screen.getByRole('menu')).toBeInTheDocument()
+
+      await user.click(screen.getByRole('menuitem', { name: 'Replace pane' }))
+
+      ackPendingPaneCloses()
+      await waitFor(() => {
+        const layout = store.getState().panes.layouts['tab-1']
+        expect(layout.type === 'leaf' && layout.content.kind === 'picker').toBe(true)
+      })
+
+      const detachMessages = wsMocks.send.mock.calls
+        .map(([msg]) => msg as { type?: string; terminalId?: string })
+        .filter((msg) => msg?.type === 'terminal.detach')
+      expect(detachMessages).toHaveLength(1)
+      // Exactly ONE pane-close evidence message keyed by the replaced pane:
+      // the gate's acknowledged send is THE send (the middleware belt skips
+      // it via the one-shot confirmation mark — delta-r7-r3, F2).
+      const paneClosedMessages = wsMocks.send.mock.calls
+        .map(([msg]) => msg as { type?: string; createRequestId?: string })
+        .filter((msg) => msg?.type === 'pane.closed')
+      expect(paneClosedMessages).toEqual([
+        { type: 'pane.closed', createRequestId: 'req-replace-1', terminalId: 'term-1' },
+      ])
+    })
+
+  })
+
+  it('opens the tabs-card menu on right click via data-context', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithTabRegistry()
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={() => {}}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <button type="button" data-context={ContextIds.TabsCard} data-tab-key="remote:open-1">
+            remote open card
+          </button>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('remote open card'), keys: '[MouseRight]' })
+
+    expect(screen.getByRole('menuitem', { name: /Pull to this device/i })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: /Copy tab name/i })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: /Jump to tab/i })).toBeNull()
+  })
+
+  it('pull to this device creates a local tab and switches view', async () => {
+    const user = userEvent.setup()
+    const store = createStoreWithTabRegistry()
+    const onViewChange = vi.fn()
+    render(
+      <Provider store={store}>
+        <ContextMenuProvider
+          view="terminal"
+          onViewChange={onViewChange}
+          onToggleSidebar={() => {}}
+          sidebarCollapsed={false}
+        >
+          <button type="button" data-context={ContextIds.TabsCard} data-tab-key="remote:open-1">
+            remote open card
+          </button>
+        </ContextMenuProvider>
+      </Provider>
+    )
+
+    await user.pointer({ target: screen.getByText('remote open card'), keys: '[MouseRight]' })
+    await user.click(screen.getByRole('menuitem', { name: /Pull to this device/i }))
+
+    expect(store.getState().tabs.tabs.some((t) => t.title === 'remote open')).toBe(true)
+    expect(onViewChange).toHaveBeenCalledWith('terminal')
+  })
+
+  it('keyboard navigation focuses menu items with preventScroll', async () => {
+    const user = userEvent.setup()
+    renderWithProvider(
+      <div data-context={ContextIds.Tab} data-tab-id="tab-1">
+        Tab One
+      </div>
+    )
+
+    await user.pointer({ target: screen.getByText('Tab One'), keys: '[MouseRight]' })
+    const menu = screen.getByRole('menu')
+
+    const focusSpy = vi.spyOn(HTMLElement.prototype, 'focus')
+    fireEvent.keyDown(menu, { key: 'ArrowDown' })
+    fireEvent.keyDown(menu, { key: 'End' })
+    fireEvent.keyDown(menu, { key: 'Home' })
+    fireEvent.keyDown(menu, { key: 'ArrowUp' })
+
+    expect(focusSpy).toHaveBeenCalled()
+    for (const call of focusSpy.mock.calls) {
+      expect(call[0]).toEqual({ preventScroll: true })
+    }
+    focusSpy.mockRestore()
+  })
+})
+
+describe('fresh-agent turn carve-out', () => {
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  function simulateTouch(
+    type: 'touchstart' | 'touchmove' | 'touchend' | 'touchcancel',
+    target: Element,
+    clientX = 100,
+    clientY = 100,
+  ) {
+    const touch = { clientX, clientY, identifier: 0, target }
+    const touchEvent = new TouchEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      touches: type === 'touchend' || type === 'touchcancel' ? [] : [touch as any],
+      changedTouches: [touch as any],
+    })
+    target.dispatchEvent(touchEvent)
+    return touchEvent
+  }
+
+  function renderFreshAgentFixture(turnArticleAttrs: Record<string, string> = {}) {
+    return renderWithProvider(
+      <div
+        data-context={ContextIds.FreshAgent}
+        data-tab-id="tab-1"
+        data-pane-id="pane-1"
+        data-session-id="sess-1"
+        data-provider="claude"
+        data-session-type="freshclaude"
+      >
+        <article data-turn-role="assistant" {...turnArticleAttrs}>
+          <p>Turn body text</p>
+        </article>
+        <div>Pane background</div>
+      </div>,
+    )
+  }
+
+  it('opens the provider menu for a fine-pointer right-click on plain turn text', () => {
+    renderFreshAgentFixture()
+
+    const target = screen.getByText('Turn body text')
+    const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 100 })
+    act(() => {
+      target.dispatchEvent(event)
+    })
+
+    // Exactly one menu, and it is the PROVIDER's fresh-agent menu — the
+    // transcript no longer renders a turn menu of its own (one menu system).
+    // The touch/sheet carve-out stays gesture-scoped: fine-pointer turn
+    // right-clicks are ordinary fresh-agent targets now.
+    expect(event.defaultPrevented).toBe(true)
+    expect(screen.getAllByRole('menu')).toHaveLength(1)
+    expect(screen.getByRole('menuitem', { name: 'Select all' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Copy session ID' })).toBeInTheDocument()
+    // Without a pane-registered turn-items builder there are no turn rows.
+    expect(screen.queryByRole('menuitem', { name: 'Fork conversation from here' })).toBeNull()
+  })
+
+  it('still opens the pane menu for contextmenu in the pane container outside any turn article', () => {
+    renderFreshAgentFixture()
+
+    const target = screen.getByText('Pane background')
+    const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 100 })
+    act(() => {
+      target.dispatchEvent(event)
+    })
+
+    expect(event.defaultPrevented).toBe(true)
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+  })
+
+  describe('specialized sub-region partition', () => {
+    function renderSpecializedFixture() {
+      return renderWithProvider(
+        <div
+          data-context={ContextIds.FreshAgent}
+          data-tab-id="tab-1"
+          data-pane-id="pane-1"
+          data-session-id="sess-1"
+          data-provider="claude"
+          data-session-type="freshclaude"
+        >
+          <article data-turn-role="assistant">
+            <div className="prose prose-sm" data-markdown-body="">
+              <pre><code>const answer = 42</code></pre>
+            </div>
+            <pre data-tool-output="">tool output line</pre>
+            <div data-diff="" data-file-path="/tmp/a.ts">
+              <span>diff body</span>
+            </div>
+            <p>Plain turn text</p>
+          </article>
+        </div>,
+      )
+    }
+
+    function rightClick(target: Element) {
+      const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 100 })
+      act(() => {
+        target.dispatchEvent(event)
+      })
+      return event
+    }
+
+    it('opens the provider context-sensitive menu (not the turn menu) for a right-click on a code block inside a turn', () => {
+      const { container } = renderSpecializedFixture()
+
+      const codeEl = container.querySelector('.prose pre code') as HTMLElement
+      const event = rightClick(codeEl)
+
+      expect(event.defaultPrevented).toBe(true)
+      // Exactly one menu, and it is the PROVIDER's context-sensitive fresh-
+      // agent menu — the whole-turn "Turn context menu" must not open here
+      // (the transcript article yields on specialized sub-regions).
+      expect(screen.getAllByRole('menu')).toHaveLength(1)
+      expect(screen.queryByRole('menu', { name: 'Turn context menu' })).toBeNull()
+      expect(screen.getByRole('menuitem', { name: 'Copy code block' })).toBeInTheDocument()
+    })
+
+    it('opens the provider context-sensitive menu for tool output inside a turn', () => {
+      const { container } = renderSpecializedFixture()
+
+      const outputEl = container.querySelector('[data-tool-output]') as HTMLElement
+      const event = rightClick(outputEl)
+
+      expect(event.defaultPrevented).toBe(true)
+      expect(screen.getAllByRole('menu')).toHaveLength(1)
+      expect(screen.queryByRole('menu', { name: 'Turn context menu' })).toBeNull()
+      expect(screen.getByRole('menuitem', { name: 'Copy output' })).toBeInTheDocument()
+    })
+
+    it('opens the provider context-sensitive menu for a diff inside a turn', () => {
+      renderSpecializedFixture()
+
+      const event = rightClick(screen.getByText('diff body'))
+
+      expect(event.defaultPrevented).toBe(true)
+      expect(screen.getAllByRole('menu')).toHaveLength(1)
+      expect(screen.queryByRole('menu', { name: 'Turn context menu' })).toBeNull()
+      expect(screen.getByRole('menuitem', { name: 'Copy new version' })).toBeInTheDocument()
+    })
+
+    it('opens the provider menu for plain turn text inside the specialized fixture (no more whole-turn carve-out)', () => {
+      renderSpecializedFixture()
+
+      const event = rightClick(screen.getByText('Plain turn text'))
+
+      expect(event.defaultPrevented).toBe(true)
+      expect(screen.getAllByRole('menu')).toHaveLength(1)
+      // Plain turn text hits no specialized sub-region, so the region items
+      // stay off; the base fresh-agent rows remain.
+      expect(screen.queryByRole('menuitem', { name: 'Copy code block' })).toBeNull()
+      expect(screen.getByRole('menuitem', { name: 'Select all' })).toBeInTheDocument()
+    })
+  })
+
+  describe('turn action items from the pane registry', () => {
+    function registerPaneTurnItems(onFork: (turnId: string) => void) {
+      return registerFreshAgentTurnItems('pane-1', (articleIndex) =>
+        articleIndex === 0
+          ? [
+              { label: 'Copy turn text', run: vi.fn() },
+              { label: 'Fork conversation from here', run: () => onFork('turn-1') },
+              { label: 'Undo to here', disabled: true, run: vi.fn() },
+              { label: 'Rewind code to here', destructive: true, run: vi.fn() },
+            ]
+          : null,
+      )
+    }
+
+    it('prepends the pane-registered turn actions for plain-text regions of a turn article', () => {
+      const onFork = vi.fn()
+      const unregister = registerPaneTurnItems(onFork)
+      try {
+        renderFreshAgentFixture({ 'data-turn-index': '0' })
+
+        const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 100 })
+        act(() => {
+          screen.getByText('Turn body text').dispatchEvent(event)
+        })
+
+        // One menu system renders — the turn-specific rows come first, then a
+        // separator, then the base fresh-agent items.
+        expect(screen.getAllByRole('menu')).toHaveLength(1)
+        const labels = screen.getAllByRole('menuitem').map((el) => el.textContent)
+        expect(labels.slice(0, 4)).toEqual([
+          'Copy turn text',
+          'Fork conversation from here',
+          'Undo to here',
+          'Rewind code to here',
+        ])
+        expect(labels).toContain('Select all')
+        expect(labels).toContain('Copy session ID')
+
+        // Builder gates map onto MenuItem semantics: disabled rows stay
+        // inert, destructive rows render with danger styling.
+        expect(screen.getByRole('menuitem', { name: 'Undo to here' })).toBeDisabled()
+        expect(screen.getByRole('menuitem', { name: 'Rewind code to here' }).className).toContain('text-destructive')
+
+        // Item activation runs the builder's callback.
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Fork conversation from here' }))
+        expect(onFork).toHaveBeenCalledWith('turn-1')
+      } finally {
+        unregister()
+      }
+    })
+
+    it('keeps turn actions off specialized sub-regions of the same turn (the region selects items, not menus)', () => {
+      const onFork = vi.fn()
+      const unregister = registerPaneTurnItems(onFork)
+      try {
+        const { container } = renderWithProvider(
+          <div
+            data-context={ContextIds.FreshAgent}
+            data-tab-id="tab-1"
+            data-pane-id="pane-1"
+            data-session-id="sess-1"
+            data-provider="claude"
+            data-session-type="freshclaude"
+          >
+            <article data-turn-role="assistant" data-turn-index="0">
+              <div className="prose prose-sm" data-markdown-body="">
+                <pre><code>const answer = 42</code></pre>
+              </div>
+            </article>
+          </div>,
+        )
+
+        const codeEl = container.querySelector('.prose pre code') as HTMLElement
+        const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 100 })
+        act(() => {
+          codeEl.dispatchEvent(event)
+        })
+
+        // The PR-#735 partition survives as ITEM selection within the one
+        // menu: code blocks keep their context rows and gain no turn rows.
+        expect(event.defaultPrevented).toBe(true)
+        expect(screen.getAllByRole('menu')).toHaveLength(1)
+        expect(screen.getByRole('menuitem', { name: 'Copy code block' })).toBeInTheDocument()
+        expect(screen.queryByRole('menuitem', { name: 'Fork conversation from here' })).toBeNull()
+      } finally {
+        unregister()
+      }
+    })
+  })
+
+  // These two tests drive the provider's 500ms long-press timer, so they need
+  // fake timers. They are scoped to this nested describe ONLY (restore in its
+  // afterEach): the outer suite stays real-timers by design.
+  describe('hybrid-input long-press', () => {
+    let elementFromPointMock: ReturnType<typeof vi.fn>
+    let originalElementFromPoint: typeof document.elementFromPoint
+
+    beforeEach(() => {
+      vi.useFakeTimers()
+      originalElementFromPoint = document.elementFromPoint
+      elementFromPointMock = vi.fn().mockReturnValue(null)
+      document.elementFromPoint = elementFromPointMock
+    })
+
+    afterEach(() => {
+      document.elementFromPoint = originalElementFromPoint
+      vi.useRealTimers()
+    })
+
+    it('still opens the provider long-press menu on a turn article WITHOUT data-longpress-owned (iPad-like fallback preserved)', () => {
+      renderFreshAgentFixture()
+
+      const article = screen.getByText('Turn body text').closest('article')!
+      elementFromPointMock.mockReturnValue(article)
+
+      act(() => {
+        simulateTouch('touchstart', article, 100, 100)
+      })
+      act(() => {
+        vi.advanceTimersByTime(500)
+      })
+
+      expect(elementFromPointMock).toHaveBeenCalled()
+      expect(screen.getByRole('menu')).toBeInTheDocument()
+    })
+
+    it('leaves the whole gesture alone on a turn article WITH data-longpress-owned="true"', () => {
+      renderFreshAgentFixture({ 'data-longpress-owned': 'true' })
+
+      const article = screen.getByText('Turn body text').closest('article')!
+      const outside = screen.getByText('Pane background')
+      elementFromPointMock.mockReturnValue(article)
+
+      act(() => {
+        simulateTouch('touchstart', article, 100, 100)
+      })
+      act(() => {
+        vi.advanceTimersByTime(500)
+      })
+
+      // The transcript's own long-press owns this gesture: no probe, no menu,
+      // no release suppression from the provider.
+      expect(elementFromPointMock).not.toHaveBeenCalled()
+      expect(screen.queryByRole('menu')).toBeNull()
+
+      const release = simulateTouch('touchend', article, 100, 100)
+      expect(release.defaultPrevented).toBe(false)
+
+      // The skipped gesture must not corrupt the provider's touch-session
+      // tracking: a following long-press outside the turn works normally.
+      elementFromPointMock.mockReturnValue(outside)
+      act(() => {
+        simulateTouch('touchstart', outside, 100, 100)
+      })
+      act(() => {
+        vi.advanceTimersByTime(500)
+      })
+
+      const menu = screen.getByRole('menu')
+      expect(menu).toBeInTheDocument()
+
+      // That menu's own release suppression still works after the skipped gesture.
+      const secondRelease = simulateTouch('touchend', outside, 100, 100)
+      expect(secondRelease.defaultPrevented).toBe(true)
+      expect(screen.getByRole('menu')).toBeInTheDocument()
+    })
+  })
+})

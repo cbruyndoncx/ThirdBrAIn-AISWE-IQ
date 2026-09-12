@@ -1,0 +1,515 @@
+import { describe, expect, it } from 'vitest'
+import {
+  collectSessionLocatorsFromTabs,
+  collectSessionRefsFromNode,
+  collectSessionRefsFromTabs,
+  extractSessionLocators,
+  findPaneForSession,
+  findTabIdForSession,
+  getActiveSessionRefForTab,
+  getSessionsForHello,
+  liveTerminalRowIdentity,
+} from '@/lib/session-utils'
+import type {
+  FreshAgentPaneContent,
+  PaneContent,
+  PaneNode,
+  SessionLocator,
+  TerminalPaneContent,
+} from '@/store/paneTypes'
+import type { RootState } from '@/store/store'
+import type { BackgroundTerminal } from '@/store/types'
+
+const VALID_SESSION_ID = '550e8400-e29b-41d4-a716-446655440000'
+const OTHER_SESSION_ID = '6f1c2b3a-4d5e-4f70-8a9b-0c1d2e3f4a5b'
+
+function terminalContent(
+  mode: TerminalPaneContent['mode'],
+  options: {
+    resumeSessionId?: string
+    sessionRef?: SessionLocator
+    serverInstanceId?: string
+    terminalId?: string
+  } = {},
+): TerminalPaneContent {
+  const identity = options.sessionRef?.sessionId ?? options.resumeSessionId ?? 'fresh'
+  return {
+    kind: 'terminal',
+    mode,
+    status: 'running',
+    createRequestId: `req-${identity}`,
+    ...(options.terminalId ? { terminalId: options.terminalId } : {}),
+    ...(options.resumeSessionId ? { resumeSessionId: options.resumeSessionId } : {}),
+    ...(options.sessionRef ? { sessionRef: options.sessionRef } : {}),
+    ...(options.serverInstanceId ? { serverInstanceId: options.serverInstanceId } : {}),
+  }
+}
+
+function freshAgentContent(
+  options: {
+    resumeSessionId?: string
+    sessionRef?: SessionLocator
+  } = {},
+): FreshAgentPaneContent {
+  const identity = options.sessionRef?.sessionId ?? options.resumeSessionId ?? 'fresh'
+  return {
+    kind: 'fresh-agent',
+    sessionType: 'freshclaude',
+    provider: 'claude',
+    status: 'idle',
+    createRequestId: `req-fresh-${identity}`,
+    ...(options.resumeSessionId ? { resumeSessionId: options.resumeSessionId } : {}),
+    ...(options.sessionRef ? { sessionRef: options.sessionRef } : {}),
+  }
+}
+
+function leaf(id: string, content: PaneContent): PaneNode {
+  return { type: 'leaf', id, content }
+}
+
+describe('getSessionsForHello', () => {
+  it('reports only canonical Claude identities from active, visible, and background tabs', () => {
+    const state = {
+      tabs: {
+        activeTabId: 'tab-1',
+        tabs: [{ id: 'tab-1' }, { id: 'tab-2' }],
+      },
+      panes: {
+        layouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              leaf('pane-claude-active', terminalContent('claude', { resumeSessionId: VALID_SESSION_ID })),
+              leaf('pane-codex-visible', terminalContent('codex', {
+                sessionRef: { provider: 'codex', sessionId: 'codex-session-1' },
+              })),
+            ],
+          },
+          'tab-2': leaf('pane-claude-background', freshAgentContent({ resumeSessionId: OTHER_SESSION_ID })),
+        },
+        activePane: {
+          'tab-1': 'pane-claude-active',
+        },
+      },
+    } as unknown as RootState
+
+    expect(getSessionsForHello(state)).toEqual({
+      active: VALID_SESSION_ID,
+      visible: [],
+      background: [OTHER_SESSION_ID],
+    })
+  })
+
+  it('ignores non-canonical Claude resume strings when building hello session state', () => {
+    const state = {
+      tabs: {
+        activeTabId: 'tab-1',
+        tabs: [{ id: 'tab-1' }],
+      },
+      panes: {
+        layouts: {
+          'tab-1': leaf('pane-claude', terminalContent('claude', { resumeSessionId: 'named-resume' })),
+        },
+        activePane: {
+          'tab-1': 'pane-claude',
+        },
+      },
+    } as unknown as RootState
+
+    expect(getSessionsForHello(state)).toEqual({
+      visible: [],
+    })
+  })
+})
+
+describe('collectSessionLocatorsFromTabs', () => {
+  it('keeps canonical sessionRef values and UUID-backed Claude fallbacks, dropping locality and invalid legacy values', () => {
+    const tabs = [
+      { id: 'tab-explicit' },
+      { id: 'tab-claude-fallback', mode: 'claude', resumeSessionId: VALID_SESSION_ID },
+      { id: 'tab-invalid-claude' },
+      { id: 'tab-invalid-codex', mode: 'codex', resumeSessionId: 'codex-session-legacy' },
+    ] as RootState['tabs']['tabs']
+
+    const panes = {
+      layouts: {
+        'tab-explicit': leaf('pane-explicit', terminalContent('codex', {
+          sessionRef: {
+            provider: 'codex',
+            sessionId: 'codex-session-1',
+          },
+          serverInstanceId: 'srv-local',
+        })),
+        'tab-invalid-claude': leaf('pane-invalid-claude', terminalContent('claude', { resumeSessionId: 'named-resume' })),
+      },
+      activePane: {},
+    } as RootState['panes']
+
+    expect(collectSessionLocatorsFromTabs(tabs, panes)).toEqual([
+      { provider: 'codex', sessionId: 'codex-session-1' },
+      { provider: 'claude', sessionId: VALID_SESSION_ID },
+    ])
+
+    expect(collectSessionRefsFromTabs(tabs, panes)).toEqual([
+      { provider: 'codex', sessionId: 'codex-session-1' },
+      { provider: 'claude', sessionId: VALID_SESSION_ID },
+    ])
+  })
+})
+
+describe('collectSessionRefsFromNode', () => {
+  it('prefers explicit sessionRef over legacy terminal resumeSessionId', () => {
+    const node = leaf('pane-1', terminalContent('shell', {
+      resumeSessionId: 'legacy-shell-resume',
+      sessionRef: {
+        provider: 'codex',
+        sessionId: 'codex-explicit-session',
+      },
+    }))
+
+    expect(collectSessionRefsFromNode(node)).toEqual([
+      { provider: 'codex', sessionId: 'codex-explicit-session' },
+    ])
+  })
+
+  it('collects fresh-agent pane resume identities by runtime provider', () => {
+    const node = leaf('pane-fresh', freshAgentContent({ resumeSessionId: VALID_SESSION_ID }))
+    expect(collectSessionRefsFromNode(node)).toEqual([
+      { provider: 'claude', sessionId: VALID_SESSION_ID },
+    ])
+  })
+})
+
+describe('getActiveSessionRefForTab', () => {
+  it('returns the active pane canonical session ref', () => {
+    const state = {
+      tabs: {
+        activeTabId: 'tab-1',
+        tabs: [{ id: 'tab-1' }],
+      },
+      panes: {
+        layouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              leaf('pane-shell', terminalContent('shell')),
+              leaf('pane-codex', terminalContent('codex', {
+                sessionRef: { provider: 'codex', sessionId: 'codex-active' },
+              })),
+            ],
+          },
+        },
+        activePane: { 'tab-1': 'pane-codex' },
+      },
+    } as unknown as RootState
+
+    expect(getActiveSessionRefForTab(state, 'tab-1')).toEqual({
+      provider: 'codex',
+      sessionId: 'codex-active',
+    })
+  })
+})
+
+describe('findTabIdForSession', () => {
+  it('matches explicit canonical sessionRef values without relying on locality', () => {
+    const state = {
+      tabs: {
+        activeTabId: 'tab-remote',
+        tabs: [{ id: 'tab-remote' }, { id: 'tab-local' }],
+      },
+      panes: {
+        layouts: {
+          'tab-remote': leaf('pane-remote', terminalContent('codex', {
+            sessionRef: { provider: 'codex', sessionId: 'shared' },
+          })),
+          'tab-local': leaf('pane-local', terminalContent('codex', {
+            sessionRef: { provider: 'codex', sessionId: 'shared' },
+          })),
+        },
+        activePane: {},
+      },
+    } as unknown as RootState
+
+    expect(findTabIdForSession(state, { provider: 'codex', sessionId: 'shared' }, 'srv-local')).toBe('tab-remote')
+  })
+
+  it('prefers a same-server explicit sessionRef over an explicitly foreign copy', () => {
+    const state = {
+      tabs: {
+        activeTabId: 'tab-remote',
+        tabs: [{ id: 'tab-remote' }, { id: 'tab-local' }],
+      },
+      panes: {
+        layouts: {
+          'tab-remote': leaf('pane-remote', terminalContent('codex', {
+            sessionRef: {
+              provider: 'codex',
+              sessionId: 'shared',
+            },
+            serverInstanceId: 'srv-remote',
+          })),
+          'tab-local': leaf('pane-local', terminalContent('codex', {
+            sessionRef: {
+              provider: 'codex',
+              sessionId: 'shared',
+            },
+            serverInstanceId: 'srv-local',
+            terminalId: 'term-local',
+          })),
+        },
+        activePane: {},
+      },
+    } as unknown as RootState
+
+    expect(findTabIdForSession(state, { provider: 'codex', sessionId: 'shared' }, 'srv-local')).toBe('tab-local')
+  })
+
+  it('falls back to tab-level canonical Claude resume ids when no layout exists', () => {
+    const state = {
+      tabs: {
+        activeTabId: 'tab-1',
+        tabs: [{ id: 'tab-1', mode: 'claude', resumeSessionId: VALID_SESSION_ID }],
+      },
+      panes: {
+        layouts: {},
+        activePane: {},
+      },
+    } as unknown as RootState
+
+    expect(findTabIdForSession(state, { provider: 'claude', sessionId: VALID_SESSION_ID })).toBe('tab-1')
+  })
+
+  it('does not match named Claude resumes without canonical sessionRef', () => {
+    const state = {
+      tabs: {
+        activeTabId: 'tab-1',
+        tabs: [{ id: 'tab-1', mode: 'claude', resumeSessionId: 'named-resume' }],
+      },
+      panes: {
+        layouts: {},
+        activePane: {},
+      },
+    } as unknown as RootState
+
+    expect(findTabIdForSession(state, { provider: 'claude', sessionId: 'named-resume' })).toBeUndefined()
+  })
+})
+
+describe('findPaneForSession', () => {
+  it('finds a pane by explicit canonical sessionRef', () => {
+    const state = {
+      tabs: {
+        activeTabId: 'tab-1',
+        tabs: [{ id: 'tab-1' }],
+      },
+      panes: {
+        layouts: {
+          'tab-1': leaf('pane-codex', terminalContent('codex', {
+            sessionRef: { provider: 'codex', sessionId: 'codex-pane' },
+          })),
+        },
+        activePane: { 'tab-1': 'pane-codex' },
+      },
+    } as unknown as RootState
+
+    expect(findPaneForSession(state, { provider: 'codex', sessionId: 'codex-pane' })).toEqual({
+      tabId: 'tab-1',
+      paneId: 'pane-codex',
+    })
+  })
+
+  it('does not match an explicitly foreign copied pane when a local server instance is known', () => {
+    const state = {
+      tabs: {
+        activeTabId: 'tab-1',
+        tabs: [{ id: 'tab-1' }],
+      },
+      panes: {
+        layouts: {
+          'tab-1': leaf('pane-codex', terminalContent('codex', {
+            sessionRef: {
+              provider: 'codex',
+              sessionId: 'codex-pane',
+            },
+            serverInstanceId: 'srv-remote',
+          })),
+        },
+        activePane: { 'tab-1': 'pane-codex' },
+      },
+    } as unknown as RootState
+
+    expect(findPaneForSession(
+      state,
+      { provider: 'codex', sessionId: 'codex-pane' },
+      'srv-local',
+    )).toBeUndefined()
+  })
+
+  it('finds a fresh-agent pane by canonical Claude resume id', () => {
+    const state = {
+      tabs: {
+        activeTabId: 'tab-1',
+        tabs: [{ id: 'tab-1' }],
+      },
+      panes: {
+        layouts: {
+          'tab-1': leaf('pane-fresh', freshAgentContent({ resumeSessionId: VALID_SESSION_ID })),
+        },
+        activePane: { 'tab-1': 'pane-fresh' },
+      },
+    } as unknown as RootState
+
+    expect(findPaneForSession(state, { provider: 'claude', sessionId: VALID_SESSION_ID })).toEqual({
+      tabId: 'tab-1',
+      paneId: 'pane-fresh',
+    })
+  })
+
+  it('returns a tab-level fallback only for canonical Claude ids', () => {
+    const state = {
+      tabs: {
+        activeTabId: 'tab-1',
+        tabs: [{ id: 'tab-1', mode: 'claude', resumeSessionId: VALID_SESSION_ID }],
+      },
+      panes: {
+        layouts: {},
+        activePane: {},
+      },
+    } as unknown as RootState
+
+    expect(findPaneForSession(state, { provider: 'claude', sessionId: VALID_SESSION_ID })).toEqual({
+      tabId: 'tab-1',
+      paneId: undefined,
+    })
+  })
+})
+
+describe('extractSessionLocators', () => {
+  it('is exported for cross-device registry identity stamping', () => {
+    expect(extractSessionLocators(terminalContent('claude', { resumeSessionId: VALID_SESSION_ID }))).toEqual([
+      { provider: 'claude', sessionId: VALID_SESSION_ID },
+    ])
+  })
+})
+
+describe('liveTerminalRowIdentity', () => {
+  function registryTerminal(overrides: Partial<BackgroundTerminal> = {}): BackgroundTerminal {
+    return {
+      terminalId: 'term-1',
+      title: 'Agent pane',
+      createdAt: 1,
+      lastActivityAt: 1,
+      status: 'running',
+      hasClients: true,
+      mode: 'opencode',
+      ...overrides,
+    }
+  }
+
+  function agentContent(
+    mode: TerminalPaneContent['mode'] = 'opencode',
+    options: Parameters<typeof terminalContent>[1] = {},
+  ): TerminalPaneContent {
+    return terminalContent(mode, { terminalId: 'term-1', ...options })
+  }
+
+  it('keys a running identity-less agent terminal as <mode>:terminal:<terminalId>', () => {
+    expect(liveTerminalRowIdentity(agentContent(), registryTerminal())).toEqual({
+      provider: 'opencode',
+      key: 'opencode:terminal:term-1',
+    })
+  })
+
+  it('falls back to the content-mode terminal key when the registry entry is missing', () => {
+    expect(liveTerminalRowIdentity(agentContent(), undefined)).toEqual({
+      provider: 'opencode',
+      key: 'opencode:terminal:term-1',
+    })
+    // Registry miss never keys shell content (shell terminals produce no row)
+    expect(liveTerminalRowIdentity(agentContent('shell'), undefined)).toBeUndefined()
+  })
+
+  it('returns undefined when the terminal is not running and carries no canonical identity', () => {
+    expect(liveTerminalRowIdentity(agentContent(), registryTerminal({ status: 'exited' }))).toBeUndefined()
+  })
+
+  it('returns undefined for shell-mode registry terminals', () => {
+    expect(liveTerminalRowIdentity(agentContent('shell'), registryTerminal({ mode: 'shell' }))).toBeUndefined()
+    expect(liveTerminalRowIdentity(agentContent('shell'), registryTerminal({ mode: undefined }))).toBeUndefined()
+  })
+
+  it('returns the canonical key when the registry terminal carries a sessionRef', () => {
+    expect(liveTerminalRowIdentity(agentContent(), registryTerminal({
+      sessionRef: { provider: 'opencode', sessionId: 'session-1' },
+    }))).toEqual({
+      provider: 'opencode',
+      key: 'opencode:session-1',
+    })
+    // Canonical rows do not depend on terminal liveness
+    expect(liveTerminalRowIdentity(agentContent(), registryTerminal({
+      status: 'exited',
+      sessionRef: { provider: 'opencode', sessionId: 'session-1' },
+    }))).toEqual({
+      provider: 'opencode',
+      key: 'opencode:session-1',
+    })
+  })
+
+  it('returns the codex canonical key for codex terminals with registry durability identity', () => {
+    const durable = {
+      schemaVersion: 1,
+      state: 'durable',
+      durableThreadId: 'durable-1',
+    } as const
+    expect(liveTerminalRowIdentity(agentContent('codex'), registryTerminal({
+      mode: 'codex',
+      codexDurability: durable,
+    }))).toEqual({ provider: 'codex', key: 'codex:durable-1' })
+    const candidateOnly = {
+      schemaVersion: 1,
+      state: 'identity_pending',
+      candidate: {
+        provider: 'codex',
+        candidateThreadId: 'cand-1',
+        rolloutPath: '/tmp/rollout.jsonl',
+        source: 'thread_start_response',
+        capturedAt: 1,
+      },
+    } as const
+    expect(liveTerminalRowIdentity(agentContent('codex'), registryTerminal({
+      mode: 'codex',
+      codexDurability: candidateOnly,
+    }))).toEqual({ provider: 'codex', key: 'codex:cand-1' })
+    // codex WITHOUT any durability identity still gets a terminal key
+    expect(liveTerminalRowIdentity(agentContent('codex'), registryTerminal({ mode: 'codex' }))).toEqual({
+      provider: 'codex',
+      key: 'codex:terminal:term-1',
+    })
+  })
+
+  it('returns nothing when the content already carries canonical identity (canonical loop covers it)', () => {
+    const withRef = agentContent('claude', {
+      sessionRef: { provider: 'claude', sessionId: VALID_SESSION_ID },
+    })
+    expect(liveTerminalRowIdentity(withRef, registryTerminal())).toBeUndefined()
+    expect(liveTerminalRowIdentity(withRef, undefined)).toBeUndefined()
+    const withDurability = {
+      ...agentContent('codex'),
+      codexDurability: { schemaVersion: 1, state: 'durable', durableThreadId: 'durable-own' } as const,
+    }
+    expect(liveTerminalRowIdentity(withDurability, undefined)).toBeUndefined()
+  })
+
+  it('returns undefined for non-terminal contents and terminals without a terminalId', () => {
+    expect(liveTerminalRowIdentity(freshAgentContent(), registryTerminal())).toBeUndefined()
+    expect(liveTerminalRowIdentity(freshAgentContent(), undefined)).toBeUndefined()
+    expect(liveTerminalRowIdentity(terminalContent('opencode'), registryTerminal())).toBeUndefined()
+    expect(liveTerminalRowIdentity(terminalContent('opencode'), undefined)).toBeUndefined()
+  })
+})

@@ -1,0 +1,1774 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { configureStore } from '@reduxjs/toolkit'
+import tabsReducer, {
+  addTab,
+  setActiveTab,
+  updateTab,
+  removeTab,
+  hydrateTabs,
+  closeTab,
+  reorderTabs,
+  openSessionTab,
+  TabsState,
+} from '../../../../src/store/tabsSlice'
+import panesReducer, { initLayout, splitPane } from '../../../../src/store/panesSlice'
+import connectionReducer from '../../../../src/store/connectionSlice'
+import extensionsReducer from '../../../../src/store/extensionsSlice'
+import sessionActivityReducer from '../../../../src/store/sessionActivitySlice'
+import terminalDirectoryReducer from '../../../../src/store/terminalDirectorySlice'
+import type { BackgroundTerminal, Tab } from '../../../../src/store/types'
+
+const VALID_CLAUDE_SESSION_ID = '550e8400-e29b-41d4-a716-446655440000'
+
+function createOpenSessionStore(serverInstanceId?: string) {
+  return configureStore({
+    reducer: {
+      tabs: tabsReducer,
+      panes: panesReducer,
+      connection: connectionReducer,
+    },
+    preloadedState: {
+      connection: {
+        status: serverInstanceId ? 'ready' : 'connected',
+        serverInstanceId,
+        platform: null,
+        availableClis: {},
+        featureFlags: {},
+      },
+    },
+  })
+}
+
+
+const { paneCloseAckHandlers, paneCloseAckMode } = vi.hoisted(() => ({
+  paneCloseAckHandlers: new Set<(msg: unknown) => void>(),
+  paneCloseAckMode: { fail: false },
+}))
+
+// Delta-r7-r3 (focused-episode-7 round 2, Finding F2): the close gate awaits
+// the correlated `pane.closed.result` before the layout loses a pane — this
+// mock answers EVERY pane.closed with success (the healthy-server shape), so
+// these tests exercise the acknowledged-close path end to end.
+vi.mock('@/lib/ws-client', () => ({
+  getWsClient: () => ({
+    send: (msg: unknown) => {
+      const m = msg as { type?: string; createRequestId?: string; requestId?: string }
+      if (m?.type === 'pane.closed' && m.createRequestId) {
+        for (const handler of [...paneCloseAckHandlers]) {
+          handler({ type: 'pane.closed.result', createRequestId: m.createRequestId, success: true })
+        }
+      }
+      // Focused-episode-7 round 3 (Finding F1): the whole-tab close is ONE
+      // batch envelope — answer the correlated `panes.closed.result` (the
+      // healthy-server shape), same as the per-pane lane above. The fail
+      // switch lets a test pin the failed-evidence path (the tab stays).
+      if (m?.type === 'panes.closed' && m.requestId) {
+        for (const handler of [...paneCloseAckHandlers]) {
+          handler({ type: 'panes.closed.result', requestId: m.requestId, success: !paneCloseAckMode.fail })
+        }
+      }
+    },
+    onMessage: (handler: (msg: unknown) => void) => {
+      paneCloseAckHandlers.add(handler)
+      return () => {
+        paneCloseAckHandlers.delete(handler)
+      }
+    },
+  }),
+  resetWsClientForTests: vi.fn(),
+}))
+
+// Mock nanoid to return predictable IDs for testing
+vi.mock('nanoid', () => ({
+  nanoid: vi.fn(() => 'test-id-' + Math.random().toString(36).substr(2, 9)),
+}))
+
+describe('tabsSlice', () => {
+  let initialState: TabsState
+
+  beforeEach(() => {
+    initialState = {
+      tabs: [],
+      activeTabId: null,
+    }
+    vi.clearAllMocks()
+    paneCloseAckMode.fail = false
+  })
+
+  describe('addTab', () => {
+    it('creates new tab with defaults when no payload provided', () => {
+      const state = tabsReducer(initialState, addTab())
+
+      expect(state.tabs).toHaveLength(1)
+      const tab = state.tabs[0]
+      expect(tab.title).toBe('Tab 1')
+      expect(tab.status).toBe('creating')
+      expect(tab.mode).toBe('shell')
+      expect(tab.shell).toBe('system')
+      expect(tab.id).toBeDefined()
+      expect(tab.createRequestId).toBe(tab.id)
+      expect(tab.createdAt).toBeDefined()
+      expect(state.activeTabId).toBe(tab.id)
+    })
+
+    it('does not force initialCwd by default (lets server apply defaultCwd)', () => {
+      const state = tabsReducer(initialState, addTab({ mode: 'shell' }))
+      expect(state.tabs[0].initialCwd).toBeUndefined()
+    })
+
+    it('creates new tab with defaults when empty payload provided', () => {
+      const state = tabsReducer(initialState, addTab({}))
+
+      expect(state.tabs).toHaveLength(1)
+      const tab = state.tabs[0]
+      expect(tab.title).toBe('Tab 1')
+      expect(tab.status).toBe('creating')
+      expect(tab.mode).toBe('shell')
+      expect(tab.shell).toBe('system')
+    })
+
+    it('accepts custom title', () => {
+      const state = tabsReducer(initialState, addTab({ title: 'My Custom Terminal' }))
+
+      expect(state.tabs[0].title).toBe('My Custom Terminal')
+    })
+
+    it('accepts custom mode', () => {
+      const state = tabsReducer(initialState, addTab({ mode: 'claude' }))
+
+      expect(state.tabs[0].mode).toBe('claude')
+    })
+
+    it('accepts custom shell', () => {
+      const state = tabsReducer(initialState, addTab({ shell: 'powershell' }))
+
+      expect(state.tabs[0].shell).toBe('powershell')
+    })
+
+    it('accepts all custom options', () => {
+      const state = tabsReducer(
+        initialState,
+        addTab({
+          title: 'Custom Tab',
+          description: 'A test description',
+          mode: 'codex',
+          shell: 'wsl',
+          status: 'running',
+          initialCwd: '/home/user',
+          sessionRef: {
+            provider: 'codex',
+            sessionId: 'session-123',
+          },
+        })
+      )
+
+      const tab = state.tabs[0]
+      expect(tab.title).toBe('Custom Tab')
+      expect(tab.description).toBe('A test description')
+      expect(tab.mode).toBe('codex')
+      expect(tab.shell).toBe('wsl')
+      expect(tab.status).toBe('running')
+      expect(tab.initialCwd).toBe('/home/user')
+      expect(tab.sessionRef).toEqual({
+        provider: 'codex',
+        sessionId: 'session-123',
+      })
+    })
+
+    it('increments tab number in default title', () => {
+      let state = tabsReducer(initialState, addTab())
+      expect(state.tabs[0].title).toBe('Tab 1')
+
+      state = tabsReducer(state, addTab())
+      expect(state.tabs[1].title).toBe('Tab 2')
+
+      state = tabsReducer(state, addTab())
+      expect(state.tabs[2].title).toBe('Tab 3')
+    })
+
+    it('sets new tab as active tab', () => {
+      let state = tabsReducer(initialState, addTab())
+      const firstTabId = state.tabs[0].id
+      expect(state.activeTabId).toBe(firstTabId)
+
+      state = tabsReducer(state, addTab())
+      const secondTabId = state.tabs[1].id
+      expect(state.activeTabId).toBe(secondTabId)
+    })
+
+    it('activate: false does not change the active tab', () => {
+      let state = tabsReducer(initialState, addTab({ title: 'One' }))
+      const firstActiveId = state.activeTabId
+      state = tabsReducer(state, addTab({ title: 'Two', activate: false }))
+
+      expect(state.tabs).toHaveLength(2)
+      expect(state.activeTabId).toBe(firstActiveId)
+    })
+
+    it('activate: false still activates when this is the first tab (bootstrap edge)', () => {
+      const state = tabsReducer(initialState, addTab({ title: 'Only', activate: false }))
+      expect(state.tabs).toHaveLength(1)
+      expect(state.activeTabId).toBe(state.tabs[0].id)
+    })
+  })
+
+  describe('setActiveTab', () => {
+    it('changes active tab to specified id', () => {
+      // Setup: create two tabs
+      let state = tabsReducer(initialState, addTab())
+      const firstTabId = state.tabs[0].id
+      state = tabsReducer(state, addTab())
+      const secondTabId = state.tabs[1].id
+
+      // Second tab should be active after adding
+      expect(state.activeTabId).toBe(secondTabId)
+
+      // Switch to first tab
+      state = tabsReducer(state, setActiveTab(firstTabId))
+      expect(state.activeTabId).toBe(firstTabId)
+    })
+
+    it('allows setting activeTabId to any string', () => {
+      const state = tabsReducer(initialState, setActiveTab('arbitrary-id'))
+      expect(state.activeTabId).toBe('arbitrary-id')
+    })
+  })
+
+  describe('updateTab', () => {
+    it('modifies existing tab properties', () => {
+      let state = tabsReducer(initialState, addTab())
+      const tabId = state.tabs[0].id
+
+      state = tabsReducer(
+        state,
+        updateTab({
+          id: tabId,
+          updates: { title: 'Updated Title', status: 'running' },
+        })
+      )
+
+      const tab = state.tabs[0]
+      expect(tab.title).toBe('Updated Title')
+      expect(tab.status).toBe('running')
+    })
+
+    it('updates terminalId', () => {
+      let state = tabsReducer(initialState, addTab())
+      const tabId = state.tabs[0].id
+
+      state = tabsReducer(
+        state,
+        updateTab({
+          id: tabId,
+          updates: { terminalId: 'terminal-456' },
+        })
+      )
+
+      expect(state.tabs[0].terminalId).toBe('terminal-456')
+    })
+
+    it('does not modify other tabs', () => {
+      let state = tabsReducer(initialState, addTab({ title: 'Tab 1' }))
+      const tab1Id = state.tabs[0].id
+      state = tabsReducer(state, addTab({ title: 'Tab 2' }))
+
+      state = tabsReducer(
+        state,
+        updateTab({
+          id: tab1Id,
+          updates: { title: 'Updated Tab 1' },
+        })
+      )
+
+      expect(state.tabs[0].title).toBe('Updated Tab 1')
+      expect(state.tabs[1].title).toBe('Tab 2')
+    })
+
+    it('does nothing if tab id not found', () => {
+      let state = tabsReducer(initialState, addTab({ title: 'Original' }))
+      const originalState = { ...state, tabs: [...state.tabs] }
+
+      state = tabsReducer(
+        state,
+        updateTab({
+          id: 'non-existent-id',
+          updates: { title: 'Should Not Appear' },
+        })
+      )
+
+      expect(state.tabs[0].title).toBe('Original')
+    })
+  })
+
+  describe('removeTab', () => {
+    it('deletes tab from tabs array', () => {
+      let state = tabsReducer(initialState, addTab())
+      const tabId = state.tabs[0].id
+      expect(state.tabs).toHaveLength(1)
+
+      state = tabsReducer(state, removeTab(tabId))
+      expect(state.tabs).toHaveLength(0)
+    })
+
+    it('updates activeTabId to immediate left tab when active tab is removed', () => {
+      let state = tabsReducer(initialState, addTab({ title: 'Tab 1' }))
+      const tab1Id = state.tabs[0].id
+      state = tabsReducer(state, addTab({ title: 'Tab 2' }))
+      const tab2Id = state.tabs[1].id
+      state = tabsReducer(state, addTab({ title: 'Tab 3' }))
+      const tab3Id = state.tabs[2].id
+
+      // Tab 3 is active
+      expect(state.activeTabId).toBe(tab3Id)
+
+      // Remove active tab (Tab 3)
+      state = tabsReducer(state, removeTab(tab3Id))
+
+      // Should switch to immediate left tab (Tab 2)
+      expect(state.activeTabId).toBe(tab2Id)
+      expect(state.tabs).toHaveLength(2)
+    })
+
+    it('falls back to first remaining tab when active tab has no left neighbor', () => {
+      let state = tabsReducer(initialState, addTab({ title: 'Tab 1' }))
+      const tab1Id = state.tabs[0].id
+      state = tabsReducer(state, addTab({ title: 'Tab 2' }))
+      const tab2Id = state.tabs[1].id
+
+      // Make Tab 1 active (no left neighbor)
+      state = tabsReducer(state, setActiveTab(tab1Id))
+
+      // Remove active tab (Tab 1)
+      state = tabsReducer(state, removeTab(tab1Id))
+
+      // Should switch to remaining tab (Tab 2)
+      expect(state.activeTabId).toBe(tab2Id)
+      expect(state.tabs).toHaveLength(1)
+    })
+
+    it('sets activeTabId to null when last tab is removed', () => {
+      let state = tabsReducer(initialState, addTab())
+      const tabId = state.tabs[0].id
+
+      state = tabsReducer(state, removeTab(tabId))
+
+      expect(state.tabs).toHaveLength(0)
+      expect(state.activeTabId).toBeNull()
+    })
+
+    it('does not change activeTabId when non-active tab is removed', () => {
+      let state = tabsReducer(initialState, addTab({ title: 'Tab 1' }))
+      const tab1Id = state.tabs[0].id
+      state = tabsReducer(state, addTab({ title: 'Tab 2' }))
+      const tab2Id = state.tabs[1].id
+
+      // Tab 2 is active
+      expect(state.activeTabId).toBe(tab2Id)
+
+      // Remove Tab 1 (not active)
+      state = tabsReducer(state, removeTab(tab1Id))
+
+      // Active tab should remain Tab 2
+      expect(state.activeTabId).toBe(tab2Id)
+      expect(state.tabs).toHaveLength(1)
+    })
+
+    it('does nothing if tab id not found', () => {
+      let state = tabsReducer(initialState, addTab())
+      const tabId = state.tabs[0].id
+
+      state = tabsReducer(state, removeTab('non-existent-id'))
+
+      expect(state.tabs).toHaveLength(1)
+      expect(state.activeTabId).toBe(tabId)
+    })
+  })
+
+  describe('hydrateTabs', () => {
+    it('restores state from storage', () => {
+      const savedTabs: Tab[] = [
+        {
+          id: 'saved-1',
+          createRequestId: 'saved-1',
+          title: 'Saved Terminal',
+          status: 'running',
+          mode: 'shell',
+          shell: 'system',
+          createdAt: 1000000,
+        },
+        {
+          id: 'saved-2',
+          createRequestId: 'saved-2',
+          title: 'Another Terminal',
+          status: 'exited',
+          mode: 'claude',
+          shell: 'powershell',
+          createdAt: 2000000,
+        },
+      ]
+
+      const state = tabsReducer(
+        initialState,
+        hydrateTabs({
+          tabs: savedTabs,
+          activeTabId: 'saved-2',
+        })
+      )
+
+      expect(state.tabs).toHaveLength(2)
+      expect(state.tabs[0].id).toBe('saved-1')
+      expect(state.tabs[0].title).toBe('Saved Terminal')
+      expect(state.tabs[1].id).toBe('saved-2')
+      expect(state.activeTabId).toBe('saved-2')
+    })
+
+    it('sets default values for missing properties', () => {
+      const incompleteTab = {
+        id: 'incomplete',
+        title: 'Incomplete Tab',
+      } as Tab
+
+      const state = tabsReducer(
+        initialState,
+        hydrateTabs({
+          tabs: [incompleteTab],
+          activeTabId: 'incomplete',
+        })
+      )
+
+      const tab = state.tabs[0]
+      expect(tab.status).toBe('creating')
+      expect(tab.mode).toBe('shell')
+      expect(tab.shell).toBe('system')
+      expect(tab.createdAt).toBeDefined()
+      expect(tab.createRequestId).toBe('incomplete')
+    })
+
+    it('uses first tab id as activeTabId when activeTabId not provided', () => {
+      const savedTabs: Tab[] = [
+        {
+          id: 'first-tab',
+          createRequestId: 'first-tab',
+          title: 'First',
+          status: 'running',
+          mode: 'shell',
+          createdAt: 1000000,
+        },
+      ]
+
+      const state = tabsReducer(
+        initialState,
+        hydrateTabs({
+          tabs: savedTabs,
+          activeTabId: null,
+        })
+      )
+
+      expect(state.activeTabId).toBe('first-tab')
+    })
+
+    it('handles empty tabs array', () => {
+      const state = tabsReducer(
+        initialState,
+        hydrateTabs({
+          tabs: [],
+          activeTabId: null,
+        })
+      )
+
+      expect(state.tabs).toHaveLength(0)
+      expect(state.activeTabId).toBeNull()
+    })
+
+    it('handles undefined tabs in payload', () => {
+      const state = tabsReducer(
+        initialState,
+        hydrateTabs({
+          tabs: undefined as unknown as Tab[],
+          activeTabId: null,
+        })
+      )
+
+      expect(state.tabs).toHaveLength(0)
+      expect(state.activeTabId).toBeNull()
+    })
+
+    it('preserves all tab properties during hydration', () => {
+      const fullTab: Tab = {
+        id: 'full-tab',
+        createRequestId: 'full-tab',
+        title: 'Full Tab',
+        description: 'A description',
+        status: 'running',
+        mode: 'codex',
+        shell: 'wsl',
+        initialCwd: '/custom/path',
+        sessionRef: {
+          provider: 'codex',
+          sessionId: 'session-abc',
+        },
+        createdAt: 5000000,
+      }
+
+      const state = tabsReducer(
+        initialState,
+        hydrateTabs({
+          tabs: [fullTab],
+          activeTabId: 'full-tab',
+        })
+      )
+
+      const tab = state.tabs[0]
+      expect(tab.id).toBe('full-tab')
+      expect(tab.title).toBe('Full Tab')
+      expect(tab.description).toBe('A description')
+      expect(tab.status).toBe('running')
+      expect(tab.mode).toBe('codex')
+      expect(tab.shell).toBe('wsl')
+      expect(tab.initialCwd).toBe('/custom/path')
+      expect(tab.sessionRef).toEqual({
+        provider: 'codex',
+        sessionId: 'session-abc',
+      })
+      expect(tab.createdAt).toBe(5000000)
+    })
+
+    it('normalizes legacy recovery_failed tab status to creating during hydration', () => {
+      const legacyTab = {
+        id: 'legacy-codex',
+        createRequestId: 'legacy-codex',
+        title: 'Legacy Codex',
+        status: 'recovery_failed',
+        mode: 'codex',
+        sessionRef: {
+          provider: 'codex',
+          sessionId: 'thread-durable-1',
+        },
+        createdAt: 5000001,
+      } as any
+
+      const state = tabsReducer(
+        initialState,
+        hydrateTabs({
+          tabs: [legacyTab],
+          activeTabId: 'legacy-codex',
+        }),
+      )
+
+      const tab = state.tabs[0]
+      expect(tab.status).toBe('creating')
+      expect(tab.sessionRef).toEqual({ provider: 'codex', sessionId: 'thread-durable-1' })
+    })
+
+    it('keeps a user-set tab name when a more-recent remote tab is not user-set', () => {
+      const seeded = tabsReducer(initialState, hydrateTabs({
+        tabs: [{
+          id: 't1', createRequestId: 't1', title: 'My Name', titleSetByUser: true,
+          status: 'running', mode: 'claude', createdAt: 1,
+        } as any],
+        activeTabId: 't1',
+      }))
+
+      const merged = tabsReducer(seeded, hydrateTabs({
+        tabs: [{
+          id: 't1', createRequestId: 't1', title: 'Claude', titleSetByUser: false,
+          status: 'running', mode: 'claude', createdAt: 1,
+        } as any],
+        activeTabId: 't1',
+        meta: { localLayoutPersistedAt: 100, remoteLayoutPersistedAt: 200 },
+      }))
+
+      const tab = merged.tabs.find((t) => t.id === 't1')
+      expect(tab?.title).toBe('My Name')
+      expect(tab?.titleSetByUser).toBe(true)
+    })
+
+    it('takes the more-recent remote name when neither side is user-set', () => {
+      const seeded = tabsReducer(initialState, hydrateTabs({
+        tabs: [{
+          id: 't2', createRequestId: 't2', title: 'old-dir', titleSetByUser: false,
+          status: 'running', mode: 'claude', createdAt: 1,
+        } as any],
+        activeTabId: 't2',
+      }))
+
+      const merged = tabsReducer(seeded, hydrateTabs({
+        tabs: [{
+          id: 't2', createRequestId: 't2', title: 'new-dir', titleSetByUser: false,
+          status: 'running', mode: 'claude', createdAt: 1,
+        } as any],
+        activeTabId: 't2',
+        meta: { localLayoutPersistedAt: 100, remoteLayoutPersistedAt: 200 },
+      }))
+
+      expect(merged.tabs.find((t) => t.id === 't2')?.title).toBe('new-dir')
+    })
+  })
+
+  describe('closeTab with multiple panes', () => {
+    it('removes layout when tab is closed', async () => {
+      const store = configureStore({
+        reducer: {
+          tabs: tabsReducer,
+          panes: panesReducer,
+        },
+      })
+
+      // Create tab
+      store.dispatch(addTab({ mode: 'shell' }))
+      const tabId = store.getState().tabs.tabs[0].id
+
+      // Initialize pane
+      store.dispatch(initLayout({
+        tabId,
+        content: { kind: 'terminal', mode: 'shell' },
+      }))
+
+      expect(store.getState().panes.layouts[tabId]).toBeDefined()
+
+      // Close tab
+      await store.dispatch(closeTab(tabId))
+
+      // Layout should be removed
+      expect(store.getState().panes.layouts[tabId]).toBeUndefined()
+    })
+  })
+
+  describe('closeTab session activity ratchet', () => {
+    const SECOND_CLAUDE_ID = '550e8400-e29b-41d4-a716-446655440001'
+
+    function createRatchetStore(
+      sessions: Record<string, number> = {},
+      terminals: BackgroundTerminal[] = [],
+    ) {
+      return configureStore({
+        reducer: {
+          tabs: tabsReducer,
+          panes: panesReducer,
+          sessionActivity: sessionActivityReducer,
+          terminalDirectory: terminalDirectoryReducer,
+        },
+        preloadedState: {
+          sessionActivity: { sessions },
+          terminalDirectory: {
+            windows: { sidebar: { items: terminals, nextCursor: null } },
+            searches: {},
+          },
+        },
+      })
+    }
+
+    function claudeRefContent(sessionId: string) {
+      return {
+        kind: 'terminal' as const,
+        mode: 'claude' as const,
+        resumeSessionId: sessionId,
+        sessionRef: { provider: 'claude', sessionId },
+      }
+    }
+
+    it('ratchets activity for every session ref of the closing tab', async () => {
+      const store = createRatchetStore()
+      store.dispatch(addTab({ mode: 'claude' }))
+      const tabId = store.getState().tabs.tabs[0].id
+      store.dispatch(initLayout({ tabId, content: claudeRefContent(VALID_CLAUDE_SESSION_ID) }))
+      const leafId = (store.getState().panes.layouts[tabId] as any).id
+      store.dispatch(splitPane({
+        tabId,
+        paneId: leafId,
+        direction: 'horizontal',
+        newContent: claudeRefContent(SECOND_CLAUDE_ID),
+      }))
+
+      const beforeClose = Date.now()
+      await store.dispatch(closeTab(tabId))
+
+      const sessions = store.getState().sessionActivity.sessions
+      expect(sessions[`claude:${VALID_CLAUDE_SESSION_ID}`]).toBeGreaterThanOrEqual(beforeClose)
+      expect(sessions[`claude:${SECOND_CLAUDE_ID}`]).toBeGreaterThanOrEqual(beforeClose)
+    })
+
+    it('records no activity when closing a sessionless shell tab', async () => {
+      const store = createRatchetStore()
+      store.dispatch(addTab({ mode: 'shell' }))
+      const tabId = store.getState().tabs.tabs[0].id
+      store.dispatch(initLayout({ tabId, content: { kind: 'terminal', mode: 'shell' } }))
+
+      await store.dispatch(closeTab(tabId))
+
+      expect(store.getState().sessionActivity.sessions).toEqual({})
+    })
+
+    it('never downgrades a newer existing ratchet value', async () => {
+      const future = Date.now() + 60_000
+      const store = createRatchetStore({ [`claude:${VALID_CLAUDE_SESSION_ID}`]: future })
+      store.dispatch(addTab({ mode: 'claude' }))
+      const tabId = store.getState().tabs.tabs[0].id
+      store.dispatch(initLayout({
+        tabId,
+        content: {
+          kind: 'terminal',
+          mode: 'claude',
+          resumeSessionId: VALID_CLAUDE_SESSION_ID,
+        },
+      }))
+
+      await store.dispatch(closeTab(tabId))
+
+      expect(store.getState().sessionActivity.sessions[`claude:${VALID_CLAUDE_SESSION_ID}`]).toBe(future)
+    })
+
+    it('ratchets layout-less tabs via tab-level fallback identity', async () => {
+      const store = createRatchetStore()
+      store.dispatch(hydrateTabs({
+        tabs: [{
+          id: 'layout-less',
+          createRequestId: 'layout-less',
+          title: 'Layout-less',
+          status: 'running',
+          mode: 'claude',
+          resumeSessionId: VALID_CLAUDE_SESSION_ID,
+          createdAt: 1,
+        } as any],
+        activeTabId: 'layout-less',
+      }))
+
+      const beforeClose = Date.now()
+      await store.dispatch(closeTab('layout-less'))
+
+      expect(store.getState().sessionActivity.sessions[`claude:${VALID_CLAUDE_SESSION_ID}`])
+        .toBeGreaterThanOrEqual(beforeClose)
+    })
+
+    it('ratchets the fallback row key of every running identity-less registry terminal in the layout', async () => {
+      // Running agent terminals without sessionRef surface in the sidebar as
+      // fallback rows keyed `<mode>:terminal:<terminalId>`; the row persists
+      // after tab close because the terminal keeps running.
+      const store = createRatchetStore({}, [
+        {
+          terminalId: 'term-op-1',
+          title: 'OpenCode one',
+          createdAt: 1,
+          lastActivityAt: 1,
+          status: 'running',
+          hasClients: true,
+          mode: 'opencode',
+        },
+        {
+          terminalId: 'term-op-2',
+          title: 'OpenCode two',
+          createdAt: 1,
+          lastActivityAt: 1,
+          status: 'running',
+          hasClients: true,
+          mode: 'opencode',
+        },
+      ])
+      store.dispatch(addTab({ mode: 'opencode' }))
+      const tabId = store.getState().tabs.tabs[0].id
+      store.dispatch(initLayout({
+        tabId,
+        content: { kind: 'terminal', mode: 'opencode', terminalId: 'term-op-1' },
+      }))
+      const leafId = (store.getState().panes.layouts[tabId] as any).id
+      store.dispatch(splitPane({
+        tabId,
+        paneId: leafId,
+        direction: 'horizontal',
+        newContent: { kind: 'terminal', mode: 'opencode', terminalId: 'term-op-2' },
+      }))
+
+      const beforeClose = Date.now()
+      await store.dispatch(closeTab(tabId))
+
+      const sessions = store.getState().sessionActivity.sessions
+      expect(sessions['opencode:terminal:term-op-1']).toBeGreaterThanOrEqual(beforeClose)
+      expect(sessions['opencode:terminal:term-op-2']).toBeGreaterThanOrEqual(beforeClose)
+    })
+
+    it('skips the terminal key when a codex registry terminal has durability identity', async () => {
+      // That row is keyed codex:<durabilitySessionId> and is already ratcheted
+      // by the canonical refs loop (pane-content codex durability locator).
+      const codexDurability = { schemaVersion: 1, state: 'durable', durableThreadId: 'durable-cx-1' } as const
+      const store = createRatchetStore({}, [{
+        terminalId: 'term-cx-1',
+        title: 'Codex pane',
+        createdAt: 1,
+        lastActivityAt: 1,
+        status: 'running',
+        hasClients: true,
+        mode: 'codex',
+        codexDurability,
+      }])
+      store.dispatch(addTab({ mode: 'codex' }))
+      const tabId = store.getState().tabs.tabs[0].id
+      store.dispatch(initLayout({
+        tabId,
+        content: { kind: 'terminal', mode: 'codex', terminalId: 'term-cx-1', codexDurability },
+      }))
+
+      const beforeClose = Date.now()
+      await store.dispatch(closeTab(tabId))
+
+      const sessions = store.getState().sessionActivity.sessions
+      expect(sessions['codex:durable-cx-1']).toBeGreaterThanOrEqual(beforeClose)
+      expect(sessions['codex:terminal:term-cx-1']).toBeUndefined()
+    })
+
+    it('ratchets the registry canonical key when the sessionRef exists only in the registry', async () => {
+      // Canonical identity lives in the registry, not the pane content: the
+      // content yields no locator, so the canonical loop ratchets nothing.
+      // The sidebar rows this terminal under claude:<sessionId>; the ratchet
+      // must target that canonical key, not a terminal alias (which would be
+      // junk — no row ever reads it).
+      const store = createRatchetStore({}, [{
+        terminalId: 'term-ref-1',
+        title: 'Claude pane',
+        createdAt: 1,
+        lastActivityAt: 1,
+        status: 'running',
+        hasClients: true,
+        mode: 'claude',
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+      }])
+      store.dispatch(addTab({ mode: 'claude' }))
+      const tabId = store.getState().tabs.tabs[0].id
+      store.dispatch(initLayout({
+        tabId,
+        content: { kind: 'terminal', mode: 'claude', terminalId: 'term-ref-1' },
+      }))
+
+      const beforeClose = Date.now()
+      await store.dispatch(closeTab(tabId))
+
+      const sessions = store.getState().sessionActivity.sessions
+      expect(sessions[`claude:${VALID_CLAUDE_SESSION_ID}`]).toBeGreaterThanOrEqual(beforeClose)
+      expect(sessions['claude:terminal:term-ref-1']).toBeUndefined()
+    })
+
+    it('ratchets the registry codex canonical key when durability identity exists only in the registry', async () => {
+      // Same registry-only-identity gap as the sessionRef case: the content
+      // carries no codexDurability, so the canonical loop yields nothing, but
+      // the sidebar rows the terminal under codex:<durabilitySessionId>.
+      const store = createRatchetStore({}, [{
+        terminalId: 'term-cx-2',
+        title: 'Codex pane',
+        createdAt: 1,
+        lastActivityAt: 1,
+        status: 'running',
+        hasClients: true,
+        mode: 'codex',
+        codexDurability: { schemaVersion: 1, state: 'durable', durableThreadId: 'durable-cx-2' } as const,
+      }])
+      store.dispatch(addTab({ mode: 'codex' }))
+      const tabId = store.getState().tabs.tabs[0].id
+      store.dispatch(initLayout({
+        tabId,
+        content: { kind: 'terminal', mode: 'codex', terminalId: 'term-cx-2' },
+      }))
+
+      const beforeClose = Date.now()
+      await store.dispatch(closeTab(tabId))
+
+      const sessions = store.getState().sessionActivity.sessions
+      expect(sessions['codex:durable-cx-2']).toBeGreaterThanOrEqual(beforeClose)
+      expect(sessions['codex:terminal:term-cx-2']).toBeUndefined()
+    })
+
+    it('falls back to the pane-mode terminal key when the registry entry is missing', async () => {
+      // terminalDirectory.windows.sidebar.items loads asynchronously, can
+      // fail or be stale, and is capped: closing before the entry arrives
+      // must still ratchet the key the still-running terminal's fallback row
+      // will read once it registers.
+      const store = createRatchetStore()
+      store.dispatch(addTab({ mode: 'opencode' }))
+      const tabId = store.getState().tabs.tabs[0].id
+      store.dispatch(initLayout({
+        tabId,
+        content: { kind: 'terminal', mode: 'opencode', terminalId: 'term-miss-1' },
+      }))
+
+      const beforeClose = Date.now()
+      await store.dispatch(closeTab(tabId))
+
+      expect(store.getState().sessionActivity.sessions['opencode:terminal:term-miss-1'])
+        .toBeGreaterThanOrEqual(beforeClose)
+    })
+
+    it('ratchets nothing when the close evidence fails (the tab stays)', async () => {
+      paneCloseAckMode.fail = true
+      const store = createRatchetStore()
+      store.dispatch(addTab({ mode: 'claude' }))
+      const tabId = store.getState().tabs.tabs[0].id
+      store.dispatch(initLayout({ tabId, content: claudeRefContent(VALID_CLAUDE_SESSION_ID) }))
+
+      await store.dispatch(closeTab(tabId))
+
+      expect(store.getState().tabs.tabs).toHaveLength(1)
+      expect(store.getState().sessionActivity.sessions).toEqual({})
+    })
+  })
+
+  describe('reorderTabs', () => {
+    it('moves tab from index 0 to index 2', () => {
+      // Setup: create 3 tabs
+      let state = tabsReducer(initialState, addTab({ title: 'Tab A' }))
+      const tabAId = state.tabs[0].id
+      state = tabsReducer(state, addTab({ title: 'Tab B' }))
+      const tabBId = state.tabs[1].id
+      state = tabsReducer(state, addTab({ title: 'Tab C' }))
+      const tabCId = state.tabs[2].id
+
+      // Move Tab A from index 0 to index 2
+      state = tabsReducer(state, reorderTabs({ fromIndex: 0, toIndex: 2 }))
+
+      // Order should now be: B, C, A
+      expect(state.tabs[0].id).toBe(tabBId)
+      expect(state.tabs[1].id).toBe(tabCId)
+      expect(state.tabs[2].id).toBe(tabAId)
+    })
+
+    it('moves tab from index 2 to index 0', () => {
+      let state = tabsReducer(initialState, addTab({ title: 'Tab A' }))
+      const tabAId = state.tabs[0].id
+      state = tabsReducer(state, addTab({ title: 'Tab B' }))
+      const tabBId = state.tabs[1].id
+      state = tabsReducer(state, addTab({ title: 'Tab C' }))
+      const tabCId = state.tabs[2].id
+
+      // Move Tab C from index 2 to index 0
+      state = tabsReducer(state, reorderTabs({ fromIndex: 2, toIndex: 0 }))
+
+      // Order should now be: C, A, B
+      expect(state.tabs[0].id).toBe(tabCId)
+      expect(state.tabs[1].id).toBe(tabAId)
+      expect(state.tabs[2].id).toBe(tabBId)
+    })
+
+    it('is a no-op when fromIndex equals toIndex', () => {
+      let state = tabsReducer(initialState, addTab({ title: 'Tab A' }))
+      const tabAId = state.tabs[0].id
+      state = tabsReducer(state, addTab({ title: 'Tab B' }))
+      const tabBId = state.tabs[1].id
+
+      state = tabsReducer(state, reorderTabs({ fromIndex: 1, toIndex: 1 }))
+
+      expect(state.tabs[0].id).toBe(tabAId)
+      expect(state.tabs[1].id).toBe(tabBId)
+    })
+
+    it('preserves activeTabId when reordering', () => {
+      let state = tabsReducer(initialState, addTab({ title: 'Tab A' }))
+      state = tabsReducer(state, addTab({ title: 'Tab B' }))
+      state = tabsReducer(state, addTab({ title: 'Tab C' }))
+
+      // Tab C is active (last added)
+      const activeId = state.activeTabId
+
+      state = tabsReducer(state, reorderTabs({ fromIndex: 0, toIndex: 2 }))
+
+      // activeTabId should be unchanged
+      expect(state.activeTabId).toBe(activeId)
+    })
+  })
+
+  describe('openSessionTab', () => {
+    it('activates an existing canonical tab when a copied snapshot already has the durable session identity', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({ id: 'foreign-tab', mode: 'codex' }))
+      store.dispatch(initLayout({
+        tabId: 'foreign-tab',
+        content: {
+          kind: 'terminal',
+          mode: 'codex',
+          sessionRef: {
+            provider: 'codex',
+            sessionId: 'shared',
+            serverInstanceId: 'srv-remote',
+          },
+        },
+      }))
+
+      await store.dispatch(openSessionTab({ sessionId: 'shared', provider: 'codex' }))
+
+      const state = store.getState()
+      expect(state.tabs.tabs).toHaveLength(1)
+      expect(state.tabs.activeTabId).toBe('foreign-tab')
+    })
+
+    it('seeds a new coding-agent tab title with the working-directory basename', async () => {
+      const store = createOpenSessionStore()
+
+      await store.dispatch(openSessionTab({
+        provider: 'claude',
+        cwd: '/home/dan/code/freshell',
+        terminalId: 'term-new',
+        forceNew: true,
+      }))
+
+      const tab = store.getState().tabs.tabs.at(-1)
+      expect(tab?.title).toBe('freshell')
+    })
+
+    it('activates the first canonical match before websocket ready when multiple tabs share the durable session identity', async () => {
+      const store = createOpenSessionStore()
+
+      store.dispatch(addTab({ id: 'foreign-tab', mode: 'codex' }))
+      store.dispatch(initLayout({
+        tabId: 'foreign-tab',
+        content: {
+          kind: 'terminal',
+          mode: 'codex',
+          sessionRef: {
+            provider: 'codex',
+            sessionId: 'shared',
+            serverInstanceId: 'srv-remote',
+          },
+        },
+      }))
+      store.dispatch(addTab({
+        id: 'local-fallback',
+        mode: 'codex',
+        sessionRef: {
+          provider: 'codex',
+          sessionId: 'shared',
+        },
+      }))
+      store.dispatch(setActiveTab('foreign-tab'))
+
+      await store.dispatch(openSessionTab({ sessionId: 'shared', provider: 'codex' }))
+
+      const state = store.getState()
+      expect(state.tabs.tabs).toHaveLength(2)
+      expect(state.tabs.activeTabId).toBe('foreign-tab')
+    })
+
+    it('activates existing tab when a pane already owns the session', async () => {
+      const store = configureStore({
+        reducer: {
+          tabs: tabsReducer,
+          panes: panesReducer,
+        },
+      })
+
+      store.dispatch(addTab({ id: 'tab-1', mode: 'claude', resumeSessionId: VALID_CLAUDE_SESSION_ID }))
+      store.dispatch(initLayout({
+        tabId: 'tab-1',
+        content: { kind: 'terminal', mode: 'claude', resumeSessionId: VALID_CLAUDE_SESSION_ID },
+      }))
+
+      store.dispatch(addTab({ id: 'tab-2', mode: 'shell' }))
+
+      await store.dispatch(openSessionTab({ sessionId: VALID_CLAUDE_SESSION_ID, provider: 'claude' }))
+
+      expect(store.getState().tabs.activeTabId).toBe('tab-1')
+      expect(store.getState().tabs.tabs).toHaveLength(2)
+    })
+
+    it('creates a new tab when no pane owns the session', async () => {
+      const store = configureStore({
+        reducer: {
+          tabs: tabsReducer,
+          panes: panesReducer,
+        },
+      })
+
+      await store.dispatch(openSessionTab({ sessionId: VALID_CLAUDE_SESSION_ID, provider: 'claude', title: 'Claude Session' }))
+
+      const tabs = store.getState().tabs.tabs
+      expect(tabs).toHaveLength(1)
+      expect(tabs[0].sessionRef).toEqual({
+        provider: 'claude',
+        sessionId: VALID_CLAUDE_SESSION_ID,
+      })
+      expect(tabs[0].mode).toBe('claude')
+    })
+
+    it('opens a completed Codex history row as a terminal resume pane, not a transcript-only tab', async () => {
+      const store = createOpenSessionStore()
+
+      await store.dispatch(openSessionTab({
+        sessionId: 'thread-durable-1',
+        title: 'Existing Codex session',
+        cwd: '/repo',
+        provider: 'codex',
+        sessionType: 'codex',
+      }) as any)
+
+      const state = store.getState()
+      const tab = state.tabs.tabs.find((candidate) => candidate.title === 'Existing Codex session')
+      expect(tab).toBeTruthy()
+      expect((tab as any)?.codingCliSessionId).toBeUndefined()
+      expect(tab?.sessionRef).toEqual({ provider: 'codex', sessionId: 'thread-durable-1' })
+
+      const layout = state.panes.layouts[tab!.id]
+      expect(layout.type).toBe('leaf')
+      expect(layout.content).toMatchObject({
+        kind: 'terminal',
+        mode: 'codex',
+        sessionRef: { provider: 'codex', sessionId: 'thread-durable-1' },
+        status: 'creating',
+      })
+    })
+
+    it('opens a Claude history row as a fresh-agent pane with resumeSessionId', async () => {
+      const store = createOpenSessionStore()
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        title: 'Existing Freshclaude session',
+        cwd: '/repo',
+        provider: 'claude',
+        sessionType: 'freshclaude',
+      }))
+
+      const state = store.getState()
+      const tab = state.tabs.tabs.find((candidate) => candidate.title === 'Existing Freshclaude session')
+      expect(tab).toBeTruthy()
+      expect(tab?.sessionRef).toEqual({ provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID })
+
+      const layout = state.panes.layouts[tab!.id]
+      expect(layout.type).toBe('leaf')
+      expect(layout.content).toMatchObject({
+        kind: 'fresh-agent',
+        sessionType: 'freshclaude',
+        provider: 'claude',
+        resumeSessionId: VALID_CLAUDE_SESSION_ID,
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+      })
+    })
+
+    it('opens non-Claude fresh-agent sessions with sessionRef instead of resumeSessionId', async () => {
+      const store = createOpenSessionStore()
+
+      await store.dispatch(openSessionTab({
+        sessionId: 'opencode-session-1',
+        cwd: '/repo',
+        provider: 'opencode',
+        sessionType: 'freshopencode',
+      }))
+
+      const state = store.getState()
+      const tab = state.tabs.tabs.find((candidate) => candidate.title === 'repo')
+      expect(tab).toBeTruthy()
+      expect(tab?.sessionRef).toEqual({ provider: 'opencode', sessionId: 'opencode-session-1' })
+
+      const layout = state.panes.layouts[tab!.id]
+      expect(layout.type).toBe('leaf')
+      expect(layout.content).toMatchObject({
+        kind: 'fresh-agent',
+        sessionType: 'freshopencode',
+        provider: 'opencode',
+        sessionRef: { provider: 'opencode', sessionId: 'opencode-session-1' },
+      })
+      expect(layout.content).not.toHaveProperty('resumeSessionId')
+    })
+
+    it('persists session metadata on newly opened tabs for fallback filtering and restored session type', async () => {
+      const store = configureStore({
+        reducer: {
+          tabs: tabsReducer,
+          panes: panesReducer,
+        },
+      })
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        sessionType: 'freshclaude',
+        firstUserMessage: 'IMPORTANT: internal task',
+        isSubagent: true,
+        isNonInteractive: true,
+      }))
+
+      const tab = store.getState().tabs.tabs[0]
+      expect(tab.sessionMetadataByKey).toEqual({
+        [`claude:${VALID_CLAUDE_SESSION_ID}`]: {
+          sessionType: 'freshclaude',
+          firstUserMessage: 'IMPORTANT: internal task',
+          isSubagent: true,
+          isNonInteractive: true,
+        },
+      })
+    })
+
+    it('enriches an existing tab when reopening the same session with session metadata', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({
+        id: 'local-fallback',
+        mode: 'claude',
+        sessionRef: {
+          provider: 'claude',
+          sessionId: VALID_CLAUDE_SESSION_ID,
+        },
+      }))
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        sessionType: 'freshclaude',
+        firstUserMessage: 'IMPORTANT: internal task',
+        isSubagent: true,
+      }))
+
+      const tab = store.getState().tabs.tabs.find((item) => item.id === 'local-fallback')
+      expect(store.getState().tabs.activeTabId).toBe('local-fallback')
+      expect(tab?.sessionMetadataByKey).toEqual({
+        [`claude:${VALID_CLAUDE_SESSION_ID}`]: {
+          sessionType: 'freshclaude',
+          firstUserMessage: 'IMPORTANT: internal task',
+          isSubagent: true,
+        },
+      })
+    })
+
+    it('updates the title of an existing tab when reopened with a different title and titleSetByUser is falsy', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({
+        id: 'local-fallback',
+        mode: 'claude',
+        title: 'Claude',
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+      }))
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        title: 'Renamed from sidebar',
+        hasTitle: true,
+      }))
+
+      const tab = store.getState().tabs.tabs.find((item) => item.id === 'local-fallback')
+      expect(store.getState().tabs.activeTabId).toBe('local-fallback')
+      expect(tab?.title).toBe('Renamed from sidebar')
+    })
+
+    it('preserves user-set title when reopening an existing tab with titleSetByUser true', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({
+        id: 'local-fallback',
+        mode: 'claude',
+        title: 'User named this',
+        titleSetByUser: true,
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+      }))
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        title: 'Renamed from sidebar',
+      }))
+
+      const tab = store.getState().tabs.tabs.find((item) => item.id === 'local-fallback')
+      expect(tab?.title).toBe('User named this')
+    })
+
+    it('updates the title of an existing tab found by terminalId when reopened with a new title', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({
+        id: 'term-tab',
+        mode: 'claude',
+        title: 'Stale Title',
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+      }))
+      store.dispatch(initLayout({
+        tabId: 'term-tab',
+        content: { kind: 'terminal', mode: 'claude', terminalId: 'term-99', status: 'running' },
+      }))
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        terminalId: 'term-99',
+        title: 'Fresh Title',
+        hasTitle: true,
+      }))
+
+      const tab = store.getState().tabs.tabs.find((item) => item.id === 'term-tab')
+      expect(tab?.title).toBe('Fresh Title')
+    })
+
+    it('preserves user-set title when reopening by terminalId with titleSetByUser true', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({
+        id: 'term-tab',
+        mode: 'claude',
+        title: 'Keep this name',
+        titleSetByUser: true,
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+      }))
+      store.dispatch(initLayout({
+        tabId: 'term-tab',
+        content: { kind: 'terminal', mode: 'claude', terminalId: 'term-88', status: 'running' },
+      }))
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        terminalId: 'term-88',
+        title: 'Should not apply',
+      }))
+
+      const tab = store.getState().tabs.tabs.find((item) => item.id === 'term-tab')
+      expect(tab?.title).toBe('Keep this name')
+    })
+
+    it('does not update tab title when reopened title already matches existing title', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({
+        id: 'local-fallback',
+        mode: 'claude',
+        title: 'Already Correct',
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+      }))
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        title: 'Already Correct',
+        hasTitle: true,
+      }))
+
+      const tab = store.getState().tabs.tabs.find((item) => item.id === 'local-fallback')
+      expect(tab?.title).toBe('Already Correct')
+      expect(store.getState().tabs.activeTabId).toBe('local-fallback')
+    })
+
+    it('updates title of existing tab for fresh-agent session when reopened with new title', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({
+        id: 'agent-tab',
+        mode: 'claude',
+        title: 'Old Name',
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+        sessionMetadataByKey: {
+          [`claude:${VALID_CLAUDE_SESSION_ID}`]: { sessionType: 'freshclaude' },
+        },
+      }))
+      store.dispatch(initLayout({
+        tabId: 'agent-tab',
+        content: {
+          kind: 'fresh-agent',
+          provider: 'freshclaude',
+          sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+        },
+      }))
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        sessionType: 'freshclaude',
+        title: 'Freshclaude Session',
+        hasTitle: true,
+      }))
+
+      const tab = store.getState().tabs.tabs.find((item) => item.id === 'agent-tab')
+      expect(tab?.title).toBe('Freshclaude Session')
+    })
+
+    it('repairs a mis-restored single-pane session tab when the reopened session resolves to fresh-agent', async () => {
+      const store = configureStore({
+        reducer: {
+          tabs: tabsReducer,
+          panes: panesReducer,
+        },
+      })
+
+      store.dispatch(addTab({
+        id: 'tab-1',
+        mode: 'claude',
+        resumeSessionId: VALID_CLAUDE_SESSION_ID,
+      }))
+      store.dispatch(initLayout({
+        tabId: 'tab-1',
+        content: {
+          kind: 'terminal',
+          mode: 'claude',
+          resumeSessionId: VALID_CLAUDE_SESSION_ID,
+        },
+      }))
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        sessionType: 'freshclaude',
+      }))
+
+      expect(store.getState().tabs.activeTabId).toBe('tab-1')
+      expect(store.getState().tabs.tabs[0].sessionMetadataByKey).toEqual({
+        [`claude:${VALID_CLAUDE_SESSION_ID}`]: {
+          sessionType: 'freshclaude',
+        },
+      })
+      expect(store.getState().panes.layouts['tab-1']).toMatchObject({
+        type: 'leaf',
+        content: {
+          kind: 'fresh-agent',
+          sessionType: 'freshclaude',
+          provider: 'claude',
+          sessionRef: {
+            provider: 'claude',
+            sessionId: VALID_CLAUDE_SESSION_ID,
+          },
+        },
+      })
+    })
+
+    it('activates existing tab when terminalId is already attached', async () => {
+      const store = configureStore({
+        reducer: {
+          tabs: tabsReducer,
+          panes: panesReducer,
+        },
+      })
+
+      store.dispatch(addTab({ id: 'tab-1', mode: 'claude', status: 'running' }))
+      store.dispatch(initLayout({
+        tabId: 'tab-1',
+        content: { kind: 'terminal', mode: 'claude', terminalId: 'term-1', status: 'running' },
+      }))
+      store.dispatch(addTab({ id: 'tab-2', mode: 'shell' }))
+
+      await store.dispatch(openSessionTab({ sessionId: VALID_CLAUDE_SESSION_ID, provider: 'claude', terminalId: 'term-1' }))
+
+      expect(store.getState().tabs.activeTabId).toBe('tab-1')
+      expect(store.getState().tabs.tabs).toHaveLength(2)
+    })
+
+    it('creates a running tab when terminalId is provided and no existing tab matches', async () => {
+      const store = configureStore({
+        reducer: {
+          tabs: tabsReducer,
+          panes: panesReducer,
+        },
+      })
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        terminalId: 'term-2',
+        title: 'Running Claude',
+      }))
+
+      const tabs = store.getState().tabs.tabs
+      expect(tabs).toHaveLength(1)
+      expect(tabs[0].status).toBe('running')
+      expect(tabs[0].sessionRef).toEqual({
+        provider: 'claude',
+        sessionId: VALID_CLAUDE_SESSION_ID,
+      })
+      // terminalId lives in pane content, not on the tab
+      const layout = store.getState().panes.layouts[tabs[0].id]
+      expect(layout).toBeDefined()
+      if (layout?.type === 'leaf' && layout.content.kind === 'terminal') {
+        expect(layout.content.terminalId).toBe('term-2')
+      }
+    })
+
+    it('uses capitalized provider label for codex tab title', async () => {
+      const store = configureStore({
+        reducer: {
+          tabs: tabsReducer,
+          panes: panesReducer,
+          extensions: extensionsReducer,
+        },
+        preloadedState: {
+          extensions: {
+            entries: [
+              { name: 'codex', label: 'Codex CLI', category: 'cli', version: '1.0.0', description: '' },
+            ],
+          },
+        },
+      })
+
+      await store.dispatch(openSessionTab({
+        sessionId: 'codex-sess-123',
+        provider: 'codex',
+      }))
+
+      const tabs = store.getState().tabs.tabs
+      expect(tabs).toHaveLength(1)
+      expect(tabs[0].title).toBe('Codex CLI')
+    })
+
+    it('uses provider label for codex tab with terminalId', async () => {
+      const store = configureStore({
+        reducer: {
+          tabs: tabsReducer,
+          panes: panesReducer,
+          extensions: extensionsReducer,
+        },
+        preloadedState: {
+          extensions: {
+            entries: [
+              { name: 'codex', label: 'Codex CLI', category: 'cli', version: '1.0.0', description: '' },
+            ],
+          },
+        },
+      })
+
+      await store.dispatch(openSessionTab({
+        sessionId: 'codex-sess-456',
+        provider: 'codex',
+        terminalId: 'term-codex-3',
+      }))
+
+      const tabs = store.getState().tabs.tabs
+      expect(tabs).toHaveLength(1)
+      expect(tabs[0].title).toBe('Codex CLI')
+    })
+
+    it('does not update tab title when hasTitle is false (prevents fallback clobbering)', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({
+        id: 'local-fallback',
+        mode: 'claude',
+        title: 'Claude',
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+      }))
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        title: 'abc12345',  // synthesized fallback like sessionId.slice(0, 8)
+        hasTitle: false,
+      }))
+
+      const tab = store.getState().tabs.tabs.find((item) => item.id === 'local-fallback')
+      expect(store.getState().tabs.activeTabId).toBe('local-fallback')
+      expect(tab?.title).toBe('Claude')  // original title preserved
+    })
+
+    it('does not update tab title when hasTitle is false even when title differs', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({
+        id: 'local-fallback',
+        mode: 'claude',
+        title: 'Claude',
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+      }))
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        title: 'Completely Different Name',
+        hasTitle: false,
+      }))
+
+      const tab = store.getState().tabs.tabs.find((item) => item.id === 'local-fallback')
+      expect(tab?.title).toBe('Claude')  // original title preserved despite different title
+    })
+
+    it('does not update tab title when hasTitle is false in terminalId path', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({
+        id: 'term-tab',
+        mode: 'claude',
+        title: 'Stale Title',
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+      }))
+      store.dispatch(initLayout({
+        tabId: 'term-tab',
+        content: { kind: 'terminal', mode: 'claude', terminalId: 'term-99', status: 'running' },
+      }))
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        terminalId: 'term-99',
+        title: 'Session abc12345',
+        hasTitle: false,
+      }))
+
+      const tab = store.getState().tabs.tabs.find((item) => item.id === 'term-tab')
+      expect(tab?.title).toBe('Stale Title')
+    })
+
+    it('syncs pane title alongside tab title when hasTitle is true via findTabIdForSession', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({
+        id: 'local-fallback',
+        mode: 'claude',
+        title: 'Claude',
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+      }))
+      store.dispatch(initLayout({
+        tabId: 'local-fallback',
+        content: {
+          kind: 'terminal',
+          mode: 'claude',
+          sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+        },
+      }))
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        title: 'Synced Name',
+        hasTitle: true,
+      }))
+
+      const tab = store.getState().tabs.tabs.find((item) => item.id === 'local-fallback')
+      expect(tab?.title).toBe('Synced Name')
+
+      const layout = store.getState().panes.layouts['local-fallback']
+      if (layout?.type === 'leaf') {
+        const paneTitle = store.getState().panes.paneTitles?.['local-fallback']?.[layout.id]
+        expect(paneTitle).toBe('Synced Name')
+      }
+    })
+
+    it('syncs pane title alongside tab title when hasTitle is true via terminalId', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({
+        id: 'term-tab',
+        mode: 'claude',
+        title: 'Old',
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+      }))
+      store.dispatch(initLayout({
+        tabId: 'term-tab',
+        content: { kind: 'terminal', mode: 'claude', terminalId: 'term-55', status: 'running' },
+      }))
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        terminalId: 'term-55',
+        title: 'Pane Synced',
+        hasTitle: true,
+      }))
+
+      const tab = store.getState().tabs.tabs.find((item) => item.id === 'term-tab')
+      expect(tab?.title).toBe('Pane Synced')
+
+      const layout = store.getState().panes.layouts['term-tab']
+      if (layout?.type === 'leaf') {
+        const paneTitle = store.getState().panes.paneTitles?.['term-tab']?.[layout.id]
+        expect(paneTitle).toBe('Pane Synced')
+      }
+    })
+
+    it('preserves pane user-set title when syncing hasTitle', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({
+        id: 'local-fallback',
+        mode: 'claude',
+        title: 'Claude',
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+      }))
+      store.dispatch(initLayout({
+        tabId: 'local-fallback',
+        content: {
+          kind: 'terminal',
+          mode: 'claude',
+          sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+        },
+      }))
+
+      const layout = store.getState().panes.layouts['local-fallback']
+      if (layout?.type === 'leaf') {
+        store.dispatch({
+          type: 'panes/updatePaneTitle',
+          payload: { tabId: 'local-fallback', paneId: layout.id, title: 'User Pane Name', setByUser: true },
+        })
+      }
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        title: 'Should not clobber',
+        hasTitle: true,
+      }))
+
+      const tab = store.getState().tabs.tabs.find((item) => item.id === 'local-fallback')
+      expect(tab?.title).toBe('Should not clobber')
+
+      const layout2 = store.getState().panes.layouts['local-fallback']
+      if (layout2?.type === 'leaf') {
+        const paneTitle = store.getState().panes.paneTitles?.['local-fallback']?.[layout2.id]
+        expect(paneTitle).toBe('User Pane Name')  // user-set pane title preserved
+      }
+    })
+
+    it('avoids unnecessary updateTab dispatch when title already matches (idempotency)', async () => {
+      const store = createOpenSessionStore('srv-local')
+
+      store.dispatch(addTab({
+        id: 'local-fallback',
+        mode: 'claude',
+        title: 'Already Correct',
+        sessionRef: { provider: 'claude', sessionId: VALID_CLAUDE_SESSION_ID },
+        sessionMetadataByKey: {
+          [`claude:${VALID_CLAUDE_SESSION_ID}`]: { sessionType: 'claude' },
+        },
+      }))
+
+      const beforeTab = store.getState().tabs.tabs.find((t) => t.id === 'local-fallback')!
+      const beforeUpdatedAt = beforeTab.updatedAt
+
+      await store.dispatch(openSessionTab({
+        sessionId: VALID_CLAUDE_SESSION_ID,
+        provider: 'claude',
+        title: 'Already Correct',
+        hasTitle: true,
+      }))
+
+      const tab = store.getState().tabs.tabs.find((item) => item.id === 'local-fallback')
+      expect(tab?.title).toBe('Already Correct')
+      expect(store.getState().tabs.activeTabId).toBe('local-fallback')
+      // updatedAt may be bumped by sessionMetadataByKey merge (pre-existing behavior),
+      // but title must remain unchanged — proving the title-sync guard works.
+      expect(tab?.updatedAt).toBeGreaterThanOrEqual(beforeUpdatedAt)
+    })
+  })
+
+  describe('lastInputAt tracking', () => {
+    it('initializes lastInputAt to undefined on new tab', () => {
+      const state = tabsReducer(initialState, addTab({ title: 'Test Tab' }))
+
+      const tab = state.tabs[0]
+      expect(Object.prototype.hasOwnProperty.call(tab, 'lastInputAt')).toBe(true)
+      expect(tab.lastInputAt).toBeUndefined()
+    })
+
+    it('can update lastInputAt via updateTab', () => {
+      let state = tabsReducer(initialState, addTab({ title: 'Test Tab' }))
+      const tabId = state.tabs[0].id
+      const timestamp = Date.now()
+
+      state = tabsReducer(
+        state,
+        updateTab({
+          id: tabId,
+          updates: { lastInputAt: timestamp },
+        })
+      )
+
+      const tab = state.tabs[0]
+      expect(tab.lastInputAt).toBe(timestamp)
+    })
+
+    it('preserves lastInputAt when loading tabs from localStorage without the field', () => {
+      const state = tabsReducer(initialState, addTab({ title: 'Test Tab' }))
+
+      const tab = state.tabs[0]
+      expect(Object.prototype.hasOwnProperty.call(tab, 'lastInputAt')).toBe(true)
+      expect(tab.lastInputAt).toBeUndefined()
+    })
+  })
+})

@@ -1,0 +1,802 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { Provider } from 'react-redux'
+import { configureStore } from '@reduxjs/toolkit'
+import Sidebar from '@/components/Sidebar'
+import tabsReducer from '@/store/tabsSlice'
+import panesReducer from '@/store/panesSlice'
+import settingsReducer, { defaultSettings } from '@/store/settingsSlice'
+import connectionReducer from '@/store/connectionSlice'
+import sessionsReducer from '@/store/sessionsSlice'
+import sessionActivityReducer from '@/store/sessionActivitySlice'
+import type { BackgroundTerminal, ProjectGroup } from '@/store/types'
+import {
+  composeResolvedSettings,
+  createDefaultServerSettings,
+  mergeServerSettings,
+  resolveLocalSettings,
+  type ServerSettingsPatch,
+} from '@shared/settings'
+
+// Mock react-window's List component
+vi.mock('react-window', () => ({
+  List: ({ rowCount, rowComponent: Row, rowProps, style }: {
+    rowCount: number
+    rowComponent: React.ComponentType<any>
+    rowProps: any
+    style: React.CSSProperties
+  }) => {
+    const items = []
+    for (let i = 0; i < rowCount; i++) {
+      items.push(
+        <Row
+          key={i}
+          index={i}
+          style={{ height: 56 }}
+          ariaAttributes={{}}
+          {...rowProps}
+        />
+      )
+    }
+    return <div style={style} data-testid="virtualized-list">{items}</div>
+  },
+}))
+
+const mockSend = vi.fn()
+const mockOnMessage = vi.fn(() => () => {})
+const mockConnect = vi.fn().mockResolvedValue(undefined)
+
+vi.mock('@/lib/ws-client', () => ({
+  getWsClient: () => ({
+    send: mockSend,
+    onMessage: mockOnMessage,
+    connect: mockConnect,
+  }),
+}))
+
+vi.mock('@/lib/api', async () => {
+  const actual = await vi.importActual('@/lib/api')
+  return { ...actual, searchSessions: vi.fn() }
+})
+
+const sessionId = (label: string) => {
+  const chars = Array.from(label).map((ch, idx) => ((ch.charCodeAt(0) + idx) % 16).toString(16))
+  const hex = chars.join('').padEnd(32, '0').slice(0, 32)
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+}
+
+function createStore(options: {
+  projects: ProjectGroup[]
+  tabs?: Array<{
+    id: string
+    title?: string
+    mode?: string
+    status?: string
+    createdAt?: number
+    createRequestId?: string
+    shell?: string
+  }>
+  activeTabId?: string | null
+  panes?: {
+    layouts: Record<string, any>
+    activePane: Record<string, string>
+    paneTitles?: Record<string, Record<string, string>>
+    paneTitleSetByUser?: Record<string, Record<string, boolean>>
+  }
+  terminals?: BackgroundTerminal[]
+  excludeFirstChatSubstrings?: string[]
+  excludeFirstChatMustStart?: boolean
+  showSubagents?: boolean
+  ignoreCodexSubagents?: boolean
+  showNoninteractiveSessions?: boolean
+  sessionOpenMode?: 'tab' | 'split'
+}) {
+  const serverSettings = mergeServerSettings(
+    createDefaultServerSettings({
+      loggingDebug: defaultSettings.logging.debug,
+    }),
+    {
+      sidebar: {
+        excludeFirstChatSubstrings: options.excludeFirstChatSubstrings,
+        excludeFirstChatMustStart: options.excludeFirstChatMustStart,
+      },
+    } satisfies ServerSettingsPatch,
+  )
+  const localSettings = resolveLocalSettings({
+    sidebar: {
+      sortMode: 'activity',
+      showProjectBadges: true,
+      showSubagents: options.showSubagents ?? defaultSettings.sidebar.showSubagents,
+      ignoreCodexSubagents: options.ignoreCodexSubagents ?? defaultSettings.sidebar.ignoreCodexSubagents,
+      showNoninteractiveSessions: options.showNoninteractiveSessions ?? defaultSettings.sidebar.showNoninteractiveSessions,
+      hideEmptySessions: false,
+    },
+    panes: {
+      sessionOpenMode: options.sessionOpenMode ?? defaultSettings.panes.sessionOpenMode,
+    },
+  })
+
+  const projects = options.projects.map((project) => ({
+    ...project,
+    sessions: (project.sessions ?? []).map((session) => ({
+      ...session,
+      provider: session.provider ?? 'claude',
+    })),
+  }))
+
+  // Infer pane layouts from tabs if not explicitly provided
+  const inferredLayouts: Record<string, any> = {}
+  const inferredActivePane: Record<string, string> = {}
+  if (!options.panes) {
+    for (const tab of options.tabs ?? []) {
+      const paneId = `pane-${tab.id}`
+      inferredLayouts[tab.id] = {
+        type: 'leaf',
+        id: paneId,
+        content: {
+          kind: 'terminal',
+          mode: tab.mode || 'shell',
+          createRequestId: `req-${tab.id}`,
+          status: tab.status || 'running',
+        },
+      }
+      inferredActivePane[tab.id] = paneId
+    }
+  }
+
+  return configureStore({
+    reducer: {
+      settings: settingsReducer,
+      tabs: tabsReducer,
+      panes: panesReducer,
+      connection: connectionReducer,
+      sessions: sessionsReducer,
+      sessionActivity: sessionActivityReducer,
+    },
+    middleware: (getDefault) =>
+      getDefault({
+        serializableCheck: {
+          ignoredPaths: ['sessions.expandedProjects'],
+        },
+      }),
+    preloadedState: {
+      settings: {
+        serverSettings,
+        localSettings,
+        settings: composeResolvedSettings(serverSettings, localSettings),
+        loaded: true,
+        lastSavedAt: undefined,
+      },
+      tabs: {
+        tabs: options.tabs?.map((t) => ({
+          id: t.id,
+          title: t.title || t.id,
+          mode: t.mode || 'shell',
+          status: t.status || 'running',
+          createdAt: t.createdAt || Date.now(),
+          createRequestId: t.createRequestId || `req-${t.id}`,
+          shell: t.shell || 'system',
+        })) ?? [],
+        activeTabId: options.activeTabId ?? null,
+      },
+      panes: options.panes ?? {
+        layouts: inferredLayouts,
+        activePane: inferredActivePane,
+        paneTitles: {},
+        paneTitleSetByUser: {},
+      },
+      sessions: {
+        projects,
+        expandedProjects: new Set<string>(),
+        isLoading: false,
+        error: null,
+      },
+      connection: {
+        status: 'connected',
+        error: null,
+      },
+      sessionActivity: {
+        sessions: {},
+      },
+    },
+  })
+}
+
+function renderSidebar(store: ReturnType<typeof createStore>) {
+  const onNavigate = vi.fn()
+
+  const result = render(
+    <Provider store={store}>
+      <Sidebar view="terminal" onNavigate={onNavigate} />
+    </Provider>
+  )
+
+  return { ...result, onNavigate, store }
+}
+
+describe('sidebar click opens pane (e2e)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+  })
+
+  it('hides sessions that match first chat exclusion substrings', async () => {
+    const projects: ProjectGroup[] = [
+      {
+        projectPath: '/home/user/project',
+        sessions: [
+          {
+            sessionId: sessionId('hidden-session'),
+            projectPath: '/home/user/project',
+            lastActivityAt: Date.now(),
+            title: 'Hidden canary session',
+            firstUserMessage: '__AUTO__ run helper flow',
+            cwd: '/home/user/project',
+          },
+          {
+            sessionId: sessionId('visible-session'),
+            projectPath: '/home/user/project',
+            lastActivityAt: Date.now() - 1000,
+            title: 'Visible manual session',
+            firstUserMessage: 'please fix tests',
+            cwd: '/home/user/project',
+          },
+        ],
+      },
+    ]
+
+    const store = createStore({
+      projects,
+      tabs: [{ id: 'tab-1', mode: 'shell' }],
+      activeTabId: 'tab-1',
+      excludeFirstChatSubstrings: ['__AUTO__'],
+    })
+
+    renderSidebar(store)
+
+    await act(async () => {
+      vi.advanceTimersByTime(100)
+    })
+
+    expect(screen.queryByText('Hidden canary session')).not.toBeInTheDocument()
+    expect(screen.getByText('Visible manual session')).toBeInTheDocument()
+  })
+
+  it('shows all subagent sessions when showSubagents is true', async () => {
+    const projects: ProjectGroup[] = [
+      {
+        projectPath: '/home/user/project',
+        sessions: [
+          {
+            provider: 'codex',
+            sessionId: sessionId('codex-subagent'),
+            projectPath: '/home/user/project',
+            lastActivityAt: Date.now(),
+            title: 'Codex subagent session',
+            isSubagent: true,
+            cwd: '/home/user/project',
+          },
+          {
+            provider: 'claude',
+            sessionId: sessionId('claude-subagent'),
+            projectPath: '/home/user/project',
+            lastActivityAt: Date.now() - 1000,
+            title: 'Claude subagent session',
+            isSubagent: true,
+            cwd: '/home/user/project',
+          },
+        ],
+      },
+    ]
+
+    const store = createStore({
+      projects,
+      tabs: [{ id: 'tab-1', mode: 'shell' }],
+      activeTabId: 'tab-1',
+      showSubagents: true,
+      ignoreCodexSubagents: false,
+    })
+
+    renderSidebar(store)
+
+    await act(async () => {
+      vi.advanceTimersByTime(100)
+    })
+
+    expect(screen.getByText('Codex subagent session')).toBeInTheDocument()
+    expect(screen.getByText('Claude subagent session')).toBeInTheDocument()
+  })
+
+  it('clicking a session splits a pane in the current tab', async () => {
+    const projects: ProjectGroup[] = [
+      {
+        projectPath: '/home/user/project',
+        sessions: [
+          {
+            sessionId: sessionId('new-session'),
+            projectPath: '/home/user/project',
+            lastActivityAt: Date.now(),
+            title: 'New session to open',
+            cwd: '/home/user/project',
+          },
+        ],
+      },
+    ]
+
+    const store = createStore({
+      projects,
+      tabs: [
+        { id: 'tab-1', mode: 'shell' },
+      ],
+      activeTabId: 'tab-1',
+      sessionOpenMode: 'split',
+    })
+
+    renderSidebar(store)
+
+    await act(async () => {
+      vi.advanceTimersByTime(100)
+    })
+
+    const sessionButton = screen.getByText('New session to open').closest('button')
+    fireEvent.click(sessionButton!)
+
+    const state = store.getState()
+
+    // Should NOT create a new tab
+    expect(state.tabs.tabs).toHaveLength(1)
+
+    // The layout should now be a split with two children
+    const layout = state.panes.layouts['tab-1']
+    expect(layout.type).toBe('split')
+    if (layout.type === 'split') {
+      const leaves = [layout.children[0], layout.children[1]]
+      const sessionPane = leaves.find(
+        (child: any) =>
+          child.type === 'leaf' &&
+          child.content.kind === 'terminal' &&
+          child.content.sessionRef?.provider === 'claude' &&
+          child.content.sessionRef?.sessionId === sessionId('new-session')
+      )
+      expect(sessionPane).toBeDefined()
+      // The new pane should be in 'creating' status (not running, since no terminalId)
+      expect(sessionPane!.content.status).toBe('creating')
+      expect(sessionPane!.content.mode).toBe('claude')
+    }
+  })
+
+  it('clicking a session already open focuses the existing pane', async () => {
+    const targetId = sessionId('already-open')
+
+    const projects: ProjectGroup[] = [
+      {
+        projectPath: '/home/user/project',
+        sessions: [
+          {
+            sessionId: targetId,
+            projectPath: '/home/user/project',
+            lastActivityAt: Date.now(),
+            title: 'Already open session',
+            cwd: '/home/user/project',
+          },
+        ],
+      },
+    ]
+
+    const store = createStore({
+      projects,
+      tabs: [
+        { id: 'tab-1', mode: 'shell' },
+        { id: 'tab-2', mode: 'claude' },
+      ],
+      activeTabId: 'tab-1',
+      panes: {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'shell',
+              createRequestId: 'req-1',
+              status: 'running',
+            },
+          },
+          'tab-2': {
+            type: 'leaf',
+            id: 'pane-2',
+            content: {
+              kind: 'terminal',
+              mode: 'claude',
+              createRequestId: 'req-2',
+              status: 'running',
+              resumeSessionId: targetId,
+            },
+          },
+        },
+        activePane: {
+          'tab-1': 'pane-1',
+          'tab-2': 'pane-2',
+        },
+        paneTitles: {},
+      },
+    })
+
+    renderSidebar(store)
+
+    await act(async () => {
+      vi.advanceTimersByTime(100)
+    })
+
+    const sessionButton = screen.getByText('Already open session').closest('button')
+    fireEvent.click(sessionButton!)
+
+    const state = store.getState()
+
+    // Should not create any new tabs or panes
+    expect(state.tabs.tabs).toHaveLength(2)
+    // Should switch to tab-2 where the session lives
+    expect(state.tabs.activeTabId).toBe('tab-2')
+    // Should focus the existing pane
+    expect(state.panes.activePane['tab-2']).toBe('pane-2')
+    // Layout should be unchanged (still a leaf, no split)
+    expect(state.panes.layouts['tab-2'].type).toBe('leaf')
+  })
+
+  it('syncs tab and pane title when clicking a renamed session already open in a pane', async () => {
+    const targetId = sessionId('renamed-session')
+
+    const projects: ProjectGroup[] = [
+      {
+        projectPath: '/home/user/project',
+        sessions: [
+          {
+            sessionId: targetId,
+            projectPath: '/home/user/project',
+            lastActivityAt: Date.now(),
+            title: 'Renamed beside name',
+            cwd: '/home/user/project',
+          },
+        ],
+      },
+    ]
+
+    const store = createStore({
+      projects,
+      tabs: [
+        { id: 'tab-1', mode: 'shell' },
+        { id: 'tab-2', mode: 'claude', title: 'Stale Title' },
+      ],
+      activeTabId: 'tab-1',
+      panes: {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: { kind: 'terminal', mode: 'shell', createRequestId: 'req-1', status: 'running' },
+          },
+          'tab-2': {
+            type: 'leaf',
+            id: 'pane-2',
+            content: {
+              kind: 'terminal', mode: 'claude', createRequestId: 'req-2', status: 'running',
+              resumeSessionId: targetId,
+            },
+          },
+        },
+        activePane: { 'tab-1': 'pane-1', 'tab-2': 'pane-2' },
+        paneTitles: {},
+      },
+    })
+
+    // Set a stale pane title to test it also gets synced
+    store.dispatch({ type: 'panes/updatePaneTitle', payload: { tabId: 'tab-2', paneId: 'pane-2', title: 'Old Pane Name', setByUser: false } })
+
+    renderSidebar(store)
+
+    await act(async () => {
+      vi.advanceTimersByTime(100)
+    })
+
+    const sessionButton = screen.getByText('Renamed beside name').closest('button')
+    fireEvent.click(sessionButton!)
+
+    const state = store.getState()
+
+    // Should focus the existing tab
+    expect(state.tabs.activeTabId).toBe('tab-2')
+    // Tab title should be updated
+    const tab = state.tabs.tabs.find((t) => t.id === 'tab-2')
+    expect(tab?.title).toBe('Renamed beside name')
+    // Pane title should also be updated (stale title replaced)
+    const paneTitle = state.panes.paneTitles?.['tab-2']?.['pane-2']
+    expect(paneTitle).toBe('Renamed beside name')
+  })
+
+  it('does not sync title when clicking a session without a custom title (hasTitle=false)', async () => {
+    const targetId = sessionId('untitled-session')
+
+    const projects: ProjectGroup[] = [
+      {
+        projectPath: '/home/user/project',
+        sessions: [
+          {
+            sessionId: targetId,
+            projectPath: '/home/user/project',
+            lastActivityAt: Date.now(),
+            // No title → hasTitle will be false, title will be sessionId.slice(0, 8)
+            cwd: '/home/user/project',
+          },
+        ],
+      },
+    ]
+
+    const store = createStore({
+      projects,
+      tabs: [
+        { id: 'tab-1', mode: 'claude', title: 'Claude' },
+      ],
+      activeTabId: 'tab-1',
+      panes: {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal', mode: 'claude', createRequestId: 'req-1', status: 'running',
+              resumeSessionId: targetId,
+            },
+          },
+        },
+        activePane: { 'tab-1': 'pane-1' },
+        paneTitles: {},
+      },
+    })
+
+    renderSidebar(store)
+
+    await act(async () => {
+      vi.advanceTimersByTime(100)
+    })
+
+    const sessionTitle = screen.getByText(targetId.slice(0, 8), { exact: false })
+    const sessionButton = sessionTitle.closest('button')
+    fireEvent.click(sessionButton!)
+
+    const state = store.getState()
+    const tab = state.tabs.tabs.find((t) => t.id === 'tab-1')
+    // Original title should be preserved (not overwritten by sessionId fallback)
+    expect(tab?.title).toBe('Claude')
+  })
+
+  it('clicking a session already open in a fresh-agent pane focuses it', async () => {
+    const targetId = sessionId('freshclaude-open')
+
+    const projects: ProjectGroup[] = [
+      {
+        projectPath: '/home/user/project',
+        sessions: [
+          {
+            sessionId: targetId,
+            projectPath: '/home/user/project',
+            lastActivityAt: Date.now(),
+            title: 'Freshclaude session',
+            cwd: '/home/user/project',
+          },
+        ],
+      },
+    ]
+
+    const store = createStore({
+      projects,
+      tabs: [
+        { id: 'tab-1', mode: 'shell' },
+        { id: 'tab-2', mode: 'claude' },
+      ],
+      activeTabId: 'tab-1',
+      panes: {
+        layouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'shell',
+              createRequestId: 'req-1',
+              status: 'running',
+            },
+          },
+          'tab-2': {
+            type: 'leaf',
+            id: 'pane-chat',
+            content: {
+              kind: 'fresh-agent',
+              sessionType: 'freshclaude',
+              provider: 'claude',
+              createRequestId: 'req-chat',
+              status: 'idle',
+              resumeSessionId: targetId,
+              sessionRef: {
+                provider: 'claude',
+                sessionId: targetId,
+              },
+            },
+          },
+        },
+        activePane: {
+          'tab-1': 'pane-1',
+          'tab-2': 'pane-chat',
+        },
+        paneTitles: {},
+      },
+    })
+
+    renderSidebar(store)
+
+    await act(async () => {
+      vi.advanceTimersByTime(100)
+    })
+
+    const sessionButton = screen.getByText('Freshclaude session').closest('button')
+    fireEvent.click(sessionButton!)
+
+    const state = store.getState()
+
+    // Should not create any new tabs or panes
+    expect(state.tabs.tabs).toHaveLength(2)
+    // Should switch to tab-2 where the freshclaude session lives
+    expect(state.tabs.activeTabId).toBe('tab-2')
+    // Should focus the existing fresh-agent pane
+    expect(state.panes.activePane['tab-2']).toBe('pane-chat')
+    // Layout should be unchanged (still a leaf, no split)
+    expect(state.panes.layouts['tab-2'].type).toBe('leaf')
+  })
+
+  it('shows freshclaude non-interactive sessions while keeping exec-style Claude sessions hidden', async () => {
+    const projects: ProjectGroup[] = [
+      {
+        projectPath: '/home/user/project',
+        sessions: [
+          {
+            sessionId: sessionId('freshclaude-visible'),
+            projectPath: '/home/user/project',
+            lastActivityAt: Date.now(),
+            title: 'Freshclaude visible',
+            cwd: '/home/user/project',
+            isNonInteractive: true,
+            sessionType: 'freshclaude',
+          },
+          {
+            sessionId: sessionId('exec-hidden'),
+            projectPath: '/home/user/project',
+            lastActivityAt: Date.now() - 1000,
+            title: 'Exec hidden',
+            cwd: '/home/user/project',
+            isNonInteractive: true,
+          },
+        ],
+      },
+    ]
+
+    const store = createStore({
+      projects,
+      showNoninteractiveSessions: false,
+    })
+
+    renderSidebar(store)
+
+    await act(async () => {
+      vi.advanceTimersByTime(100)
+    })
+
+    expect(screen.getByText('Freshclaude visible')).toBeInTheDocument()
+    expect(screen.queryByText('Exec hidden')).not.toBeInTheDocument()
+  })
+
+  it('opens a closed persisted freshclaude session from the left panel as FreshAgent', async () => {
+    const targetId = sessionId('persisted-freshclaude')
+    const projects: ProjectGroup[] = [
+      {
+        projectPath: '/repo',
+        sessions: [
+          {
+            sessionId: targetId,
+            projectPath: '/repo',
+            lastActivityAt: Date.now(),
+            title: 'FreshClaude task',
+            cwd: '/repo',
+            provider: 'claude',
+            sessionType: 'freshclaude',
+          },
+        ],
+      },
+    ]
+
+    const store = createStore({
+      projects,
+      tabs: [{ id: 'tab-1', mode: 'shell' }],
+      activeTabId: 'tab-1',
+      sessionOpenMode: 'split',
+    })
+
+    renderSidebar(store)
+
+    await act(async () => {
+      vi.advanceTimersByTime(100)
+    })
+
+    const sessionButton = screen.getByText('FreshClaude task').closest('button')
+    fireEvent.click(sessionButton!)
+
+    const layout = store.getState().panes.layouts['tab-1']
+    expect(layout.type).toBe('split')
+    if (layout.type === 'split') {
+      const sessionPane = layout.children.find((child: any) =>
+        child.type === 'leaf' &&
+        child.content.kind === 'fresh-agent' &&
+        child.content.sessionType === 'freshclaude' &&
+        child.content.sessionRef?.provider === 'claude' &&
+        child.content.sessionRef?.sessionId === targetId
+      )
+      expect(sessionPane).toBeDefined()
+      expect(sessionPane!.content).toMatchObject({
+        provider: 'claude',
+        resumeSessionId: targetId,
+        sessionRef: { provider: 'claude', sessionId: targetId },
+      })
+    }
+  })
+
+  it('clicking a session with no active tab creates a new tab', async () => {
+    const projects: ProjectGroup[] = [
+      {
+        projectPath: '/home/user/project',
+        sessions: [
+          {
+            sessionId: sessionId('orphan-session'),
+            projectPath: '/home/user/project',
+            lastActivityAt: Date.now(),
+            title: 'Orphan session',
+            cwd: '/home/user/project',
+          },
+        ],
+      },
+    ]
+
+    const store = createStore({
+      projects,
+      tabs: [],
+      activeTabId: null,
+      panes: {
+        layouts: {},
+        activePane: {},
+        paneTitles: {},
+      },
+    })
+
+    const { onNavigate } = renderSidebar(store)
+
+    await act(async () => {
+      vi.advanceTimersByTime(100)
+    })
+
+    const sessionButton = screen.getByText('Orphan session').closest('button')
+    fireEvent.click(sessionButton!)
+
+    const state = store.getState()
+
+    // Should create a new tab via openSessionTab fallback
+    expect(state.tabs.tabs).toHaveLength(1)
+    expect(state.tabs.tabs[0].sessionRef).toEqual({
+      provider: 'claude',
+      sessionId: sessionId('orphan-session'),
+    })
+    expect(state.tabs.tabs[0].mode).toBe('claude')
+    expect(onNavigate).toHaveBeenCalledWith('terminal')
+  })
+})

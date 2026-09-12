@@ -1,0 +1,974 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, fireEvent, cleanup, waitFor, within, act } from '@testing-library/react'
+import { configureStore } from '@reduxjs/toolkit'
+import { Provider } from 'react-redux'
+import PanePicker from '@/components/panes/PanePicker'
+import { resetEnsureExtensionsRegistryCacheForTests } from '@/hooks/useEnsureExtensionsRegistry'
+import { setStatus } from '@/store/connectionSlice'
+import settingsReducer from '@/store/settingsSlice'
+import connectionReducer from '@/store/connectionSlice'
+import extensionsReducer from '@/store/extensionsSlice'
+import type { ClientExtensionEntry } from '@shared/extension-types'
+import type { DefaultNewPane, SidebarSortMode, TerminalTheme } from '@/store/types'
+
+const mockApiGet = vi.fn()
+vi.mock('@/lib/api', () => ({
+  api: {
+    get: (...args: unknown[]) => mockApiGet(...args),
+  },
+}))
+
+const mockClaudeExt: ClientExtensionEntry = {
+  name: 'claude', version: '1.0.0', label: 'Claude CLI', description: '', category: 'cli',
+  picker: { shortcut: 'L' },
+  cli: { supportsPermissionMode: true, supportsResume: true, resumeCommandTemplate: ['claude', '--resume', '{{sessionId}}'] },
+}
+const mockCodexExt: ClientExtensionEntry = {
+  name: 'codex', version: '1.0.0', label: 'Codex CLI', description: '', category: 'cli',
+  picker: { shortcut: 'X' },
+  cli: { supportsModel: true, supportsSandbox: true, supportsResume: true, resumeCommandTemplate: ['codex', 'resume', '{{sessionId}}'] },
+}
+const mockOpencodeExt: ClientExtensionEntry = {
+  name: 'opencode', version: '1.0.0', label: 'OpenCode', description: '', category: 'cli',
+  cli: { supportsModel: true, supportsPermissionMode: true, supportsResume: true, resumeCommandTemplate: ['opencode', '--session', '{{sessionId}}'] },
+}
+const defaultCliExtensions: ClientExtensionEntry[] = [mockClaudeExt, mockCodexExt]
+
+// Mock lucide-react icons
+vi.mock('lucide-react', () => ({
+  Terminal: ({ className }: { className?: string }) => (
+    <svg data-testid="terminal-icon" className={className} />
+  ),
+  Globe: ({ className }: { className?: string }) => (
+    <svg data-testid="globe-icon" className={className} />
+  ),
+  FileText: ({ className }: { className?: string }) => (
+    <svg data-testid="file-text-icon" className={className} />
+  ),
+  LayoutGrid: ({ className }: { className?: string }) => (
+    <svg data-testid="layout-grid-icon" className={className} />
+  ),
+  Gauge: ({ className }: { className?: string }) => (
+    <svg data-testid="gauge-icon" className={className} />
+  ),
+}))
+
+function createStore(overrides?: {
+  platform?: string | null
+  connectionStatus?: 'disconnected' | 'connecting' | 'connected' | 'ready'
+  serverInstanceId?: string
+  availableClis?: Record<string, boolean>
+  enabledProviders?: string[]
+  disabledExtensions?: string[]
+  extensions?: ClientExtensionEntry[]
+  featureFlags?: Record<string, boolean>
+  freshClientsEnabled?: boolean
+}) {
+  return configureStore({
+    reducer: {
+      settings: settingsReducer,
+      connection: connectionReducer,
+      extensions: extensionsReducer,
+    },
+    preloadedState: {
+      connection: {
+        status: overrides?.connectionStatus ?? 'ready',
+        platform: overrides?.platform ?? null,
+        availableClis: overrides?.availableClis ?? {},
+        featureFlags: overrides?.featureFlags ?? {},
+        serverInstanceId: overrides?.serverInstanceId,
+      },
+      extensions: {
+        entries: overrides?.extensions ?? [],
+      },
+      settings: {
+        settings: {
+          theme: 'system' as const,
+          uiScale: 1,
+          terminal: {
+            fontSize: 14,
+            fontFamily: 'monospace',
+            lineHeight: 1.2,
+            cursorBlink: true,
+            scrollback: 5000,
+            theme: 'auto' as TerminalTheme,
+          },
+          safety: { autoKillIdleMinutes: 180 },
+          sidebar: {
+            sortMode: 'activity' as SidebarSortMode,
+            showProjectBadges: true,
+            width: 288,
+            collapsed: false,
+          },
+          panes: { defaultNewPane: 'ask' as DefaultNewPane },
+          codingCli: {
+            enabledProviders: (overrides?.enabledProviders ?? []) as any[],
+            providers: {},
+          },
+          freshAgent: {
+            enabled: overrides?.freshClientsEnabled ?? false,
+          },
+          logging: { debug: false },
+          extensions: {
+            disabled: overrides?.disabledExtensions ?? [],
+          },
+        },
+        loaded: true,
+        lastSavedAt: null,
+      },
+    },
+  })
+}
+
+function renderPicker(
+  overrides?: Parameters<typeof createStore>[0],
+  props?: { onSelect?: ReturnType<typeof vi.fn>; onCancel?: ReturnType<typeof vi.fn>; isOnlyPane?: boolean; focusEligible?: boolean; paneId?: string; focusEpoch?: number }
+) {
+  const store = createStore(overrides)
+  const onSelect = props?.onSelect ?? vi.fn()
+  const onCancel = props?.onCancel ?? vi.fn()
+  const isOnlyPane = props?.isOnlyPane ?? false
+  const focusEligible = props?.focusEligible ?? true
+  const utils = render(
+    <Provider store={store}>
+      <PanePicker
+        onSelect={onSelect}
+        onCancel={onCancel}
+        isOnlyPane={isOnlyPane}
+        focusEligible={focusEligible}
+        paneId={props?.paneId}
+        focusEpoch={props?.focusEpoch}
+      />
+    </Provider>
+  )
+  const rerenderPicker = (next: { focusEligible?: boolean; focusEpoch?: number }) => utils.rerender(
+    <Provider store={store}>
+      <PanePicker
+        onSelect={onSelect}
+        onCancel={onCancel}
+        isOnlyPane={isOnlyPane}
+        focusEligible={next.focusEligible ?? focusEligible}
+        paneId={props?.paneId}
+        focusEpoch={next.focusEpoch ?? props?.focusEpoch}
+      />
+    </Provider>
+  )
+  return { onSelect, onCancel, store, rerenderPicker, ...utils }
+}
+
+// Helper to get the picker container
+const getContainer = () => {
+  const container = document.querySelector('[data-context="pane-picker"]')
+  if (!container) throw new Error('Picker container not found')
+  return container
+}
+
+// Helper to complete the fade animation
+const completeFadeAnimation = () => {
+  fireEvent.transitionEnd(getContainer())
+}
+
+// Controllable ResizeObserver: captures the callback so tests can drive
+// container re-measures with setContainerSize().
+class MockResizeObserver {
+  static instances: MockResizeObserver[] = []
+  readonly callback: ResizeObserverCallback
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback
+    MockResizeObserver.instances.push(this)
+  }
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+
+// Override the container's measured size and notify the observer so the
+// picker recomputes its adaptive grid layout.
+const setContainerSize = (width: number, height: number) => {
+  const container = getContainer()
+  Object.defineProperty(container, 'clientWidth', { value: width, configurable: true })
+  Object.defineProperty(container, 'clientHeight', { value: height, configurable: true })
+  const observer = MockResizeObserver.instances[0]
+  if (observer) {
+    act(() => {
+      observer.callback([], {} as ResizeObserver)
+    })
+  }
+}
+
+describe('PanePicker', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockApiGet.mockReset()
+    resetEnsureExtensionsRegistryCacheForTests()
+    localStorage.clear()
+    localStorage.setItem('freshell.auth-token', 'test-token')
+    MockResizeObserver.instances = []
+    vi.stubGlobal('ResizeObserver', MockResizeObserver)
+  })
+
+  afterEach(() => {
+    cleanup()
+    resetEnsureExtensionsRegistryCacheForTests()
+    vi.unstubAllGlobals()
+  })
+
+  describe('rendering', () => {
+    it('renders Editor, Browser, Shell options by default', () => {
+      renderPicker()
+      expect(screen.getByText('Editor')).toBeInTheDocument()
+      expect(screen.getByText('Browser')).toBeInTheDocument()
+      expect(screen.getByText('Shell')).toBeInTheDocument()
+    })
+
+    it('re-focuses the container on a focus epoch bump after a denied remount (same-target select)', () => {
+      const first = renderPicker(undefined, { paneId: 'pane-k' })
+      expect(getContainer()).toHaveFocus()
+      const chrome = document.createElement('input')
+      document.body.appendChild(chrome)
+      chrome.focus()
+      first.unmount() // records NOT owned
+      const second = renderPicker(undefined, { paneId: 'pane-k' })
+      expect(chrome).toHaveFocus() // denied adoption: agent split while user is in app chrome
+      second.rerenderPicker({ focusEpoch: 1 })
+      expect(getContainer()).toHaveFocus()
+    })
+
+    it('renders icons for each option', () => {
+      renderPicker()
+      expect(screen.getByTestId('file-text-icon')).toBeInTheDocument()
+      expect(screen.getByTestId('globe-icon')).toBeInTheDocument()
+      expect(screen.getByTestId('terminal-icon')).toBeInTheDocument()
+    })
+
+    it('shows Claude CLI and Codex CLI buttons when available and enabled', () => {
+      renderPicker({
+        availableClis: { claude: true, codex: true },
+        enabledProviders: ['claude', 'codex'],
+        extensions: defaultCliExtensions,
+      })
+      expect(screen.getByRole('button', { name: 'Claude CLI' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Codex CLI' })).toBeInTheDocument()
+    })
+
+    it('shows OpenCode when available and enabled', () => {
+      renderPicker({
+        availableClis: { opencode: true },
+        enabledProviders: ['opencode'],
+        extensions: [mockOpencodeExt],
+      })
+
+      expect(screen.getByRole('button', { name: 'OpenCode' })).toBeInTheDocument()
+    })
+
+    it('hides Claude CLI when not available on system', () => {
+      renderPicker({
+        availableClis: { claude: false, codex: true },
+        enabledProviders: ['claude', 'codex'],
+        extensions: defaultCliExtensions,
+      })
+      expect(screen.queryByRole('button', { name: 'Claude CLI' })).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Codex CLI' })).toBeInTheDocument()
+    })
+
+    it('hides Codex CLI when disabled in settings', () => {
+      renderPicker({
+        availableClis: { claude: true, codex: true },
+        enabledProviders: ['claude'],
+        extensions: defaultCliExtensions,
+      })
+      expect(screen.getByRole('button', { name: 'Claude CLI' })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Codex CLI' })).not.toBeInTheDocument()
+    })
+
+    it('renders provider icons as inline SVGs (not img tags)', () => {
+      renderPicker({
+        availableClis: { claude: true, codex: true },
+        enabledProviders: ['claude', 'codex'],
+        extensions: defaultCliExtensions,
+      })
+      const claudeButton = screen.getByRole('button', { name: 'Claude CLI' })
+      const codexButton = screen.getByRole('button', { name: 'Codex CLI' })
+
+      // Should render inline SVGs that inherit color, not <img> tags
+      expect(claudeButton.querySelector('svg')).toBeInTheDocument()
+      expect(claudeButton.querySelector('img')).not.toBeInTheDocument()
+      expect(codexButton.querySelector('svg')).toBeInTheDocument()
+      expect(codexButton.querySelector('img')).not.toBeInTheDocument()
+    })
+
+    it('renders options in correct order: Freshclaude, CLIs, Freshcodex, Editor, Browser, Shell (Kilroy hidden by default)', () => {
+      renderPicker({
+        availableClis: { claude: true, codex: true },
+        enabledProviders: ['claude', 'codex'],
+        extensions: defaultCliExtensions,
+        freshClientsEnabled: true,
+      })
+      const buttons = screen.getAllByRole('button')
+      const labels = buttons.map(b => b.getAttribute('aria-label'))
+      expect(labels[0]).toBe('Freshclaude')
+      expect(labels[1]).toBe('Claude CLI')
+      expect(labels[2]).toBe('Codex CLI')
+      expect(labels[3]).toBe('Freshcodex')
+      expect(labels[4]).toBe('Editor')
+      expect(labels[5]).toBe('Browser')
+      expect(labels[6]).toBe('Shell')
+      expect(labels).not.toContain('Kilroy')
+    })
+
+    it('shows Kilroy when kilroy feature flag is enabled', () => {
+      renderPicker({
+        availableClis: { claude: true, codex: true },
+        enabledProviders: ['claude', 'codex'],
+        extensions: defaultCliExtensions,
+        featureFlags: { kilroy: true },
+        freshClientsEnabled: true,
+      })
+      const buttons = screen.getAllByRole('button')
+      const labels = buttons.map(b => b.getAttribute('aria-label'))
+      expect(labels).toContain('Kilroy')
+      // Kilroy should appear after CLIs (it has pickerAfterCli: true)
+      expect(labels[0]).toBe('Freshclaude')
+      expect(labels[1]).toBe('Claude CLI')
+      expect(labels[2]).toBe('Codex CLI')
+      expect(labels[3]).toBe('Kilroy')
+      expect(labels[4]).toBe('Freshcodex')
+      expect(labels[5]).toBe('Editor')
+      expect(labels[6]).toBe('Browser')
+      expect(labels[7]).toBe('Shell')
+    })
+
+    it('hides all fresh clients by default even when their CLIs are available and enabled', () => {
+      renderPicker({
+        availableClis: { claude: true, codex: true, opencode: true },
+        enabledProviders: ['claude', 'codex', 'opencode'],
+        extensions: [...defaultCliExtensions, mockOpencodeExt],
+        featureFlags: { kilroy: true },
+      })
+
+      expect(screen.queryByRole('button', { name: 'Freshclaude' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Freshcodex' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Freshopencode' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Kilroy' })).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Claude CLI' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Codex CLI' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'OpenCode' })).toBeInTheDocument()
+    })
+
+    it('shows Freshopencode when fresh clients and OpenCode are enabled', () => {
+      renderPicker({
+        availableClis: { opencode: true },
+        enabledProviders: ['opencode'],
+        extensions: [mockOpencodeExt],
+        freshClientsEnabled: true,
+      })
+
+      expect(screen.getByRole('button', { name: 'Freshopencode' })).toBeInTheDocument()
+    })
+
+    it('shows fresh client labels without old wording', () => {
+      renderPicker({
+        availableClis: { claude: true, codex: true, opencode: true },
+        enabledProviders: ['claude', 'codex', 'opencode'],
+        extensions: [...defaultCliExtensions, mockOpencodeExt],
+        freshClientsEnabled: true,
+      })
+
+      expect(screen.getByRole('button', { name: 'Freshclaude' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Freshcodex' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Freshopencode' })).toBeInTheDocument()
+      expect(document.body.textContent).not.toMatch(/agent[-\s]?chat/i)
+    })
+
+    it('hides a Fresh-agent picker entry disabled by session type without hiding its CLI', () => {
+      renderPicker({
+        availableClis: { claude: true, codex: true },
+        enabledProviders: ['claude', 'codex'],
+        extensions: defaultCliExtensions,
+        freshClientsEnabled: true,
+        disabledExtensions: ['freshcodex'],
+      })
+
+      expect(screen.getByRole('button', { name: 'Freshclaude' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Codex CLI' })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Freshcodex' })).not.toBeInTheDocument()
+    })
+
+    it('shows only non-CLI options when no CLIs are available', () => {
+      renderPicker({ availableClis: {} })
+      expect(screen.queryByRole('button', { name: 'Claude CLI' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Codex CLI' })).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Editor' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Browser' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Shell' })).toBeInTheDocument()
+    })
+
+    it('loads extension options on demand when the registry is empty', async () => {
+      mockApiGet.mockResolvedValue([
+        {
+          name: 'notes-widget',
+          version: '0.1.0',
+          label: 'Notes Widget',
+          description: 'A notes widget',
+          category: 'client',
+        },
+      ])
+
+      renderPicker()
+
+      expect(mockApiGet).toHaveBeenCalledWith(expect.stringContaining('/api/extensions'))
+      expect(await screen.findByRole('button', { name: 'Notes Widget' })).toBeInTheDocument()
+    })
+
+    it('retries loading the extension registry after the connection reaches ready', async () => {
+      mockApiGet
+        .mockRejectedValueOnce({ status: 503, message: 'Service Unavailable' })
+        .mockResolvedValueOnce([
+          {
+            name: 'notes-widget',
+            version: '0.1.0',
+            label: 'Notes Widget',
+            description: 'A notes widget',
+            category: 'client',
+          },
+        ])
+
+      const { store } = renderPicker({
+        connectionStatus: 'connecting',
+      })
+
+      await waitFor(() => {
+        expect(mockApiGet).toHaveBeenCalledTimes(1)
+      })
+      await Promise.resolve()
+
+      store.dispatch(setStatus('ready'))
+
+      expect(await screen.findByRole('button', { name: 'Notes Widget' })).toBeInTheDocument()
+      expect(mockApiGet).toHaveBeenCalledTimes(2)
+    })
+
+    it('does not load extension options on demand without an auth token', async () => {
+      localStorage.removeItem('freshell.auth-token')
+      mockApiGet.mockResolvedValue([
+        {
+          name: 'notes-widget',
+          version: '0.1.0',
+          label: 'Notes Widget',
+          description: 'A notes widget',
+          category: 'client',
+        },
+      ])
+
+      renderPicker()
+
+      await Promise.resolve()
+
+      expect(mockApiGet).not.toHaveBeenCalled()
+      expect(screen.queryByRole('button', { name: 'Notes Widget' })).not.toBeInTheDocument()
+    })
+  })
+
+  describe('mouse interaction', () => {
+    it('calls onSelect with shell when Shell is clicked after fade', () => {
+      const { onSelect } = renderPicker()
+      fireEvent.click(screen.getByText('Shell'))
+      expect(onSelect).not.toHaveBeenCalled()
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('shell')
+    })
+
+    it('starts fade animation on click', () => {
+      renderPicker()
+      const container = getContainer()
+      expect(container).not.toHaveClass('opacity-0')
+      fireEvent.click(screen.getByText('Shell'))
+      expect(container).toHaveClass('opacity-0')
+    })
+
+    it('ignores additional clicks during fade', () => {
+      const { onSelect } = renderPicker()
+      fireEvent.click(screen.getByText('Shell'))
+      fireEvent.click(screen.getByText('Browser'))
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledTimes(1)
+      expect(onSelect).toHaveBeenCalledWith('shell')
+    })
+
+    it('calls onSelect with claude when Claude CLI button is clicked', () => {
+      const { onSelect } = renderPicker({
+        availableClis: { claude: true },
+        enabledProviders: ['claude'],
+        extensions: defaultCliExtensions,
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'Claude CLI' }))
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('claude')
+    })
+  })
+
+  describe('keyboard shortcuts (scoped to picker container)', () => {
+    it('fires shortcut S for Shell when container has focus', () => {
+      const { onSelect } = renderPicker()
+      const container = getContainer()
+      fireEvent.keyDown(container, { key: 's' })
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('shell')
+    })
+
+    it('shortcuts are case-insensitive', () => {
+      const { onSelect } = renderPicker()
+      const container = getContainer()
+      fireEvent.keyDown(container, { key: 'S' })
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('shell')
+    })
+
+    it('fires shortcut L for Claude', () => {
+      const { onSelect } = renderPicker({
+        availableClis: { claude: true },
+        enabledProviders: ['claude'],
+        extensions: defaultCliExtensions,
+      })
+      fireEvent.keyDown(getContainer(), { key: 'l' })
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('claude')
+    })
+
+    it('fires shortcut X for Codex', () => {
+      const { onSelect } = renderPicker({
+        availableClis: { codex: true },
+        enabledProviders: ['codex'],
+        extensions: defaultCliExtensions,
+      })
+      fireEvent.keyDown(getContainer(), { key: 'x' })
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('codex')
+    })
+
+    it('does not fire shortcuts when an element outside the picker has focus', () => {
+      const onSelect = vi.fn()
+      const store = createStore()
+      render(
+        <Provider store={store}>
+          <div>
+            <PanePicker onSelect={onSelect} onCancel={vi.fn()} isOnlyPane={false} />
+            <input data-testid="other-input" />
+          </div>
+        </Provider>
+      )
+      const otherInput = screen.getByTestId('other-input')
+      otherInput.focus()
+      fireEvent.keyDown(otherInput, { key: 's' })
+      expect(onSelect).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('arrow key navigation', () => {
+    it('moves focus right with ArrowRight', () => {
+      renderPicker()
+      const editorButton = screen.getByText('Editor').closest('button')!
+      editorButton.focus()
+      fireEvent.keyDown(editorButton, { key: 'ArrowRight' })
+      const browserButton = screen.getByText('Browser').closest('button')!
+      expect(browserButton).toHaveFocus()
+    })
+
+    it('moves focus across rows with ArrowRight using the global index', () => {
+      renderPicker({
+        availableClis: { claude: true, codex: true },
+        enabledProviders: ['claude', 'codex'],
+        extensions: defaultCliExtensions,
+        freshClientsEnabled: true,
+      })
+      const buttons = screen.getAllByRole('button')
+      expect(buttons).toHaveLength(7)
+      // Fallback [2,3,2]: global index 1 (Claude CLI) is the last of row 1;
+      // ArrowRight must jump to global index 2 (Codex CLI), the first of row 2.
+      buttons[1].focus()
+      fireEvent.keyDown(buttons[1], { key: 'ArrowRight' })
+      expect(buttons[2]).toHaveFocus()
+    })
+
+    it('selects focused option on Enter after fade', () => {
+      const { onSelect } = renderPicker()
+      const browserButton = screen.getByText('Browser').closest('button')!
+      browserButton.focus()
+      fireEvent.keyDown(browserButton, { key: 'Enter' })
+      expect(onSelect).not.toHaveBeenCalled()
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('browser')
+    })
+  })
+
+  describe('escape behavior', () => {
+    it('calls onCancel on Escape when not only pane', () => {
+      const { onCancel } = renderPicker()
+      fireEvent.keyDown(getContainer(), { key: 'Escape' })
+      expect(onCancel).toHaveBeenCalled()
+    })
+
+    it('does not call onCancel on Escape when only pane', () => {
+      const onCancel = vi.fn()
+      renderPicker(undefined, { onCancel, isOnlyPane: true })
+      fireEvent.keyDown(getContainer(), { key: 'Escape' })
+      expect(onCancel).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('shortcut hints', () => {
+    it('shows shortcut hint on hover', () => {
+      renderPicker()
+      const shellButton = screen.getByText('Shell').closest('button')!
+      fireEvent.mouseEnter(shellButton)
+      const hint = screen.getByText('S', { selector: '.shortcut-hint' })
+      expect(hint).toHaveClass('opacity-40')
+    })
+
+    it('hides shortcut hint on mouse leave', () => {
+      renderPicker()
+      const shellButton = screen.getByText('Shell').closest('button')!
+      fireEvent.mouseEnter(shellButton)
+      fireEvent.mouseLeave(shellButton)
+      const hint = screen.getByText('S', { selector: '.shortcut-hint' })
+      expect(hint).toHaveClass('opacity-0')
+    })
+  })
+
+  describe('platform-specific shell options', () => {
+    it('shows single Shell option on non-Windows platforms', () => {
+      renderPicker({ platform: 'darwin' })
+      expect(screen.getByText('Shell')).toBeInTheDocument()
+      expect(screen.queryByText('CMD')).not.toBeInTheDocument()
+      expect(screen.queryByText('PowerShell')).not.toBeInTheDocument()
+      expect(screen.queryByText('WSL')).not.toBeInTheDocument()
+    })
+
+    it('shows CMD, PowerShell, WSL options on Windows', () => {
+      renderPicker({ platform: 'win32' })
+      expect(screen.getByText('CMD')).toBeInTheDocument()
+      expect(screen.getByText('PowerShell')).toBeInTheDocument()
+      expect(screen.getByText('WSL')).toBeInTheDocument()
+      expect(screen.queryByText('Shell')).not.toBeInTheDocument()
+    })
+
+    it('calls onSelect with cmd when CMD clicked on Windows', () => {
+      const { onSelect } = renderPicker({ platform: 'win32' })
+      fireEvent.click(screen.getByText('CMD'))
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('cmd')
+    })
+
+    it('calls onSelect with powershell when PowerShell clicked', () => {
+      const { onSelect } = renderPicker({ platform: 'win32' })
+      fireEvent.click(screen.getByText('PowerShell'))
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('powershell')
+    })
+
+    it('calls onSelect with wsl when WSL clicked', () => {
+      const { onSelect } = renderPicker({ platform: 'win32' })
+      fireEvent.click(screen.getByText('WSL'))
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('wsl')
+    })
+
+    it('uses C shortcut for CMD on Windows', () => {
+      const { onSelect } = renderPicker({ platform: 'win32' })
+      fireEvent.keyDown(getContainer(), { key: 'c' })
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('cmd')
+    })
+
+    it('uses P shortcut for PowerShell on Windows', () => {
+      const { onSelect } = renderPicker({ platform: 'win32' })
+      fireEvent.keyDown(getContainer(), { key: 'p' })
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('powershell')
+    })
+
+    it('uses W shortcut for WSL on Windows', () => {
+      const { onSelect } = renderPicker({ platform: 'win32' })
+      fireEvent.keyDown(getContainer(), { key: 'w' })
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('wsl')
+    })
+
+    it('falls back to Shell option when platform is null', () => {
+      renderPicker({ platform: null })
+      expect(screen.getByText('Shell')).toBeInTheDocument()
+    })
+
+    it('shows CMD, PowerShell, WSL options on WSL platform', () => {
+      renderPicker({ platform: 'wsl' })
+      expect(screen.getByText('CMD')).toBeInTheDocument()
+      expect(screen.getByText('PowerShell')).toBeInTheDocument()
+      expect(screen.getByText('WSL')).toBeInTheDocument()
+      expect(screen.queryByText('Shell')).not.toBeInTheDocument()
+    })
+  })
+
+  // System Status option gating (mirrors 'platform-specific shell options'):
+  // gate = featureFlags.hostStatsAvailable === true && platform !== 'win32'.
+  describe('host stats pane option', () => {
+    it('hides System Status when the hostStatsAvailable feature flag is absent', () => {
+      renderPicker({ platform: 'linux' })
+      expect(screen.queryByRole('button', { name: 'System Status' })).not.toBeInTheDocument()
+    })
+
+    it('hides System Status when hostStatsAvailable is false', () => {
+      renderPicker({ platform: 'linux', featureFlags: { hostStatsAvailable: false } })
+      expect(screen.queryByRole('button', { name: 'System Status' })).not.toBeInTheDocument()
+    })
+
+    it('hides System Status on win32 even when the flag is true', () => {
+      renderPicker({ platform: 'win32', featureFlags: { hostStatsAvailable: true } })
+      expect(screen.queryByRole('button', { name: 'System Status' })).not.toBeInTheDocument()
+      // Sanity: the platform-specific windows shells still render in this state.
+      expect(screen.getByText('PowerShell')).toBeInTheDocument()
+    })
+
+    it('shows System Status with an accessible button name and Gauge icon when the flag is true on linux', () => {
+      renderPicker({ platform: 'linux', featureFlags: { hostStatsAvailable: true } })
+      expect(screen.getByRole('button', { name: 'System Status' })).toBeInTheDocument()
+      expect(screen.getByTestId('gauge-icon')).toBeInTheDocument()
+    })
+
+    it('calls onSelect with host-stats when System Status is clicked', () => {
+      const { onSelect } = renderPicker({ platform: 'linux', featureFlags: { hostStatsAvailable: true } })
+      fireEvent.click(screen.getByRole('button', { name: 'System Status' }))
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('host-stats')
+    })
+
+    it('uses the H shortcut for System Status', () => {
+      const { onSelect } = renderPicker({ platform: 'linux', featureFlags: { hostStatsAvailable: true } })
+      fireEvent.keyDown(getContainer(), { key: 'h' })
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('host-stats')
+    })
+  })
+
+  describe('auto-focus on mount', () => {
+    it('focuses the picker container on mount', () => {
+      renderPicker()
+      const container = getContainer()
+      expect(container).toHaveFocus()
+    })
+
+    it('does not focus the picker container when focusEligible is false', () => {
+      renderPicker(undefined, { focusEligible: false })
+      expect(getContainer()).not.toHaveFocus()
+    })
+  })
+
+  describe('responsive sizing', () => {
+    it('applies the pane-picker class to the outer wrapper', () => {
+      renderPicker()
+      const container = getContainer()
+      expect(container).toHaveClass('pane-picker')
+    })
+
+    it('marks the outer wrapper as a toolbar', () => {
+      renderPicker()
+      const container = getContainer()
+      expect(container).toHaveAttribute('role', 'toolbar')
+      expect(container).toHaveAttribute('aria-label', 'Pane type picker')
+    })
+
+    it('applies the pane-picker-options class to the options container', () => {
+      renderPicker()
+      const buttonContainer = screen.getByTestId('pane-picker-options')
+      expect(buttonContainer).toHaveClass('pane-picker-options')
+    })
+
+    it('applies the pane-picker-option-row class to each row', () => {
+      renderPicker()
+      const rows = screen.getAllByTestId('pane-picker-option-row')
+      expect(rows.length).toBeGreaterThan(0)
+      for (const row of rows) {
+        expect(row).toHaveClass('pane-picker-option-row')
+      }
+    })
+
+    it('applies the pane-picker-tile class to each button', () => {
+      renderPicker()
+      const buttons = screen.getAllByRole('button')
+      expect(buttons.length).toBeGreaterThan(0)
+      for (const button of buttons) {
+        expect(button).toHaveClass('pane-picker-tile')
+      }
+    })
+  })
+
+  describe('adaptive reflow', () => {
+    const sevenOptionStore = {
+      availableClis: { claude: true, codex: true },
+      enabledProviders: ['claude', 'codex'],
+      extensions: defaultCliExtensions,
+      freshClientsEnabled: true,
+    }
+
+    it('lays out 7 options as [2,3,2] at 480x400', () => {
+      renderPicker(sevenOptionStore)
+      setContainerSize(480, 400)
+      const rows = screen.getAllByTestId('pane-picker-option-row')
+      expect(rows).toHaveLength(3)
+      expect(within(rows[0]).getAllByRole('button')).toHaveLength(2)
+      expect(within(rows[1]).getAllByRole('button')).toHaveLength(3)
+      expect(within(rows[2]).getAllByRole('button')).toHaveLength(2)
+      expect(getContainer().style.getPropertyValue('--cols')).toBe('3')
+      expect(getContainer().style.getPropertyValue('--rows')).toBe('3')
+    })
+
+    it('lays out 7 options as [4,3] at 640x300', () => {
+      renderPicker(sevenOptionStore)
+      setContainerSize(640, 300)
+      const rows = screen.getAllByTestId('pane-picker-option-row')
+      expect(rows).toHaveLength(2)
+      expect(within(rows[0]).getAllByRole('button')).toHaveLength(4)
+      expect(within(rows[1]).getAllByRole('button')).toHaveLength(3)
+      expect(getContainer().style.getPropertyValue('--cols')).toBe('4')
+      expect(getContainer().style.getPropertyValue('--rows')).toBe('2')
+    })
+
+    it('lays out 7 options as [2,3,2] at 300x500 (no trailing singleton)', () => {
+      renderPicker(sevenOptionStore)
+      setContainerSize(300, 500)
+      const rows = screen.getAllByTestId('pane-picker-option-row')
+      expect(rows).toHaveLength(3)
+      expect(within(rows[0]).getAllByRole('button')).toHaveLength(2)
+      expect(within(rows[1]).getAllByRole('button')).toHaveLength(3)
+      expect(within(rows[2]).getAllByRole('button')).toHaveLength(2)
+    })
+
+    it('lays out 13 options as [3,4,4,2] at 480x400', () => {
+      const clientExt = (name: string, label: string): ClientExtensionEntry => ({
+        name,
+        version: '1.0.0',
+        label,
+        description: '',
+        category: 'client',
+      })
+      const threeClientExtensions = [
+        clientExt('widget-a', 'Widget A'),
+        clientExt('widget-b', 'Widget B'),
+        clientExt('widget-c', 'Widget C'),
+      ]
+      renderPicker({
+        freshClientsEnabled: true,
+        featureFlags: { kilroy: true },
+        availableClis: { claude: true, codex: true, opencode: true },
+        enabledProviders: ['claude', 'codex', 'opencode'],
+        extensions: [...defaultCliExtensions, mockOpencodeExt, ...threeClientExtensions],
+      })
+      expect(screen.getAllByRole('button')).toHaveLength(13)
+      setContainerSize(480, 400)
+      const rows = screen.getAllByTestId('pane-picker-option-row')
+      expect(rows).toHaveLength(4)
+      expect(within(rows[0]).getAllByRole('button')).toHaveLength(3)
+      expect(within(rows[1]).getAllByRole('button')).toHaveLength(4)
+      expect(within(rows[2]).getAllByRole('button')).toHaveLength(4)
+      expect(within(rows[3]).getAllByRole('button')).toHaveLength(2)
+      expect(getContainer().style.getPropertyValue('--cols')).toBe('4')
+      expect(getContainer().style.getPropertyValue('--rows')).toBe('4')
+    })
+  })
+
+  describe('balanced icon layout', () => {
+    it('prefers a balanced 2+3+2 arrangement when seven options are visible', () => {
+      renderPicker({
+        availableClis: { claude: true, codex: true },
+        enabledProviders: ['claude', 'codex'],
+        extensions: defaultCliExtensions,
+        freshClientsEnabled: true,
+      })
+
+      const rows = screen.getAllByTestId('pane-picker-option-row')
+      expect(rows).toHaveLength(3)
+      expect(within(rows[0]).getAllByRole('button')).toHaveLength(2)
+      expect(within(rows[1]).getAllByRole('button')).toHaveLength(3)
+      expect(within(rows[2]).getAllByRole('button')).toHaveLength(2)
+    })
+  })
+
+  describe('extension options', () => {
+    const sampleExtension: ClientExtensionEntry = {
+      name: 'test-widget',
+      version: '1.0.0',
+      label: 'Test Widget',
+      description: 'A test extension',
+      category: 'client',
+      picker: { shortcut: 'T' },
+    }
+
+    const secondExtension: ClientExtensionEntry = {
+      name: 'another-ext',
+      version: '2.0.0',
+      label: 'Another Extension',
+      description: 'Another test extension',
+      category: 'server',
+    }
+
+    it('shows extension options from the registry', () => {
+      renderPicker({ extensions: [sampleExtension] })
+      expect(screen.getByRole('button', { name: 'Test Widget' })).toBeInTheDocument()
+    })
+
+    it('shows no extension options when registry is empty', () => {
+      renderPicker({ extensions: [] })
+      // Should only show built-in options (Editor, Browser, Shell)
+      const buttons = screen.getAllByRole('button')
+      const labels = buttons.map(b => b.getAttribute('aria-label'))
+      expect(labels).not.toContain('Test Widget')
+    })
+
+    it('shows multiple extension options', () => {
+      renderPicker({ extensions: [sampleExtension, secondExtension] })
+      expect(screen.getByRole('button', { name: 'Test Widget' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Another Extension' })).toBeInTheDocument()
+    })
+
+    it('calls onSelect with ext:<name> when extension option is clicked', () => {
+      const { onSelect } = renderPicker({ extensions: [sampleExtension] })
+      fireEvent.click(screen.getByRole('button', { name: 'Test Widget' }))
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('ext:test-widget')
+    })
+
+    it('supports keyboard shortcut from extension manifest', () => {
+      const { onSelect } = renderPicker({ extensions: [sampleExtension] })
+      fireEvent.keyDown(getContainer(), { key: 't' })
+      completeFadeAnimation()
+      expect(onSelect).toHaveBeenCalledWith('ext:test-widget')
+    })
+
+    it('uses empty shortcut when extension has no picker.shortcut', () => {
+      renderPicker({ extensions: [secondExtension] })
+      const button = screen.getByRole('button', { name: 'Another Extension' })
+      // The shortcut hint element should be present but empty
+      const hint = button.querySelector('.shortcut-hint')
+      expect(hint).toBeInTheDocument()
+      expect(hint!.textContent).toBe('')
+    })
+
+    it('renders fallback icon for extensions without custom icon', () => {
+      renderPicker({ extensions: [sampleExtension] })
+      const button = screen.getByRole('button', { name: 'Test Widget' })
+      expect(button.querySelector('[data-testid="layout-grid-icon"]')).toBeInTheDocument()
+    })
+
+    it('places extension options after built-in options', () => {
+      renderPicker({ extensions: [sampleExtension] })
+      const buttons = screen.getAllByRole('button')
+      const labels = buttons.map(b => b.getAttribute('aria-label'))
+      // Built-in options come first: Editor, Browser, Shell
+      // Extension options come after
+      const editorIdx = labels.indexOf('Editor')
+      const shellIdx = labels.indexOf('Shell')
+      const extIdx = labels.indexOf('Test Widget')
+      expect(extIdx).toBeGreaterThan(editorIdx)
+      expect(extIdx).toBeGreaterThan(shellIdx)
+    })
+  })
+})

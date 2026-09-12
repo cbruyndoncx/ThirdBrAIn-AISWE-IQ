@@ -1,0 +1,928 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { WsClient, getWsClient, resetWsClientForTests } from '../../../../src/lib/ws-client'
+import { WS_PROTOCOL_VERSION } from '../../../../shared/ws-protocol'
+import { resetTerminalCreateStaggerForTests } from '@/lib/terminal-create-stagger'
+
+class MockWebSocket {
+  static OPEN = 1
+  static instances: MockWebSocket[] = []
+
+  readyState = MockWebSocket.OPEN
+  onopen: null | (() => void) = null
+  onmessage: null | ((ev: { data: string }) => void) = null
+  onclose: null | ((ev: { code: number; reason: string }) => void) = null
+  onerror: null | (() => void) = null
+  sent: string[] = []
+
+  constructor(_url: string) {
+    MockWebSocket.instances.push(this)
+  }
+
+  send(data: any) {
+    this.sent.push(String(data))
+  }
+
+  close() {
+    this.onclose?.({ code: 1000, reason: '' })
+  }
+
+  _open() {
+    this.onopen?.()
+  }
+
+  _message(obj: any) {
+    this.onmessage?.({ data: JSON.stringify(obj) })
+  }
+
+  _close(code: number, reason = '') {
+    this.onclose?.({ code, reason })
+  }
+}
+
+describe('WsClient.connect', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    MockWebSocket.instances = []
+    // @ts-expect-error - test override
+    globalThis.WebSocket = MockWebSocket
+    localStorage.setItem('freshell.auth-token', 't')
+
+    // Some Vitest environments provide a minimal window without timer fns.
+    ;(window as any).setTimeout = globalThis.setTimeout
+    ;(window as any).clearTimeout = globalThis.clearTimeout
+  })
+
+  afterEach(() => {
+    resetWsClientForTests()
+    vi.clearAllTimers()
+    vi.useRealTimers()
+  })
+
+  it('returns the same in-flight promise and resolves only after ready', async () => {
+    const c = new WsClient('ws://example/ws')
+
+    const p1 = c.connect()
+    const p2 = c.connect()
+    expect(p2).toBe(p1)
+
+    let resolved = false
+    void p1.then(() => { resolved = true })
+
+    // Not resolved until ready arrives.
+    await Promise.resolve()
+    expect(resolved).toBe(false)
+
+    expect(MockWebSocket.instances).toHaveLength(1)
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+
+    await p1
+    expect(resolved).toBe(true)
+  })
+
+  it('sends protocol version in hello and only advertises parse-supported capabilities', async () => {
+    const c = new WsClient('ws://example/ws')
+    const p = c.connect()
+    expect(MockWebSocket.instances).toHaveLength(1)
+    MockWebSocket.instances[0]._open()
+
+    const hello = JSON.parse(MockWebSocket.instances[0].sent[0])
+    expect(hello.type).toBe('hello')
+    expect(hello.protocolVersion).toBe(WS_PROTOCOL_VERSION)
+    expect(hello.capabilities).toEqual({
+      uiScreenshotV1: true,
+      terminalOutputBatchV1: true,
+      terminalInterestV1: true,
+      paneReconcileV1: true,
+      paneReconcileFreshAgentV1: true,
+    })
+
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p
+  })
+
+  it('observes the hello handshake as an outbound wire send', async () => {
+    const c = new WsClient('ws://example/ws')
+    const observer = vi.fn()
+    c.setOutboundMessageObserver(observer)
+
+    const p = c.connect()
+    expect(MockWebSocket.instances).toHaveLength(1)
+    MockWebSocket.instances[0]._open()
+
+    expect(observer).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'hello',
+      token: 't',
+      protocolVersion: WS_PROTOCOL_VERSION,
+    }))
+
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p
+  })
+
+  it('hello payload does not advertise split flags', async () => {
+    const c = new WsClient('ws://example/ws')
+    const p = c.connect()
+    expect(MockWebSocket.instances).toHaveLength(1)
+    MockWebSocket.instances[0]._open()
+
+    const hello = JSON.parse(MockWebSocket.instances[0].sent[0])
+    expect(hello.type).toBe('hello')
+    expect(hello.capabilities?.createAttachSplitV1).toBeUndefined()
+    expect(hello.capabilities?.attachViewportV1).toBeUndefined()
+
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p
+  })
+
+  it('connect-time queued create flushes after ready without rewriting the payload', async () => {
+    const c = new WsClient('ws://example/ws')
+    c.send({ type: 'terminal.create', requestId: 'queued-1', mode: 'shell' } as any)
+    const p = c.connect()
+    expect(MockWebSocket.instances).toHaveLength(1)
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p
+    vi.advanceTimersByTime(0)
+    const flushed = MockWebSocket.instances[0].sent.map((x) => JSON.parse(x))
+    expect(flushed).toContainEqual(expect.objectContaining({
+      type: 'terminal.create',
+      requestId: 'queued-1',
+      mode: 'shell',
+    }))
+  })
+
+  it('connect failure then ready flush sends queued create exactly once', async () => {
+    const c = new WsClient('ws://example/ws')
+    c.send({ type: 'terminal.create', requestId: 'queued-fail-then-ready', mode: 'shell' } as any)
+
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._close(1006, 'before-ready')
+    await expect(p1).rejects.toThrow()
+
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+    MockWebSocket.instances[1]._message({ type: 'ready' })
+    await p2
+    vi.advanceTimersByTime(0)
+
+    const sent = MockWebSocket.instances[1].sent.map((x) => JSON.parse(x))
+    expect(sent.filter((m) => m.type === 'terminal.create' && m.requestId === 'queued-fail-then-ready')).toHaveLength(1)
+  })
+
+  it('resets server instance id across reconnect and refreshes it from the next ready', async () => {
+    const c = new WsClient('ws://example/ws')
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({
+      type: 'ready',
+      serverInstanceId: 'srv-1',
+    })
+    await p1
+    expect(c.serverInstanceId).toBe('srv-1')
+
+    MockWebSocket.instances[0]._close(1006, 'reconnect')
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+    MockWebSocket.instances[1]._message({
+      type: 'ready',
+      serverInstanceId: 'srv-2',
+    })
+    await p2
+    expect(c.serverInstanceId).toBe('srv-2')
+  })
+
+  it('reconnect with unknown terminalId resends in-flight create once after ready', async () => {
+    const c = new WsClient('ws://example/ws')
+    c.send({ type: 'terminal.create', requestId: 'reconnect-unknown-1', mode: 'shell' } as any)
+
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p1
+    vi.advanceTimersByTime(0)
+    MockWebSocket.instances[0]._close(1006, 'drop-after-create')
+
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+    MockWebSocket.instances[1]._message({ type: 'ready' })
+    await p2
+    vi.advanceTimersByTime(0)
+
+    const sent = MockWebSocket.instances[1].sent.map((x) => JSON.parse(x))
+    expect(sent.filter((m) => m.type === 'terminal.create' && m.requestId === 'reconnect-unknown-1')).toHaveLength(1)
+  })
+
+  it('does not resend a create after terminal.created already cleared it', async () => {
+    const c = new WsClient('ws://example/ws')
+    c.send({ type: 'terminal.create', requestId: 'created-before-reconnect', mode: 'shell' } as any)
+
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p1
+    vi.advanceTimersByTime(0)
+    MockWebSocket.instances[0]._message({
+      type: 'terminal.created',
+      requestId: 'created-before-reconnect',
+      terminalId: 'term-created-before-reconnect',
+      createdAt: Date.now(),
+    })
+    MockWebSocket.instances[0]._close(1006, 'drop-after-created')
+
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+    MockWebSocket.instances[1]._message({ type: 'ready' })
+    await p2
+
+    const resent = MockWebSocket.instances[1].sent
+      .map((x) => JSON.parse(x))
+      .filter((m) => m.type === 'terminal.create' && m.requestId === 'created-before-reconnect')
+    expect(resent).toHaveLength(0)
+  })
+
+  it('evicted queued creates are removed from reconnect resend tracking', async () => {
+    const c = new WsClient('ws://example/ws')
+    ;(c as any).maxQueueSize = 1
+
+    c.send({ type: 'terminal.create', requestId: 'evict-older-create', mode: 'shell' } as any)
+    c.send({ type: 'terminal.create', requestId: 'keep-newer-create', mode: 'shell' } as any)
+
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p1
+    vi.advanceTimersByTime(0)
+
+    const firstCreates = MockWebSocket.instances[0].sent
+      .map((x) => JSON.parse(x))
+      .filter((m) => m.type === 'terminal.create')
+      .map((m) => m.requestId)
+    expect(firstCreates).toEqual(['keep-newer-create'])
+
+    MockWebSocket.instances[0]._close(1006, 'drop-after-ready')
+
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+    MockWebSocket.instances[1]._message({ type: 'ready' })
+    await p2
+    vi.advanceTimersByTime(0)
+
+    const secondCreates = MockWebSocket.instances[1].sent
+      .map((x) => JSON.parse(x))
+      .filter((m) => m.type === 'terminal.create')
+      .map((m) => m.requestId)
+    expect(secondCreates).toEqual(['keep-newer-create'])
+  })
+
+  it('resends an in-flight create after reconnect without relying on ready capabilities', async () => {
+    const c = new WsClient('ws://example/ws')
+    c.send({
+      type: 'terminal.create',
+      requestId: 'reconnect-create-1',
+      mode: 'shell',
+    } as any)
+
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p1
+    vi.advanceTimersByTime(0)
+    MockWebSocket.instances[0]._close(1006, 'drop-after-create')
+
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+    MockWebSocket.instances[1]._message({ type: 'ready' })
+    await p2
+    vi.advanceTimersByTime(0)
+
+    const secondCreates = MockWebSocket.instances[1].sent
+      .map((x) => JSON.parse(x))
+      .filter((m) => m.type === 'terminal.create')
+      .map((m) => m.requestId)
+    expect(secondCreates).toEqual(['reconnect-create-1'])
+  })
+
+  it('resends an in-flight freshAgent.create once after reconnect until freshAgent.created arrives', async () => {
+    const c = new WsClient('ws://example/ws')
+    c.send({
+      type: 'freshAgent.create',
+      requestId: 'fresh-agent-reconnect-create-1',
+      sessionType: 'freshcodex',
+      provider: 'codex',
+      cwd: '/tmp/project',
+    } as any)
+
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p1
+    MockWebSocket.instances[0]._close(1006, 'drop-after-fresh-agent-create')
+
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+    MockWebSocket.instances[1]._message({ type: 'ready' })
+    await p2
+
+    const secondCreates = MockWebSocket.instances[1].sent
+      .map((x) => JSON.parse(x))
+      .filter((m) => m.type === 'freshAgent.create')
+      .map((m) => m.requestId)
+    expect(secondCreates).toEqual(['fresh-agent-reconnect-create-1'])
+  })
+
+  it('clears freshAgent.create reconnect tracking when freshAgent.created arrives', async () => {
+    const c = new WsClient('ws://example/ws')
+    c.send({
+      type: 'freshAgent.create',
+      requestId: 'fresh-agent-created-before-reconnect',
+      sessionType: 'freshcodex',
+      provider: 'codex',
+      cwd: '/tmp/project',
+    } as any)
+
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p1
+    MockWebSocket.instances[0]._message({
+      type: 'freshAgent.created',
+      requestId: 'fresh-agent-created-before-reconnect',
+      sessionId: 'codex-thread-created-before-reconnect',
+      sessionType: 'freshcodex',
+      provider: 'codex',
+      runtimeProvider: 'codex',
+    })
+    MockWebSocket.instances[0]._close(1006, 'drop-after-fresh-agent-created')
+
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+    MockWebSocket.instances[1]._message({ type: 'ready' })
+    await p2
+
+    const resent = MockWebSocket.instances[1].sent
+      .map((x) => JSON.parse(x))
+      .filter((m) => m.type === 'freshAgent.create' && m.requestId === 'fresh-agent-created-before-reconnect')
+    expect(resent).toHaveLength(0)
+  })
+
+  it('clears freshAgent.create reconnect tracking when freshAgent.create.failed arrives', async () => {
+    const c = new WsClient('ws://example/ws')
+    c.send({
+      type: 'freshAgent.create',
+      requestId: 'fresh-agent-create-failed-before-reconnect',
+      sessionType: 'freshcodex',
+      provider: 'codex',
+      cwd: '/tmp/project',
+    } as any)
+
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p1
+    MockWebSocket.instances[0]._message({
+      type: 'freshAgent.create.failed',
+      requestId: 'fresh-agent-create-failed-before-reconnect',
+      code: 'FRESH_AGENT_CREATE_FAILED',
+      message: 'failed before reconnect',
+      retryable: true,
+    })
+    MockWebSocket.instances[0]._close(1006, 'drop-after-fresh-agent-create-failed')
+
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+    MockWebSocket.instances[1]._message({ type: 'ready' })
+    await p2
+
+    const resent = MockWebSocket.instances[1].sent
+      .map((x) => JSON.parse(x))
+      .filter((m) => m.type === 'freshAgent.create' && m.requestId === 'fresh-agent-create-failed-before-reconnect')
+    expect(resent).toHaveLength(0)
+  })
+
+  it('does not flush or resend a cancelled freshAgent.create', async () => {
+    const c = new WsClient('ws://example/ws')
+    c.send({
+      type: 'freshAgent.create',
+      requestId: 'fresh-agent-cancelled-before-connect',
+      sessionType: 'freshcodex',
+      provider: 'codex',
+      cwd: '/tmp/project',
+    } as any)
+    c.cancelCreate('fresh-agent-cancelled-before-connect')
+
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p1
+
+    const firstSent = MockWebSocket.instances[0].sent
+      .map((x) => JSON.parse(x))
+      .filter((m) => m.type === 'freshAgent.create' && m.requestId === 'fresh-agent-cancelled-before-connect')
+    expect(firstSent).toHaveLength(0)
+
+    MockWebSocket.instances[0]._close(1006, 'drop-after-cancelled-create')
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+    MockWebSocket.instances[1]._message({ type: 'ready' })
+    await p2
+
+    const resent = MockWebSocket.instances[1].sent
+      .map((x) => JSON.parse(x))
+      .filter((m) => m.type === 'freshAgent.create' && m.requestId === 'fresh-agent-cancelled-before-connect')
+    expect(resent).toHaveLength(0)
+  })
+
+  it('drops queued terminal.attach messages on reconnect so recovery only attaches once', async () => {
+    const c = new WsClient('ws://example/ws')
+    const reconnectHandler = vi.fn(() => {
+      c.send({
+        type: 'terminal.attach',
+        terminalId: 'term-reconnect-attach',
+        cols: 120,
+        rows: 40,
+        attachRequestId: 'attach-from-reconnect-handler',
+      } as any)
+    })
+    c.onReconnect(reconnectHandler)
+
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p1
+    MockWebSocket.instances[0]._close(1006, 'drop-before-recovery-attach')
+
+    c.send({
+      type: 'terminal.attach',
+      terminalId: 'term-reconnect-attach',
+      cols: 80,
+      rows: 24,
+      attachRequestId: 'attach-queued-while-offline',
+    } as any)
+
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+    MockWebSocket.instances[1]._message({ type: 'ready' })
+    await p2
+
+    expect(reconnectHandler).toHaveBeenCalledTimes(1)
+    const attaches = MockWebSocket.instances[1].sent
+      .map((x) => JSON.parse(x))
+      .filter((m) => m.type === 'terminal.attach')
+    expect(attaches).toEqual([
+      expect.objectContaining({
+        type: 'terminal.attach',
+        terminalId: 'term-reconnect-attach',
+        attachRequestId: 'attach-from-reconnect-handler',
+      }),
+    ])
+  })
+
+  it('drops queued terminal.input on reconnect instead of replaying it against a stale terminalId', async () => {
+    const c = new WsClient('ws://example/ws')
+
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p1
+    MockWebSocket.instances[0]._close(1006, 'server restart')
+
+    // Typed while the socket was down: the old terminalId is baked in and the
+    // restarted server has never heard of it -- replaying is silent loss.
+    c.send({ type: 'terminal.input', terminalId: 'term-old', data: 'echo lost\r' })
+
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+    MockWebSocket.instances[1]._message({ type: 'ready' })
+    await p2
+
+    const inputs = MockWebSocket.instances[1].sent
+      .map((x) => JSON.parse(x))
+      .filter((m) => m.type === 'terminal.input')
+    expect(inputs).toEqual([])
+  })
+
+  it('filters invalid sidebarOpenSessions before sending hello', async () => {
+    const c = new WsClient('ws://example/ws')
+    c.setHelloExtensionProvider(() => ({
+      sidebarOpenSessions: [
+        { provider: 'foo', sessionId: '' } as any,
+        { provider: 'codex', sessionId: 'older-open', serverInstanceId: '' } as any,
+      ],
+    }))
+
+    const p = c.connect()
+    expect(MockWebSocket.instances).toHaveLength(1)
+    MockWebSocket.instances[0]._open()
+
+    const hello = JSON.parse(MockWebSocket.instances[0].sent[0])
+    expect(hello.sidebarOpenSessions).toEqual([
+      { provider: 'codex', sessionId: 'older-open' },
+    ])
+
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p
+  })
+
+  it('treats HELLO_TIMEOUT as transient and schedules reconnect', async () => {
+    const setTimeoutSpy = vi.spyOn(window, 'setTimeout')
+
+    const c = new WsClient('ws://example/ws')
+    const p = c.connect()
+    expect(MockWebSocket.instances).toHaveLength(1)
+
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._close(4002, 'Hello timeout')
+
+    await expect(p).rejects.toThrow(/Handshake timeout/i)
+
+    // Should schedule a reconnect attempt around baseReconnectDelay (1000ms ± jitter)
+    const reconnectDelays = setTimeoutSpy.mock.calls
+      .map((call) => call[1])
+      .filter((d): d is number => typeof d === 'number' && d >= 800 && d <= 1400)
+    expect(reconnectDelays.length).toBeGreaterThan(0)
+  })
+
+  it('treats BACKPRESSURE as transient and schedules reconnect with a minimum delay', async () => {
+    const setTimeoutSpy = vi.spyOn(window, 'setTimeout')
+
+    const c = new WsClient('ws://example/ws')
+    const p = c.connect()
+    expect(MockWebSocket.instances).toHaveLength(1)
+
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._close(4008, 'Backpressure')
+
+    await expect(p).rejects.toThrow(/backpressure/i)
+
+    const delays = setTimeoutSpy.mock.calls.map((call) => call[1]).filter((d): d is number => typeof d === 'number')
+    expect(Math.max(...delays)).toBeGreaterThanOrEqual(5000)
+  })
+
+  it('uses standard reconnect timing for ordinary disconnects (no backpressure penalty loop)', async () => {
+    const setTimeoutSpy = vi.spyOn(window, 'setTimeout')
+
+    const c = new WsClient('ws://example/ws')
+    const p = c.connect()
+    expect(MockWebSocket.instances).toHaveLength(1)
+
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._close(1006, 'Abnormal closure')
+
+    await expect(p).rejects.toThrow(/closed before ready/i)
+
+    const reconnectDelays = setTimeoutSpy.mock.calls
+      .map((call) => call[1])
+      .filter((d): d is number => typeof d === 'number' && d < 10000)
+
+    // First reconnect delay should be around 1000ms (with jitter ±20%)
+    expect(reconnectDelays.length).toBeGreaterThan(0)
+    expect(reconnectDelays[0]).toBeGreaterThanOrEqual(800)
+    expect(reconnectDelays[0]).toBeLessThanOrEqual(1400)
+    // All delays capped at max (4000ms + jitter ceiling)
+    expect(reconnectDelays.every((delay) => delay <= 4800)).toBe(true)
+  })
+
+  it('treats SERVER_SHUTDOWN (4009) as transient and uses fast reconnect', async () => {
+    const setTimeoutSpy = vi.spyOn(window, 'setTimeout')
+
+    const c = new WsClient('ws://example/ws')
+    const p = c.connect()
+    expect(MockWebSocket.instances).toHaveLength(1)
+
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._close(4009, 'Server shutdown')
+
+    await expect(p).rejects.toThrow(/Server restarting/i)
+
+    // Should schedule a fast reconnect (500ms base with jitter)
+    const reconnectDelays = setTimeoutSpy.mock.calls
+      .map((call) => call[1])
+      .filter((d): d is number => typeof d === 'number' && d < 10000)
+    expect(reconnectDelays.length).toBeGreaterThan(0)
+    // Post-shutdown base is 500ms, with jitter ±20%: 400-700ms
+    expect(reconnectDelays[0]).toBeGreaterThanOrEqual(400)
+    expect(reconnectDelays[0]).toBeLessThanOrEqual(700)
+  })
+
+  it('treats protocol version mismatch as fatal and does not reconnect', async () => {
+    const setTimeoutSpy = vi.spyOn(window, 'setTimeout')
+
+    const c = new WsClient('ws://example/ws')
+    const p = c.connect()
+    expect(MockWebSocket.instances).toHaveLength(1)
+
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._close(4010, 'Protocol version mismatch')
+
+    await expect(p).rejects.toThrow(/protocol version/i)
+    await Promise.resolve()
+
+    const reconnectDelays = setTimeoutSpy.mock.calls
+      .map((call) => call[1])
+      .filter((d): d is number => typeof d === 'number' && d < 10000)
+    expect(reconnectDelays).toHaveLength(0)
+
+    vi.advanceTimersByTime(30_000)
+    expect(MockWebSocket.instances).toHaveLength(1)
+  })
+
+  it('queues input while disconnected and flushes after ready', async () => {
+    const c = new WsClient('ws://example/ws')
+
+    c.send({ type: 'terminal.input', terminalId: 'term-1', data: 'pwd\n' })
+
+    const p = c.connect()
+    expect(MockWebSocket.instances).toHaveLength(1)
+    MockWebSocket.instances[0]._open()
+
+    const sentBeforeReady = MockWebSocket.instances[0].sent.map((entry) => JSON.parse(entry))
+    expect(sentBeforeReady).toHaveLength(1)
+    expect(sentBeforeReady[0].type).toBe('hello')
+
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p
+
+    const sentAfterReady = MockWebSocket.instances[0].sent.map((entry) => JSON.parse(entry))
+    expect(sentAfterReady.some((msg: any) =>
+      msg.type === 'terminal.input' && msg.terminalId === 'term-1' && msg.data === 'pwd\n',
+    )).toBe(true)
+  })
+
+  it('disconnect clears pending reconnect timers', async () => {
+    const c = new WsClient('ws://example/ws')
+    const p = c.connect()
+    expect(MockWebSocket.instances).toHaveLength(1)
+
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._close(4002, 'Hello timeout')
+
+    await expect(p).rejects.toThrow(/Handshake timeout/i)
+    expect(MockWebSocket.instances).toHaveLength(1)
+
+    c.disconnect()
+
+    vi.advanceTimersByTime(5000)
+    expect(MockWebSocket.instances).toHaveLength(1)
+  })
+
+  it('resetWsClientForTests tears down singleton reconnect state', async () => {
+    const c = getWsClient()
+    const p = c.connect()
+    expect(MockWebSocket.instances).toHaveLength(1)
+
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._close(4002, 'Hello timeout')
+
+    await expect(p).rejects.toThrow(/Handshake timeout/i)
+    expect(MockWebSocket.instances).toHaveLength(1)
+
+    resetWsClientForTests()
+
+    vi.advanceTimersByTime(5000)
+    expect(MockWebSocket.instances).toHaveLength(1)
+    expect(getWsClient()).not.toBe(c)
+  })
+})
+
+describe('WsClient.sendTerminalInterest', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    MockWebSocket.instances = []
+    // @ts-expect-error - test override
+    globalThis.WebSocket = MockWebSocket
+    localStorage.setItem('freshell.auth-token', 't')
+    ;(window as any).setTimeout = globalThis.setTimeout
+    ;(window as any).clearTimeout = globalThis.clearTimeout
+  })
+
+  afterEach(() => {
+    resetWsClientForTests()
+    vi.clearAllTimers()
+    vi.useRealTimers()
+  })
+
+  const openReady = async (c: WsClient, negotiated: boolean) => {
+    const p = c.connect()
+    MockWebSocket.instances[MockWebSocket.instances.length - 1]._open()
+    MockWebSocket.instances[MockWebSocket.instances.length - 1]._message({
+      type: 'ready',
+      ...(negotiated ? { capabilities: { terminalInterestV1: true } } : {}),
+    })
+    await p
+  }
+  const snap = { focusedTerminalId: 'A', visibleTerminalIds: ['A', 'B'] }
+  const lastSocket = () => MockWebSocket.instances[MockWebSocket.instances.length - 1]
+
+  it('refuses before ready and sends nothing but the handshake', async () => {
+    const c = new WsClient('ws://example/ws')
+    const p = c.connect()
+    lastSocket()._open()
+    expect(c.sendTerminalInterest(snap)).toBe(false)
+    expect(lastSocket().sent.map((x) => JSON.parse(x).type)).toEqual(['hello'])
+    lastSocket()._message({ type: 'ready', capabilities: { terminalInterestV1: true } })
+    await p
+    expect(lastSocket().sent.map((x) => JSON.parse(x).type)).toEqual(['hello'])
+  })
+
+  it('refuses when the server did not negotiate the capability', async () => {
+    const c = new WsClient('ws://example/ws')
+    await openReady(c, false)
+    expect(c.sendTerminalInterest(snap)).toBe(false)
+    expect(lastSocket().sent.some((x) => JSON.parse(x).type === 'terminal.interest')).toBe(false)
+  })
+
+  it('sends monotonic socket-owned revisions immediately once negotiated', async () => {
+    const c = new WsClient('ws://example/ws')
+    await openReady(c, true)
+    expect(c.sendTerminalInterest(snap)).toBe(true)
+    expect(c.sendTerminalInterest(snap)).toBe(true)
+    const interests = lastSocket().sent
+      .map((x) => JSON.parse(x))
+      .filter((m) => m.type === 'terminal.interest')
+    expect(interests.map((m) => m.revision)).toEqual([1, 2])
+    expect(interests[0].focusedTerminalId).toBe('A')
+    expect(interests[0].visibleTerminalIds).toEqual(['A', 'B'])
+  })
+
+  it('never queues across disconnect and restarts revisions on the new socket', async () => {
+    const c = new WsClient('ws://example/ws')
+    await openReady(c, true)
+    expect(c.sendTerminalInterest(snap)).toBe(true)
+
+    lastSocket()._close(1006, 'drop')
+    expect(c.sendTerminalInterest(snap)).toBe(false)
+
+    await openReady(c, true)
+    const frames = lastSocket().sent.map((x) => JSON.parse(x))
+    expect(frames.filter((m) => m.type === 'terminal.interest')).toHaveLength(0)
+
+    expect(c.sendTerminalInterest(snap)).toBe(true)
+    const interest = lastSocket().sent
+      .map((x) => JSON.parse(x))
+      .filter((m) => m.type === 'terminal.interest')
+    expect(interest).toHaveLength(1)
+    expect(interest[0].revision).toBe(1)
+  })
+})
+
+describe('WsClient terminal.create stagger', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    MockWebSocket.instances = []
+    // @ts-expect-error - test override
+    globalThis.WebSocket = MockWebSocket
+    localStorage.setItem('freshell.auth-token', 't')
+    ;(window as any).setTimeout = globalThis.setTimeout
+    ;(window as any).clearTimeout = globalThis.clearTimeout
+    resetTerminalCreateStaggerForTests()
+  })
+
+  afterEach(() => {
+    resetWsClientForTests()
+    vi.clearAllTimers()
+    vi.useRealTimers()
+  })
+
+  const typesOf = (instance: MockWebSocket) =>
+    instance.sent.map((x) => JSON.parse(x))
+  const createsOf = (instance: MockWebSocket) =>
+    typesOf(instance).filter((m: any) => m.type === 'terminal.create')
+
+  it('paces terminal.create sends 450ms apart when multiple are ready', async () => {
+    const c = new WsClient('ws://example/ws')
+    const p = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p
+
+    c.send({ type: 'terminal.create', requestId: 'tc-1', mode: 'shell' } as any)
+    c.send({ type: 'terminal.create', requestId: 'tc-2', mode: 'shell' } as any)
+    c.send({ type: 'terminal.create', requestId: 'tc-3', mode: 'shell' } as any)
+
+    vi.advanceTimersByTime(0)
+    expect(createsOf(MockWebSocket.instances[0]).map((m) => m.requestId)).toEqual(['tc-1'])
+
+    vi.advanceTimersByTime(450)
+    expect(createsOf(MockWebSocket.instances[0]).map((m) => m.requestId)).toEqual(['tc-1', 'tc-2'])
+
+    vi.advanceTimersByTime(450)
+    expect(createsOf(MockWebSocket.instances[0]).map((m) => m.requestId)).toEqual(['tc-1', 'tc-2', 'tc-3'])
+  })
+
+  it('non-create messages bypass the stagger (sent immediately)', async () => {
+    const c = new WsClient('ws://example/ws')
+    const p = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p
+
+    c.send({ type: 'terminal.create', requestId: 'tc-1', mode: 'shell' } as any)
+    c.send({ type: 'terminal.input', terminalId: 'term-x', data: 'ls\n' } as any)
+
+    // terminal.input bypasses the stagger — sent immediately, before the
+    // terminal.create's setTimeout(0) fires.
+    const inputsBeforeAdvance = typesOf(MockWebSocket.instances[0])
+      .filter((m: any) => m.type === 'terminal.input')
+    expect(inputsBeforeAdvance).toHaveLength(1)
+
+    vi.advanceTimersByTime(0)
+    expect(createsOf(MockWebSocket.instances[0]).map((m) => m.requestId)).toEqual(['tc-1'])
+  })
+
+  it('clears the stagger on ready (no stale sends from dead socket)', async () => {
+    const c = new WsClient('ws://example/ws')
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p1
+
+    // Send 2 creates: 1st at t=0, 2nd at t=450 — lastSendAt is set to 450.
+    c.send({ type: 'terminal.create', requestId: 'tc-1', mode: 'shell' } as any)
+    c.send({ type: 'terminal.create', requestId: 'tc-2', mode: 'shell' } as any)
+    vi.advanceTimersByTime(450)
+    expect(createsOf(MockWebSocket.instances[0]).map((m) => m.requestId)).toEqual(['tc-1', 'tc-2'])
+
+    // Disconnect: onclose clears the stagger (lastSendAt → 0).
+    MockWebSocket.instances[0]._close(1006, 'drop')
+
+    // Reconnect: ready clears the stagger again (belt-and-suspenders).
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+    MockWebSocket.instances[1]._message({ type: 'ready' })
+    await p2
+
+    // The reconnect replay re-sends tc-1 then tc-2 through the fresh stagger.
+    // Because lastSendAt was reset to 0, tc-1 sends immediately (setTimeout(0)).
+    // Without the clear, lastSendAt=450 and Date.now()=450, so elapsed=0 and
+    // tc-1 would wait 450ms instead of sending immediately.
+    vi.advanceTimersByTime(0)
+    const sentAfter0 = createsOf(MockWebSocket.instances[1])
+    expect(sentAfter0).toHaveLength(1)
+    expect(sentAfter0[0].requestId).toBe('tc-1')
+
+    vi.advanceTimersByTime(450)
+    expect(createsOf(MockWebSocket.instances[1]).map((m) => m.requestId)).toEqual(['tc-1', 'tc-2'])
+  })
+
+  it('clears the stagger on disconnect — stale timer does NOT fire on replacement socket before ready', async () => {
+    const c = new WsClient('ws://example/ws')
+    const p1 = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p1
+
+    // Send 2 creates: 1st sends via setTimeout(0), 2nd arms a 450ms timer.
+    c.send({ type: 'terminal.create', requestId: 'tc-1', mode: 'shell' } as any)
+    c.send({ type: 'terminal.create', requestId: 'tc-2', mode: 'shell' } as any)
+    vi.advanceTimersByTime(0)
+    expect(createsOf(MockWebSocket.instances[0]).map((m) => m.requestId)).toEqual(['tc-1'])
+
+    // Disconnect: onclose clears the stagger, cancelling tc-2's 450ms timer.
+    MockWebSocket.instances[0]._close(1006, 'drop')
+
+    // Open a replacement socket but do NOT deliver ready yet.
+    const p2 = c.connect()
+    MockWebSocket.instances[1]._open()
+
+    // Advance past the 450ms window — the stale timer from the dead socket
+    // would fire here if the onclose clear hadn't cancelled it.
+    vi.advanceTimersByTime(450)
+    expect(createsOf(MockWebSocket.instances[1])).toHaveLength(0)
+
+    // Now deliver ready — the in-flight creates replay through the fresh stagger.
+    MockWebSocket.instances[1]._message({ type: 'ready' })
+    await p2
+
+    vi.advanceTimersByTime(0)
+    expect(createsOf(MockWebSocket.instances[1]).map((m) => m.requestId)).toContain('tc-1')
+  })
+
+  it('cancelCreate retracts a queued create — stagger callback skips the send', async () => {
+    const c = new WsClient('ws://example/ws')
+    const p = c.connect()
+    MockWebSocket.instances[0]._open()
+    MockWebSocket.instances[0]._message({ type: 'ready' })
+    await p
+
+    // Send 3 creates: 1st sends via setTimeout(0), 2nd and 3rd queue behind it.
+    c.send({ type: 'terminal.create', requestId: 'tc-1', mode: 'shell' } as any)
+    c.send({ type: 'terminal.create', requestId: 'tc-2', mode: 'shell' } as any)
+    c.send({ type: 'terminal.create', requestId: 'tc-3', mode: 'shell' } as any)
+    vi.advanceTimersByTime(0)
+    expect(createsOf(MockWebSocket.instances[0]).map((m) => m.requestId)).toEqual(['tc-1'])
+
+    // Cancel tc-2 while it is queued in the stagger (before its 450ms timer fires).
+    c.cancelCreate('tc-2')
+
+    // Advance 450ms — tc-2's stagger callback fires but skips the send
+    // (inFlightCreates no longer has tc-2).
+    vi.advanceTimersByTime(450)
+    expect(createsOf(MockWebSocket.instances[0]).map((m) => m.requestId)).toEqual(['tc-1'])
+
+    // tc-3 sends after another 450ms.
+    vi.advanceTimersByTime(450)
+    expect(createsOf(MockWebSocket.instances[0]).map((m) => m.requestId)).toEqual(['tc-1', 'tc-3'])
+  })
+})

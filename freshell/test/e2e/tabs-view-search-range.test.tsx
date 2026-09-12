@@ -1,0 +1,96 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
+import { Provider } from 'react-redux'
+import { configureStore } from '@reduxjs/toolkit'
+import tabsReducer from '../../src/store/tabsSlice'
+import panesReducer from '../../src/store/panesSlice'
+import tabRegistryReducer from '../../src/store/tabRegistrySlice'
+import connectionReducer from '../../src/store/connectionSlice'
+import TabsView from '../../src/components/TabsView'
+import { BROWSER_PREFERENCES_STORAGE_KEY } from '../../src/lib/browser-preferences'
+
+const wsMock = {
+  state: 'ready',
+  sendTabsSyncQuery: vi.fn(),
+  sendTabsSyncPush: vi.fn(),
+  onMessage: vi.fn(() => () => {}),
+  onReconnect: vi.fn(() => () => {}),
+}
+
+vi.mock('@/lib/ws-client', () => ({
+  getWsClient: () => wsMock,
+}))
+
+vi.mock('@/lib/clipboard', () => ({
+  copyText: vi.fn(() => Promise.resolve(true)),
+}))
+
+describe('tabs view search range loading', () => {
+  beforeEach(() => {
+    wsMock.sendTabsSyncQuery.mockClear()
+    localStorage.removeItem(BROWSER_PREFERENCES_STORAGE_KEY)
+  })
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('updates the registered retention range without issuing an untracked direct query', () => {
+    const initialTabRegistry = tabRegistryReducer(undefined, { type: '@@INIT' })
+    const store = configureStore({
+      reducer: {
+        tabs: tabsReducer,
+        panes: panesReducer,
+        tabRegistry: tabRegistryReducer,
+        connection: connectionReducer,
+      },
+      preloadedState: {
+        tabRegistry: {
+          ...initialTabRegistry,
+          closedTabRetentionDays: 1,
+          searchRangeDays: 1,
+        },
+      },
+    })
+
+    render(
+      <Provider store={store}>
+        <TabsView />
+      </Provider>,
+    )
+
+    expect(wsMock.sendTabsSyncQuery).not.toHaveBeenCalled()
+
+    fireEvent.change(screen.getByLabelText('Closed range filter'), {
+      target: { value: '30' },
+    })
+    expect(wsMock.sendTabsSyncQuery).not.toHaveBeenCalled()
+    expect(store.getState().tabRegistry.closedTabRetentionDays).toBe(30)
+  })
+
+  it('hydrates the closed range filter from browser preferences on reload', async () => {
+    localStorage.setItem(BROWSER_PREFERENCES_STORAGE_KEY, JSON.stringify({
+      tabs: { searchRangeDays: 90 },
+    }))
+
+    vi.resetModules()
+    const { default: reloadedTabRegistryReducer } = await import('../../src/store/tabRegistrySlice')
+    const { default: ReloadedTabsView } = await import('../../src/components/TabsView')
+
+    const store = configureStore({
+      reducer: {
+        tabs: tabsReducer,
+        panes: panesReducer,
+        tabRegistry: reloadedTabRegistryReducer,
+        connection: connectionReducer,
+      },
+    })
+
+    render(
+      <Provider store={store}>
+        <ReloadedTabsView />
+      </Provider>,
+    )
+
+    expect(screen.getByLabelText('Closed range filter')).toHaveValue('30')
+  })
+})

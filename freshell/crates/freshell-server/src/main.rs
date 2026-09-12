@@ -1,0 +1,3765 @@
+//! `freshell-server` — the standalone headless server binary (the oracle SUT).
+//!
+//! Phase 3.4a: boot fast + clean on an ephemeral loopback port under the oracle
+//! harness's env contract, then serve ONE axum app that answers `/api/health`
+//! (freshell-api) and the connect handshake at `/ws` (freshell-ws). The handshake
+//! must normalize-equal the original's (oracle T0). Terminal-over-wire, the rest
+//! of REST, sessions, and the providers are later steps.
+//!
+//! ## Env contract (mirrors `test/e2e-browser/helpers/test-server.ts`)
+//! * `PORT` — the ephemeral loopback port to bind (required in practice; the
+//!   original defaults to 3001, mirrored here for a standalone run).
+//! * `AUTH_TOKEN` — the required WS/REST auth token (refuse to start if absent,
+//!   matching `auth.ts#getRequiredAuthToken`).
+//! * `FRESHELL_BIND_HOST` — `127.0.0.1` (default/forced) or `0.0.0.0`; any other
+//!   value is forced to loopback (mirrors `get-network-host.ts`).
+//! * `FRESHELL_HOME` / `HOME` — the isolated home whose `.freshell/config.json`
+//!   supplies the persisted `network` overlay for `settings.updated`.
+
+mod ai_router;
+mod ai_title;
+mod attachments;
+mod auto_title;
+mod auto_title_sweep;
+mod boot;
+mod checkpoints;
+mod diag;
+mod existence;
+mod existence_by_id;
+mod extensions;
+mod files;
+mod host_stats;
+mod identity_sink;
+mod instance_id;
+mod legacy_local_seed;
+mod logging;
+mod managed_ports;
+mod migrations;
+mod net_bind;
+mod network;
+mod project_colors;
+mod proxy;
+mod rate_limit;
+mod recovery_inventory;
+mod repo_icon;
+mod repo_icon_detect;
+mod repo_icon_git;
+mod resolve;
+mod screenshots;
+mod serve_client;
+mod session_directory;
+mod session_metadata;
+mod sessions;
+mod settings;
+mod settings_store;
+mod shutdown_forensics;
+mod subagent_cadence;
+mod tabs_snapshots;
+mod terminals;
+#[cfg(test)]
+pub(crate) mod test_clock_gate;
+mod test_clock_router;
+mod updater;
+
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::sync::Arc;
+
+use freshell_api::ApiState;
+use freshell_freshagent::FreshAgentState;
+use freshell_platform::detect::{
+    detect_platform_proc, host_os_live, is_wsl_proc, read_proc_version,
+};
+use freshell_platform::Env as _;
+use freshell_ws::WsState;
+use uuid::Uuid;
+
+use crate::boot::BootState;
+
+/// App version reported by `GET /api/version` (mirrors `package.json` `version`).
+/// Overridable via `FRESHELL_APP_VERSION` for parity when a run needs it.
+const APP_VERSION: &str = "0.7.0";
+
+/// Load `.env` from `dir` into the process environment — legacy parity for the
+/// original's `import 'dotenv/config'` (`server/index.ts:2-3`), which resolves
+/// against `process.cwd()` before anything else in the module reads `process.env`
+/// (including its own `AUTH_TOKEN` read). Node `dotenv`'s default semantics
+/// (and `dotenvy`'s, mirrored here): a process env var that is ALREADY set is
+/// never overridden by the file. A missing `.env` file is a silent no-op —
+/// `dotenvy::from_path` returns an `Io(NotFound)` error we deliberately ignore,
+/// matching `dotenv/config`'s own silent-missing-file behavior.
+fn load_dotenv_from(dir: &Path) {
+    let _ = dotenvy::from_path(dir.join(".env"));
+}
+
+/// Delta-r6-r4 (focused-episode-6 round 3, Finding 2): the close-evidence
+/// retention gate input — every pane identity the retained snapshot
+/// generations reference, scanned from the SAME `tabs-snapshots` store the
+/// recovery route reads. A scan ERROR maps to `None` = "references unknown"
+/// = the gate keeps EVERYTHING this pass (over-pruning the only closed
+/// verdict for a pane a retained snapshot still claims is never acceptable).
+fn snapshot_close_evidence_references(
+    home: &Option<PathBuf>,
+) -> Option<freshell_ws::tabs_persist::RetainedSnapshotReferences> {
+    let root = home.as_ref()?.join(".freshell").join("tabs-snapshots");
+    match freshell_ws::tabs_persist::retained_snapshot_references(&root) {
+        Ok(refs) => Some(refs),
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "pane_ledger_snapshot_reference_scan_failed: close-evidence retention keeps \
+                 everything this pass (references unknown)"
+            );
+            None
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    // Legacy parity: `import 'dotenv/config'` (`server/index.ts:2-3`) loads
+    // `.env` from cwd before the module reads ANY process env — including the
+    // AUTH_TOKEN check immediately below. A cwd we can't resolve, or a cwd with
+    // no `.env`, is a silent no-op either way.
+    if let Ok(cwd) = std::env::current_dir() {
+        load_dotenv_from(&cwd);
+    }
+
+    // AUTH_TOKEN is mandatory — refuse to start without it (matches the original).
+    let auth_token = match std::env::var("AUTH_TOKEN") {
+        Ok(token) => match validate_auth_token(&token) {
+            Ok(()) => Arc::new(token),
+            Err(reason) => {
+                eprintln!("{reason}");
+                return ExitCode::FAILURE;
+            }
+        },
+        Err(_) => {
+            eprintln!("AUTH_TOKEN is required. Refusing to start without authentication.");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let port = resolve_port();
+    let home = resolve_home();
+
+    // The app version string, resolved ONCE here (before logging init, which
+    // stamps it onto every line) and shared (Arc::clone) into BOTH
+    // `GET /api/version` (`currentVersion`) and `GET /api/health` (`version`),
+    // so the two endpoints can never disagree. Overridable via
+    // `FRESHELL_APP_VERSION`. Pure env read + constant -- no dependency on
+    // anything built later, so it is safe to resolve this early.
+    let app_version =
+        Arc::new(std::env::var("FRESHELL_APP_VERSION").unwrap_or_else(|_| APP_VERSION.to_string()));
+
+    // DIAG-01/DIAG-03: structured JSONL logging to
+    // `<home>/.freshell/logs/rust-server.jsonl`, redacted from the first
+    // byte (the live AUTH_TOKEN is the ONE secret this process itself
+    // knows verbatim) and stamped per-line with the app version + server
+    // pid (DIAG-01's app-version / process-ownership fields). A failure
+    // here (e.g. an unwritable log dir) must never prevent boot -- the
+    // pre-existing stderr "listening on" line below still gets the
+    // operator to a running server either way.
+    let logging_config = logging::resolve_config(
+        home.as_deref(),
+        auth_token.as_str().to_string(),
+        app_version.as_str().to_string(),
+    );
+    if let Err(err) = logging::init(logging_config) {
+        eprintln!("freshell-server: structured logging disabled: {err}");
+    }
+
+    // Boot-time parent chain for the shutdown-forensics comparison (V5:
+    // WSL2 orphans reparent to the Relay subreaper, not pid 1 — the
+    // discriminator is parent-changed-vs-boot, so the boot chain must be
+    // captured now).
+    shutdown_forensics::record_boot_parent_chain();
+
+    // Boot-scoped identifiers. `server_instance_id` is shared (Arc::clone) into
+    // BOTH the WS handshake (`ready.serverInstanceId`) AND `GET /api/health`
+    // (`instanceId`), so the id an Electron discovery candidate records matches
+    // the handshake it later opens.
+    //
+    // CFG-07: `server_instance_id` is now PERSISTED per home (port of
+    // `server/instance-id.ts#loadOrCreateServerInstanceId`) -- stable across
+    // restarts of the SAME home, distinct across DIFFERENT homes. This is the
+    // stable *installation* identity (tab-registry keying, session-locator
+    // priority, live-terminal ownership -- see `instance_id.rs`'s module doc).
+    // A `None` home (no `FRESHELL_HOME`/`HOME`, e.g. a headless/ephemeral run)
+    // has nowhere to persist to, so it mints a fresh ephemeral id every boot --
+    // matching legacy's `baseDir`-optional shape (`instance-id.ts`'s
+    // `resolveInstanceIdPath` falls back to `getFreshellConfigDir()`, which
+    // itself falls back to `os.homedir()`; a Rust `None` home has no such
+    // fallback, so ephemeral-per-boot is the correct terminal case here).
+    // A persistence FAILURE (e.g. an unwritable/corrupt home) also falls back
+    // to an ephemeral id + a `warn` log rather than blocking boot -- mirrors
+    // logging's own boot-tolerance (`logging::init`, above) and is a
+    // documented degradation (A.9), not silent regeneration on the happy path.
+    let server_instance_id = Arc::new(
+        home.as_deref()
+            .map(|h| instance_id::load_or_create(&h.join(".freshell")))
+            .transpose()
+            .unwrap_or_else(|err| {
+                tracing::warn!(
+                    error = %err,
+                    "CFG-07: instance-id persistence failed; using an ephemeral id for this boot"
+                );
+                None
+            })
+            .unwrap_or_else(|| format!("srv-{}", Uuid::new_v4())),
+    );
+    // `boot_id` stays per-boot, regenerated every process start -- this is the
+    // RESTART signal (A.10: never persist or rotate this). Restart detection is
+    // owned by the terminal-inventory frame's `bootId` (an empty inventory +
+    // changed `bootId` on reconnect means the server restarted), never by
+    // `server_instance_id`.
+    let boot_id = Arc::new(format!("boot-{}", Uuid::new_v4()));
+
+    // The server-start timestamp, captured once here as an ISO-8601 string
+    // (millisecond precision + `Z`, matching JS `Date.toISOString()` in
+    // `server/health-router.ts`). Surfaced as health `startedAt`.
+    let started_at =
+        Arc::new(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    // DIAG-05: the SAME boot moment, captured as a monotonic `Instant` (not the
+    // ISO-8601 string above) so `GET /api/server-info`'s `uptime` is immune to
+    // wall-clock adjustments (matches legacy's `Date.now() - startedAt` intent
+    // without legacy's wall-clock fragility).
+    let boot_instant = std::time::Instant::now();
+
+    // R2/R3/R4 root-cause fix: a single LIVE settings store, not a boot-time
+    // snapshot. `allCliNames` (`server/index.ts:267-269`) is discovered here via
+    // the SAME cwd/home-relative dirs the original scans (`userExtDir`,
+    // `localExtDir`, `builtinExtDir` — `server/index.ts:225-227`; NO compiled-in
+    // fallback, see `resolve_builtin_extensions_dir`). `SettingsStore::load`
+    // runs the original's startup knownProviders migration against it
+    // (`server/index.ts:271-299`): seed-when-missing, append-new + auto-enable
+    // otherwise — pinned live 2026-07-12 (cwd-neutral fresh boot ⇒ `[]`;
+    // cwd=repo fresh boot ⇒ 5 names; persisted `[]` + cwd=repo reboot ⇒
+    // knownProviders grows AND enabledProviders auto-enables the new names).
+    // The same discovered set is the PATCH validation allowlist
+    // (`validCliProviders: allCliNames`, `server/index.ts:585`).
+    let known_providers: Vec<String> =
+        extensions::ExtensionRegistry::scan(&extensions::resolve_extension_dirs(home.as_deref()))
+            .discovered_cli_names();
+    let settings_store = settings_store::SettingsStore::load(home.as_deref(), known_providers);
+    let settings = Arc::new(settings_store.get().await);
+    // NET-02/06 restart truthfulness: the BOOT bind honors the persisted
+    // `settings.network` (a disable that persisted loopback must survive a
+    // restart), so the bind host is resolved only now, AFTER the settings
+    // store loads. `FRESHELL_BIND_HOST` still outranks it (platform-side).
+    let bind_host = resolve_bind_host(&settings_store.get().await.network);
+    // GAP1 (CFG-03 checklist follow-up): the boot-time `config.fallback`
+    // notice, if the primary config needed to fall back at boot. `None` for
+    // a healthy config or an ordinary fresh install. Threaded into
+    // `WsState` below so every `/ws` connection's handshake includes it
+    // (`freshell_ws::build_handshake`), mirroring the original's
+    // per-connection `configFallback` (`server/index.ts:372-380`).
+    let config_fallback = settings_store.config_fallback();
+
+    // Task 2 (AI key cell): process-local mirror of Node's `AI_CONFIG`
+    // (`server/ai-prompts.ts:13-23`). Boot semantics = `server/index.ts:251`:
+    // env `GOOGLE_GENERATIVE_AI_API_KEY` wins over `settings.ai.geminiApiKey`
+    // (non-forcing); every successful settings save re-applies the settings
+    // key with force via `SettingsRouterState.ai_key` (blank never clears).
+    let ai_key = ai_title::AiKeyCell::init(
+        freshell_platform::RealEnv
+            .get("GOOGLE_GENERATIVE_AI_API_KEY")
+            .filter(|v| !v.is_empty()),
+        settings.ai.gemini_api_key.clone(),
+    );
+    // `FRESHELL_GEMINI_BASE_URL` is a Rust-only test seam for the e2e
+    // fake-Gemini server (Task 21) — Node has NO env base-URL override (its
+    // default is hardcoded), a deliberate documented superset (validator-A1).
+    let gemini_base_url = freshell_platform::RealEnv
+        .get("FRESHELL_GEMINI_BASE_URL")
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| ai_title::GEMINI_DEFAULT_BASE_URL.to_string());
+    let gemini: std::sync::Arc<dyn ai_title::GeminiTransport> = std::sync::Arc::new(
+        ai_title::GeminiHttp::new(reqwest::Client::new(), ai_key.clone(), gemini_base_url),
+    );
+
+    // The shared server→client broadcast bus (pre-serialized frames). REST handlers
+    // (fresh-agent create/send) push here; every `/ws` connection fans it out to its
+    // socket — the original `WsHandler.broadcast`. Capacity is generous so a paced
+    // fresh-agent turn's handful of broadcasts never laps a briefly-busy consumer.
+    let broadcast_tx = Arc::new(tokio::sync::broadcast::channel::<String>(1024).0);
+
+    // The shared UI-screenshot broker over that same bus: `POST /api/screenshots`
+    // registers a request + broadcasts `screenshot.capture`; the `/ws` loop routes
+    // the capable client's `ui.screenshot.result` back. Shared by value into WsState
+    // (capability tracking + result routing) and the screenshots REST state.
+    let screenshots = freshell_ws::screenshot::ScreenshotBroker::new(Arc::clone(&broadcast_tx));
+
+    // Per-connection `includeSubagents` interest registry (amplifier watch
+    // reduction): `sessions.prefs` frames flip the sending connection's entry;
+    // teardown clears it. Task 9's demand-driven amplifier subagent rescan
+    // cadence reads the SAME instance.
+    let subagent_interest = freshell_ws::subagent_interest::SubagentInterestRegistry::default();
+
+    // The freshcodex WS fresh-agent slice: shares the auth token + the broadcast bus so its
+    // freshAgent.created/send.accepted/event frames reach every WS client (incl. the oracle's
+    // capture socket). Seeded with the settings tree so `PATCH /api/settings` returns/merges it.
+    let mut fresh_codex_state = freshell_freshagent::FreshCodexState::new(
+        Arc::clone(&auth_token),
+        Arc::clone(&broadcast_tx),
+        serde_json::to_value(settings.as_ref()).unwrap_or_else(|_| serde_json::json!({})),
+    );
+
+    // The freshclaude WS fresh-agent slice: shares the broadcast bus so its
+    // freshAgent.created/send.accepted/event frames reach every WS client (incl. the
+    // oracle's capture socket). It drives the ONE sanctioned Node claude sidecar; the
+    // create gate is the SHARED settings.freshAgent.enabled flag (owned by fresh_codex).
+    let mut fresh_claude_state =
+        freshell_freshagent::FreshClaudeState::new(Arc::clone(&broadcast_tx));
+
+    // Task 12 (D8 for fresh agents): the ONE server-wide per-sessionRef create/resume
+    // lease map, shared by every fresh-agent runtime (keys are provider-namespaced).
+    let fresh_agent_leases =
+        Arc::new(freshell_freshagent::session_lease::FreshAgentSessionLeases::new());
+    fresh_codex_state.set_session_leases(Arc::clone(&fresh_agent_leases));
+    fresh_claude_state.set_session_leases(Arc::clone(&fresh_agent_leases));
+
+    // SESSION-09 fix-forward: mint the shared `sessions.changed` revision
+    // counter BEFORE `fresh_agent_state` so it can be wired into both
+    // producers -- see `FreshAgentState::with_shared_sessions_revision`'s doc
+    // comment for the full rationale (previously `freshell-freshagent` kept
+    // its OWN independent counter, which could mask a real change from one
+    // producer behind a lower-or-equal revision from the other).
+    let sessions_revision = Arc::new(std::sync::atomic::AtomicI64::new(0));
+    // The fresh-agent REST surface (opencode slice): shares the auth token + the
+    // broadcast bus so its create/send broadcasts reach every WS client. Constructed
+    // here (before `ws_state`) so the WS freshopencode slice below can wrap the SAME
+    // instance -- one `opencode serve` sidecar shared by both surfaces (Batch D PR-2).
+    // `with_shared_sessions_revision` unifies its `sessions.changed` emission onto the
+    // SAME sequence as `ws_state.sessions_revision` below (SESSION-09 fix-forward).
+    // AUTO-01 spine (Task 13): ONE shared server-side layout store. The WS
+    // `ui.layout.sync` ingestion (`ws_state.layout`, below) REPLACES its
+    // snapshot; the REST automation surface (Tasks 14-16) reads/mutates the
+    // SAME instance via `fresh_agent_state.layout`. Constructed BEFORE
+    // `fresh_agent_state` and wired at `new()`-time so the
+    // `fresh_opencode_state` clone (taken immediately below) shares it too.
+    let layout_store = freshell_freshagent::layout_store::LayoutStore::default();
+    let fresh_agent_state =
+        FreshAgentState::new(Arc::clone(&auth_token), Arc::clone(&broadcast_tx))
+            .with_shared_sessions_revision(Arc::clone(&sessions_revision))
+            .with_layout(layout_store.clone());
+    // The freshopencode WS fresh-agent slice: the post-handshake loop dispatches
+    // `freshAgent.create`/`send`/`kill`/`interrupt` (opencode) here.
+    let mut fresh_opencode_state =
+        freshell_freshagent::FreshOpencodeState::new(fresh_agent_state.clone());
+    fresh_opencode_state.set_session_leases(Arc::clone(&fresh_agent_leases));
+
+    // The shared, connection-independent terminal registry: terminals are owned by
+    // `terminalId` here (not by the socket that created them), so a second/reconnected
+    // socket re-attaches to a running PTY and replays its scrollback. This is what
+    // makes the multi-client / reconnection / hot-across-reload flows work.
+    // Cloned (cheap Arc) into the files REST surface too, whose `candidate-dirs`
+    // sources the running terminals' cwds for the DirectoryPicker.
+    let registry = freshell_terminal::TerminalRegistry::new();
+    // HOST-PRESSURE PANE (Task 9, docs/plans/2026-08-25-host-pressure-pane.md):
+    // the Rust host-stats collector — freshell-platform readers over
+    // freshell-ws's trait bridge. Constructed here (not at the ~1311
+    // subagent-cadence spawn the plan cites, which sits inside the
+    // session-index block BELOW `ws_state`): the concrete instance must be
+    // Arc'd and injected INTO `WsState::host_stats` when that literal builds.
+    // NO cadence spawns here — `terminal.rs`'s `hoststats.subscribe`
+    // 0->1 edge calls the collector's `set_active(true)`, which owns
+    // spawn/abort internally (zero-cost idle). The interest registry clone
+    // shared into WsState is the SAME instance the collector's cadence
+    // delivers snapshots through (subscribed connections only — never
+    // `broadcast_tx`). `boot_anchor` backs `freshell.uptimeSec`.
+    let host_stats_interest =
+        freshell_ws::host_stats_interest::HostStatsInterestRegistry::default();
+    let host_stats_collector: std::sync::Arc<
+        dyn freshell_ws::host_stats_collector::HostStatsCollector,
+    > = std::sync::Arc::new(host_stats::HostStatsCollectorService::new(
+        host_stats::HostStatsCollectorConfig::from_env(),
+        registry.clone(),
+        host_stats_interest.clone(),
+        std::time::Instant::now(),
+    ));
+    // Slice 1 (docs/plans/2026-07-18-agent-api-mcp-parity-spec.md \u00a79 Risk 1): the
+    // Agent-API's terminal-mode `POST /api/tabs` shares THIS SAME registry --
+    // never a second one -- so an Agent-API-created shell terminal is a first-class
+    // citizen of the one PTY registry the WS `terminal.create`/attach/kill paths use.
+    // Fix Spec: Session Naming Cluster -- the shared terminal-identity registry
+    // (`freshell_ws::identity`, the port-side closure of
+    // `TerminalMetadataService`'s provider/sessionId association slice). Written
+    // by the WS terminal create/kill/exit paths (`ws_state`, below); read by the
+    // REST rename cascades (`terminals_state`/`sessions::SessionsState`) and the
+    // session-directory live-terminal join (`session_directory_state`).
+    // Constructed BEFORE the fresh-agent builder chain so the REST D7
+    // live-session guard can consume it through the `SessionIdentityLookup`
+    // seam (cheap-clone handle; `WsState` keeps using this same binding).
+    let terminal_identity = freshell_ws::identity::TerminalIdentityRegistry::new();
+    // P1.8: the pane-identity ledger (spec §4.2). Root resolved ONCE here;
+    // the module itself never reads env vars. No home => disabled no-op,
+    // same policy as tabs-snapshots. `new_locked` = the single-writer
+    // guard (V2.md): exclusive flock on <root>/lock, ConfigLock pattern —
+    // a second server on the same home comes up with a DISABLED ledger and
+    // a loud ERROR instead of two writers corrupting one store. Hoisted
+    // above the fresh-agent builder chain (kata hbsa Task 5, ledger A8):
+    // it depends only on `home`, and the REST spawn pipeline's
+    // `PaneIdentityBinder` below must share THIS instance with `ws_state`.
+    let pane_ledger = std::sync::Arc::new(freshell_ws::pane_ledger::PaneLedger::new_locked(
+        home.as_ref()
+            .map(|h| h.join(".freshell").join("pane-ledger")),
+    ));
+    // Codex sidecar record store (katas ynfn/da92, Task 10 wiring): the
+    // flock'd single-writer store of the `codex app-server` sidecars that
+    // terminal panes spawn, so a restarted server can reattach to (or
+    // conservatively reap) survivors. Same root policy as the pane ledger
+    // above (no home => disabled no-op store); the `rust-` prefix keeps it
+    // disjoint from Node's `~/.freshell/codex-sidecars/` store. The global
+    // handle is the Task 3 seam every tracked spawn records through.
+    let codex_sidecar_store = std::sync::Arc::new(
+        freshell_codex::sidecar_store::CodexSidecarStore::new_locked(
+            home.as_ref()
+                .map(|h| h.join(".freshell").join("rust-codex-sidecars")),
+        ),
+    );
+    freshell_codex::sidecar_store::set_codex_sidecar_store(codex_sidecar_store.clone());
+    // OpenCode terminal-pane restore fix
+    // (`docs/plans/2026-07-18-opencode-terminal-restore-spec.md`): the
+    // opencode locator, resolved against the SAME `default_opencode_data_home()`
+    // root the `OpencodeSource` (History sidebar) uses below, so an opencode
+    // terminal's cwd is compared against the SAME `opencode.db` the CLI
+    // itself writes into. Unconditionally `Some` (unlike the deleted
+    // amplifier locator, which depended on `session_directory::provider_home()`;
+    // see kata qmpk — amplifier identity is now launcher-assigned at create
+    // time): opencode's data home resolves independent of the isolated
+    // `FRESHELL_HOME` config root. Created ABOVE the fresh-agent builder
+    // chain (dependency-free: its only input is the zero-arg
+    // `default_opencode_data_home()`) so the REST `PaneIdentityBinder` below
+    // can wrap its `classify_resume_target` as the injected classifier.
+    let opencode_locator = Some(Arc::new(
+        freshell_sessions::opencode_locator::OpencodeLocator::new(
+            freshell_sessions::parse::default_opencode_data_home(),
+        ),
+    ));
+    let fresh_agent_state = fresh_agent_state
+        .with_terminal_registry(registry.clone())
+        .with_session_identity(std::sync::Arc::new(terminal_identity.clone()))
+        // Write-side twin (kata hbsa Task 5): REST creates write identity
+        // rows and durable ledger bindings through the SAME
+        // `TerminalIdentityRegistry` + `PaneLedger` instances `ws_state`
+        // uses below — REST-written rows must be visible to the WS
+        // guard/drain and vice versa.
+        .with_pane_identity_binder(std::sync::Arc::new(
+            freshell_ws::pane_identity_binder::LedgerPaneIdentityBinder::new(
+                terminal_identity.clone(),
+                std::sync::Arc::clone(&pane_ledger),
+                // Bug-1 (sidebar rail): the REST lane's resume-target
+                // classifier — the same locator instance `ws_state` gets
+                // below; `None` when the locator is disabled (REST-lane
+                // classification simply stays off).
+                opencode_locator.as_ref().map(|locator| {
+                    let locator = Arc::clone(locator);
+                    Arc::new(move |sid: &str| locator.classify_resume_target(sid))
+                        as std::sync::Arc<dyn Fn(&str) -> Option<bool> + Send + Sync>
+                }),
+            ),
+        ));
+    // TERM-11 fix: honor `settings.safety.autoKillIdleMinutes` at boot (the
+    // Rust registry previously never read it at all, so a config that raised
+    // or lowered it from the default had no effect). See
+    // `freshell_ws::spawn_idle_monitor` for the periodic sweep this feeds.
+    registry.set_auto_kill_idle_minutes(settings.safety.auto_kill_idle_minutes);
+    // HARNESS-14: under the env-gated test clock the sweep cadence shrinks
+    // to 250ms so tests observe an advanced clock promptly (the sweep still
+    // ticks on real time; only the threshold math follows the virtual one).
+    // Production (gate off) keeps the legacy 30s cadence exactly.
+    let idle_sweep_interval = if freshell_platform::clock::enabled() {
+        std::time::Duration::from_millis(250)
+    } else {
+        std::time::Duration::from_secs(30)
+    };
+    freshell_ws::spawn_idle_monitor(registry.clone(), idle_sweep_interval);
+    // e2e knob (kata znhn item 2): sub-second flap cycles would trip the
+    // registry generation cap (3 per 30s liveness window) before the hub's
+    // circuit breaker can ever fire. Production default unchanged.
+    if let Some(ms) = std::env::var("FRESHELL_RESPAWN_LIVENESS_WINDOW_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|v| *v > 0)
+    {
+        registry.set_respawn_liveness_window_ms(ms);
+        tracing::info!(ms, "respawn_liveness_window_override");
+    }
+    // TERM-13 fix: honor `settings.terminal.scrollback` at boot (the Rust
+    // registry previously used a fixed 8MiB replay-log cap for every
+    // terminal, ignoring the configured value entirely).
+    registry.set_scrollback_max_bytes(freshell_terminal::compute_scrollback_max_bytes(
+        settings.terminal.scrollback,
+    ));
+    // Fix Spec: Session Naming Cluster -- the shared terminal-identity registry
+    // (`freshell_ws::identity`, constructed ABOVE the fresh-agent builder chain
+    // since #540 so the REST D7 live-session guard can consume it). Written by
+    // the WS terminal create/kill/exit paths (`ws_state`, below); read by the
+    // REST rename cascades (`terminals_state`/`sessions::SessionsState`) and the
+    // session-directory live-terminal join (`session_directory_state`).
+    //
+    // Task 13b (cross-kind liveness): the terminal-liveness probe the fresh-agent
+    // runtimes consult before any create/attach resume -- the SAME join the terminal
+    // D7 create-rung guard performs (identity owner + Running registry row). Built
+    // here as a closure so `freshell-freshagent` never imports `freshell-ws`.
+    let terminal_liveness: freshell_freshagent::TerminalLivenessProbe = {
+        let identity = terminal_identity.clone();
+        let registry = registry.clone();
+        std::sync::Arc::new(move |provider: &str, session_id: &str| {
+            let identity_owner_live =
+                identity
+                    .find_by_session(provider, session_id)
+                    .is_some_and(|owner| {
+                        registry.probe(&owner.terminal_id).is_some_and(|r| {
+                            r.status == freshell_protocol::TerminalRunStatus::Running
+                        })
+                    });
+            identity_owner_live
+                || registry.directory().into_iter().any(|entry| {
+                    entry.mode == provider
+                        && entry.resume_session_id.as_deref() == Some(session_id)
+                        && entry.status == freshell_protocol::TerminalRunStatus::Running
+                })
+        })
+    };
+    fresh_claude_state.set_terminal_liveness(std::sync::Arc::clone(&terminal_liveness));
+    fresh_codex_state.set_terminal_liveness(std::sync::Arc::clone(&terminal_liveness));
+    fresh_opencode_state.set_terminal_liveness(terminal_liveness);
+    let fresh_claude_state = fresh_claude_state;
+    let fresh_codex_state = fresh_codex_state;
+    let fresh_opencode_state = fresh_opencode_state;
+    // Task 18 (DEV-0008 closure): the shared terminal-metadata registry (the
+    // port of `server/terminal-metadata-service.ts`, `freshell_ws::terminal_meta`).
+    // Written by the WS create/kill/exit paths and the association drains
+    // (`ws_state`, below); ALSO written by the auto-title sweep's per-session
+    // meta refresh (`AutoTitleSweepState.terminal_meta`, below); read by every
+    // connection's handshake (`terminal.inventory.terminalMeta`).
+    let terminal_meta = freshell_ws::terminal_meta::TerminalMetaRegistry::default();
+    // The shared tabs registry — cloned into both the WS handler
+    // (`tabs.sync.*`) and the boot REST surface (`/api/tabs-sync/client-retire`),
+    // so the unload beacon and the socket path retire against ONE cross-device view.
+    //
+    // Task 11 (CFG-08/AUTO-15): the registry is now backed by the DURABLE
+    // Node-parity store under `<home>/.freshell/tabs-registry` (manifest +
+    // content-addressed objects, `server/tabs-registry/store.ts`). Opening is
+    // blocking, which is fine at boot (Node blocks too); a corrupt store
+    // REFUSES boot with the error message (Node parity: `open()` throws out
+    // of server startup rather than silently discarding user data). No home →
+    // memory-only registry exactly as before.
+    //
+    // The registry additionally persists rolling snapshot generations under
+    // `<home>/.freshell/tabs-snapshots/<deviceId>/` (last 5 per device) so a
+    // device's tabs can be rebuilt after client-state loss (continuity trio,
+    // docs/plans/2026-07-22-continuity-safety-trio.md).
+    let tabs = match &home {
+        Some(home) => {
+            let store_root = home.join(".freshell").join("tabs-registry");
+            let boot_now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let store = match freshell_ws::tabs_store::DurableTabsStore::open(
+                &store_root,
+                freshell_ws::tabs_store_model::default_caps(),
+                boot_now,
+            ) {
+                Ok(store) => store,
+                Err(err) => {
+                    eprintln!(
+                        "Failed to open tabs registry store at {}: {err}",
+                        store_root.display()
+                    );
+                    std::process::exit(1);
+                }
+            };
+            freshell_ws::tabs::TabsRegistry::with_durable_store(
+                store,
+                Some(home.join(".freshell").join("tabs-snapshots")),
+            )
+        }
+        None => freshell_ws::tabs::TabsRegistry::new(),
+    };
+
+    // Follow-up 3.19: discover the CLI extensions (bundled `extensions/` + user/local
+    // dirs) once. Feeds THREE consumers: the WS terminal spawner's coding-CLI command
+    // resolution (`cli_commands`, below), `availableClis` (platform payload), and the
+    // client registry (`GET /api/extensions`).
+    let extension_registry =
+        extensions::ExtensionRegistry::scan(&extensions::resolve_extension_dirs(home.as_deref()));
+    // The coding-CLI command specs the WS terminal handler resolves `terminal.create
+    // { mode: <cli> }` against (claude/codex/opencode → the real CLI launch). Full
+    // manifest compilation per `server/index.ts:231-255` (arg templates + env),
+    // spec `port/machine/specs/cli-argv-fidelity.md` §3.1.
+    let cli_commands = Arc::new(extension_registry.cli_command_specs());
+
+    // Graceful-shutdown notify: on SIGTERM/SIGINT every live WS connection closes
+    // with `4009 "Server shutting down"` (ws-handler.ts:3843 parity).
+    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    // ONE handler-scoped `terminals.changed` revision counter, shared by the WS
+    // terminal lifecycle paths (create/kill, ws-handler.ts:2553/2570/2988) and the
+    // REST `/api/terminals` PATCH/DELETE broadcasts — the original keeps a single
+    // `terminalsRevision` on the WsHandler that both surfaces stamp.
+    let terminals_revision = Arc::new(std::sync::atomic::AtomicI64::new(0));
+    // SESSION-09: the SAME handler-scoped `sessions.changed` revision counter
+    // minted above (and already wired into `fresh_agent_state` via
+    // `with_shared_sessions_revision`), stamped ALSO by the periodic
+    // session-directory sweep task (spawned below, once `session_index`
+    // exists) -- see `freshell_ws::WsState::sessions_revision`'s doc comment
+    // for the full parity rationale. Both producers now share this ONE
+    // sequence (fix-forward: they previously used two independent counters).
+    // Lane B2 (campaign §2.3.2): server-side codex identity locator. Same
+    // sessions root the resume-time rollout locator below walks. `None`
+    // when HOME/CODEX_HOME are unresolvable — every codex_association
+    // entry point no-ops in that case.
+    let codex_locator = freshell_ws::codex_sessions_root()
+        .map(|root| std::sync::Arc::new(freshell_sessions::codex_locator::CodexLocator::new(root)));
+    // Slice 3a (docs/plans/2026-07-18-agent-api-mcp-parity-spec.md): wire the
+    // SAME locators + coding-CLI command specs `ws_state` (below) gets into
+    // `fresh_agent_state` too, so `POST /api/tabs` terminal-mode creates (a)
+    // accept every mode the WS `terminal.create` path does and (b) arm a
+    // fresh opencode/codex pane in the IDENTICAL locator instance the
+    // periodic sweep (spawned below, against `ws_state`) already polls --
+    // one shared instance, no second sweep loop.
+    let fresh_agent_state = fresh_agent_state
+        .with_cli_commands(Arc::clone(&cli_commands))
+        .with_opencode_locator(opencode_locator.clone())
+        .with_codex_locator(codex_locator.clone())
+        // Fix round 1 (Task 23 gap): REST-pipeline creates (`POST /api/tabs`,
+        // pane split, restore) get the SAME create-time meta seed -> async git
+        // enrich -> `terminal.meta.updated` broadcast the WS `terminal.create`
+        // path runs (Node seeds off the registry's 'terminal.created' event
+        // for EVERY terminal, `server/index.ts:647-655` -> `seedFromTerminal`).
+        // Wired HERE because only this crate sees both sides: freshagent (the
+        // hook seam) and freshell-ws (the meta registry). WS creates never
+        // fire this hook, so no terminal is double-seeded.
+        .with_terminal_created_hook({
+            let terminal_meta = terminal_meta.clone();
+            let broadcast_tx = Arc::clone(&broadcast_tx);
+            Arc::new(move |event: freshell_freshagent::TerminalCreatedEvent| {
+                freshell_ws::terminal_meta::seed_from_terminal(
+                    &terminal_meta,
+                    &broadcast_tx,
+                    &event.terminal_id,
+                    &event.mode,
+                    event.resume_session_id.as_deref(),
+                    event.cwd.as_deref(),
+                );
+            })
+        });
+    // Batch B: `session_directory` no longer re-walks + re-parses every
+    // transcript on every request -- it reads a cached, TTL-refreshed
+    // `SessionIndex`. Batch C adds `CodexSource` (file-based, same shape as
+    // `ClaudeSource`) and `OpencodeSource` (direct-listed from
+    // `opencode.db`) alongside claude. `None` home -> no index -> the prior
+    // empty-page behavior.
+    //
+    // FRESHELL_HOME root-alignment fix: provider transcript sources must
+    // resolve against the REAL home, never the (possibly `FRESHELL_HOME`-
+    // overridden) isolated config root `home` above -- see
+    // `session_directory::provider_home` for the full rationale.
+    //
+    // Fourth source: `AmplifierSource` (`crates/freshell-sessions/src/amplifier.rs`,
+    // a faithful port of `server/coding-cli/providers/amplifier.ts`'s
+    // discovery/parse -- file-based, same shape as `ClaudeSource`/`CodexSource`).
+    // `amplifier_home` lives in that module (not `session_directory.rs`, whose
+    // internals are out of scope for this change) and resolves
+    // `$FRESHELL_AMPLIFIER_HOME` (used as-is when set and non-empty) else
+    // `<home>/.amplifier`, against the same `provider_home()` root
+    // `claude_home`/`codex_home` use. `AMPLIFIER_HOME` is deliberately NOT
+    // consulted anywhere broker-side.
+    let session_index = session_directory::provider_home().as_ref().map(|h| {
+        Arc::new(freshell_sessions::directory_index::SessionIndex::new(vec![
+            Arc::new(freshell_sessions::directory_index::ClaudeSource::new(
+                session_directory::claude_home(h),
+            )) as Arc<dyn freshell_sessions::directory_index::SessionSource>,
+            Arc::new(freshell_sessions::directory_index::CodexSource::new(
+                session_directory::codex_home(h),
+            )) as Arc<dyn freshell_sessions::directory_index::SessionSource>,
+            Arc::new(freshell_sessions::directory_index::OpencodeSource::new(
+                freshell_sessions::parse::default_opencode_data_home(),
+            )) as Arc<dyn freshell_sessions::directory_index::SessionSource>,
+            Arc::new(freshell_sessions::amplifier::AmplifierSource::new(
+                freshell_sessions::amplifier::amplifier_home(h),
+            )) as Arc<dyn freshell_sessions::directory_index::SessionSource>,
+        ]))
+    });
+
+    // Start the session-directory file watcher. This replaces the continuous
+    // 1s-TTL polling with event-driven inotify watching. The TTL (now 15
+    // minutes) serves as a reconciliation sweep for the ~1.8% of events
+    // the watcher misses.
+    // Session-directory watcher — must live for the process lifetime (dropping
+    // the SessionWatcher sends the stop signal, killing the watcher loop).
+    let _session_watcher = if let Some(ref index) = session_index {
+        // The subagent-mkdir escalation gate (Task 3) reads the SAME
+        // registry the cadence (spawned below) reads.
+        let subagent_count = subagent_interest.count_handle();
+        session_directory::provider_home().map(|home| {
+            let providers = vec![
+                freshell_sessions::session_watcher::WatchedProvider {
+                    layout: Box::new(freshell_sessions::provider_layout::ClaudeLayout),
+                    home: session_directory::claude_home(&home),
+                },
+                freshell_sessions::session_watcher::WatchedProvider {
+                    layout: Box::new(freshell_sessions::provider_layout::CodexLayout),
+                    home: session_directory::codex_home(&home),
+                },
+                freshell_sessions::session_watcher::WatchedProvider {
+                    layout: Box::new(freshell_sessions::provider_layout::OpencodeLayout),
+                    home: freshell_sessions::parse::default_opencode_data_home(),
+                },
+                freshell_sessions::session_watcher::WatchedProvider {
+                    layout: Box::new(freshell_sessions::provider_layout::AmplifierLayout),
+                    home: freshell_sessions::amplifier::amplifier_home(&home),
+                },
+            ];
+            let mut watcher = freshell_sessions::session_watcher::SessionWatcher::new(
+                Arc::clone(index),
+                providers,
+            )
+            .with_subagent_interest(subagent_count);
+            // Watch-reduction cold-start gate (Task 9): every boot-time
+            // session-index publish (the warm spawn, the sessions sweep's
+            // initial signature snapshot, the auto-title first pass,
+            // pre-readiness request routes, mark-driven background
+            // refreshes) funnels through the index's two publish entries;
+            // installing the receiver HERE — BETWEEN construction and
+            // start() — orders the FIRST publish provably after the watcher
+            // reports its startup arms settled.
+            index.set_startup_gate(watcher.startup_ready());
+            watcher.start();
+            watcher
+        })
+    } else {
+        None
+    };
+
+    // TERM-15/TERM-16: the terminal-mode CLI activity hub. Consumes the
+    // registry tap (installed right below), broadcasts *.activity.updated /
+    // terminal.turn.complete / terminal.idle on the shared bus, and answers
+    // the *.activity.list requests. The resolver maps a RESUMED amplifier
+    // terminal's session id to its events.jsonl (one bounded projects walk at
+    // create time — fresh sessions pre-create their stub, `events.jsonl`
+    // included, so the same create-time resolver covers them too; the
+    // post-spawn amplifier association was deleted, see kata qmpk).
+    let activity_hub = {
+        let resolver: Option<freshell_ws::activity::AmplifierEventsPathResolver> =
+            session_directory::provider_home().map(|h| {
+                let projects_root =
+                    freshell_sessions::amplifier::amplifier_home(&h).join("projects");
+                Arc::new(move |session_id: &str| {
+                    resolve_amplifier_events_path(&projects_root, session_id)
+                }) as freshell_ws::activity::AmplifierEventsPathResolver
+            });
+        freshell_ws::activity::ActivityHub::new(Arc::clone(&broadcast_tx), resolver)
+    };
+    registry.set_activity_observer(activity_hub.registry_observer());
+    // G9: resume-time codex rollout locator (ownership-proof walk of the
+    // codex sessions root; None -> PTY-only lane, same degradation as the
+    // amplifier resolver above).
+    if let Some(codex_sessions_root) = freshell_ws::codex_sessions_root() {
+        activity_hub.set_codex_rollout_locator(std::sync::Arc::new(move |session_id: &str| {
+            freshell_ws::locate_codex_rollout(&codex_sessions_root, session_id)
+        }));
+    }
+    // Task 10: the opencode SSE lane's production IO seams (reqwest impls;
+    // fakes in tests). Unset would leave OpencodeAttach retire-only.
+    activity_hub.set_opencode_lane_deps(std::sync::Arc::new(
+        freshell_ws::opencode_lane::OpencodeLaneDeps {
+            http: std::sync::Arc::new(freshell_ws::opencode_lane::ReqwestLaneHttp::new()),
+            events: std::sync::Arc::new(freshell_ws::opencode_lane::ReqwestLaneStream::new()),
+        },
+    ));
+    // #606: the claude deadman's session-JSONL truth source (verify-then-
+    // decide; fakes in tests). Unset would make every deadman verify fail
+    // (crash semantics).
+    activity_hub.set_claude_truth(std::sync::Arc::new(
+        freshell_ws::claude_truth::FsClaudeTruth::from_env(),
+    ));
+    // Resolved ONCE so the rate-limit knobs and the gate the handlers consult
+    // are guaranteed to come from the same env snapshot.
+    let create_protect = freshell_ws::create_limit::CreateProtectConfig::from_env();
+    // Kata enn3: ONE server-wide spawn gate shared by BOTH create doors —
+    // WS terminal.create (restore path, via create_gate) AND the freshagent
+    // REST pipeline (/api/tabs, /api/panes/{id}/split,
+    // /api/panes/{id}/respawn). A single concurrency budget, never two
+    // parallel budgets; pinned by
+    // crates/freshell-ws/tests/rest_ws_shared_gate.rs. Post-construction
+    // setter (ledger precedent). NOTE: the LAST fresh_agent_state builder
+    // rebinding is no longer here — it is the door-3 resume-validation
+    // wiring below (just above the WsState literal), which needs pane_ledger
+    // and the hoisted session_existence probe; this set_spawn_gate is an
+    // Arc<OnceLock> shared by every clone, so the later consuming rebinding
+    // does not affect it. SpawnGate::new passes the (already env-sanitized)
+    // values straight through.
+    let spawn_gate = std::sync::Arc::new(freshell_freshagent::spawn_gate::SpawnGate::new(
+        create_protect.spawn_concurrency,
+        create_protect.spawn_queue_cap,
+    ));
+    fresh_agent_state.set_spawn_gate(
+        std::sync::Arc::clone(&spawn_gate),
+        std::time::Duration::from_millis(create_protect.spawn_timeout_ms),
+    );
+    // Boot assertion (council enn3 follow-up): the OnceLock is a fail-OPEN
+    // seam — unwired means every REST create runs ungated. Fail LOUD at boot
+    // if the wiring above ever regresses.
+    assert!(
+        fresh_agent_state.spawn_gate_wired(),
+        "spawn-gate OnceLock must be wired at startup (REST creates would run ungated)"
+    );
+    // Boot visibility (council observability follow-up, PR #552): the ONE
+    // authoritative line stating the resolved create-protection posture —
+    // env-overridable knobs plus the fact that requestId dedupe is active —
+    // so a support bundle answers "what protection was this boot running?"
+    // without source-diving.
+    tracing::info!(
+        spawn_gate_concurrency = create_protect.spawn_concurrency,
+        spawn_gate_queue_cap = create_protect.spawn_queue_cap,
+        spawn_gate_timeout_ms = create_protect.spawn_timeout_ms,
+        rate_limit = create_protect.rate_limit,
+        rate_window_ms = create_protect.rate_window_ms,
+        request_id_dedupe = "active",
+        "create_protection_config"
+    );
+    // Shutdown latch shared with shutdown_signal (Task 7 wires the setter).
+    let shutdown_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // P1.13: inject the ledger-backed identity sink into the fresh-agent
+    // states (constructed earlier, before the ledger exists — the
+    // post-construction setter exists precisely for this ordering). All
+    // clones of each state share the `Arc<OnceLock>` field, so this covers
+    // every route's clone.
+    let fresh_agent_identity_sink: freshell_freshagent::SharedPaneIdentitySink =
+        std::sync::Arc::new(identity_sink::LedgerIdentitySink::new(pane_ledger.clone()));
+    fresh_codex_state.set_identity_sink(fresh_agent_identity_sink.clone());
+    fresh_claude_state.set_identity_sink(fresh_agent_identity_sink.clone());
+    fresh_opencode_state.set_identity_sink(fresh_agent_identity_sink.clone());
+    // opencode REST surface (Task 7's materialization site; V10 A13-N1)
+    fresh_agent_state.set_identity_sink(fresh_agent_identity_sink.clone());
+    // Lane D1: the crash-event channel for terminal auto-resume. The receiver
+    // is consumed by `auto_resume::spawn_auto_resume_hub`, spawned right
+    // after `ws_state` is assembled (the hub needs the full state).
+    let (auto_resume_tx, auto_resume_rx) =
+        tokio::sync::mpsc::unbounded_channel::<freshell_ws::auto_resume::CrashEvent>();
+    // Reconciliation handshake disk-truth probe (design §5.1): backed by
+    // the SAME shared session index the History surfaces read; the
+    // no-index fallback (honest `Unknown` on known providers) when no
+    // provider home resolves — mirrors `session_index`'s own `Option`
+    // convention.
+    let session_existence: freshell_ws::existence::SharedExistenceProbe = match &session_index {
+        Some(index) => {
+            let probe = existence::IndexExistenceProbe::new(
+                std::sync::Arc::clone(index),
+                // P1.8 read 2: the durable ledger backs `ever_observed`, so a
+                // transcript deleted while the server was DOWN still derives
+                // loud dead_session (per-boot observed set is empty then).
+                Some(std::sync::Arc::clone(&pane_ledger)),
+                // Provider session roots resolved with the SAME helpers the
+                // `session_index` sources above use — a known provider whose
+                // root does not exist on this machine derives an immediate
+                // `error{provider_unavailable}`, never `index_warming`.
+                session_directory::provider_home()
+                    .map(|h| {
+                        std::collections::HashMap::from([
+                            ("claude".to_string(), session_directory::claude_home(&h)),
+                            ("codex".to_string(), session_directory::codex_home(&h)),
+                            (
+                                "opencode".to_string(),
+                                freshell_sessions::parse::default_opencode_data_home(),
+                            ),
+                            (
+                                "amplifier".to_string(),
+                                freshell_sessions::amplifier::amplifier_home(&h),
+                            ),
+                        ])
+                    })
+                    .unwrap_or_default(),
+            )
+            // Kata 09v1 zero-turn claude fallback: the SAME raw-file check
+            // the attach arm trusts (claude_snapshot ordered candidate
+            // roots, CLAUDE_CONFIG_DIR > CLAUDE_HOME > $HOME/.claude), so
+            // reconcile and attach can never disagree about whether a
+            // claude transcript exists. Degenerate no-roots case (HOME
+            // unset etc.): locate_transcript answers None and the probe
+            // keeps the pure index answer — identical to pre-fix behavior.
+            .with_claude_transcript_locator(std::sync::Arc::new(|session_id: &str| {
+                freshell_freshagent::locate_transcript(session_id)
+            }))
+            // Opencode rebind fix: the SAME by-id DB truth the attach arm
+            // trusts (`opencode --session <id>` resolves children and
+            // directory-less roots the root-filtered listing hides), so
+            // reconcile and attach can never disagree about whether an
+            // opencode session exists. Points at the SAME data home the
+            // OpencodeSource above uses. Unreadable DB => Unknown
+            // (bounded deferral), never a false dead_session.
+            .with_opencode_session_locator(existence::opencode_db_locator(
+                freshell_sessions::parse::default_opencode_data_home(),
+            ));
+            // Amplifier by-id fallback (resume-validation): the SAME
+            // all-slugs disk scan the stub writer/attach arm trusts
+            // (amplifier_stub::session_on_disk), over the SAME home the
+            // stub writer resolves. Covers both a stale warm snapshot
+            // AND the cold index at boot (restore-time creates race the
+            // detached sweep). No resolvable home => probe behaves as
+            // today for amplifier.
+            let probe = match freshell_sessions::amplifier_stub::resolve_amplifier_home() {
+                Some(amplifier_home) => probe.with_amplifier_session_locator(
+                    existence::amplifier_dir_locator(amplifier_home),
+                ),
+                None => probe,
+            };
+            // Codex by-id fallback (resume-validation): the gate-safe
+            // tri-state rollout walk over the SAME sessions root the
+            // ActivityHub's resume-time locator (above) walks —
+            // warm-Absent adjudication only (AD-4: ~1s on a real
+            // store, never on the cold path). No resolvable root =>
+            // probe behaves as today for codex.
+            let probe = match freshell_ws::codex_sessions_root() {
+                Some(codex_sessions_root) => probe.with_codex_rollout_locator(
+                    existence::codex_rollout_existence_locator(codex_sessions_root),
+                ),
+                None => probe,
+            };
+            std::sync::Arc::new(probe)
+        }
+        None => std::sync::Arc::new(freshell_ws::existence::NoIndexProbe::default()),
+    };
+    // Resume-validation wiring (door 3). Deliberately the LAST fresh_agent_state
+    // rebinding: it needs pane_ledger and the hoisted session_existence probe
+    // (both constructed just above), which do not exist at the earlier builder
+    // chains. Sound because every door-3 consumer clones fresh_agent_state
+    // AFTER this point (the freshagent REST router merge and
+    // SnapshotState::new, below); the one EARLIER capture --
+    // FreshOpencodeState::new(fresh_agent_state.clone()) near the top, held
+    // by value -- already predates every door-3-relevant builder
+    // (with_cli_commands included) by existing design and never runs the REST
+    // create pipeline. The set_spawn_gate/set_identity_sink calls above are
+    // unaffected: Arc<OnceLock> cells initialized in new(), shared by every
+    // clone including this rebound value.
+    let fresh_agent_state = fresh_agent_state
+        .with_resume_probe({
+            let probe = session_existence.clone(); // the hoisted Arc'd probe
+            std::sync::Arc::new(move |provider: &str, session_id: &str| {
+                use freshell_platform::resume_gate::{ResumeExistence, ResumeProbeAnswer};
+                use freshell_ws::existence::SessionExistence;
+                let existence = match probe.exists_for_gate(provider, session_id) {
+                    SessionExistence::Present => ResumeExistence::Present,
+                    SessionExistence::Absent => ResumeExistence::Absent,
+                    SessionExistence::Unknown | SessionExistence::ProviderUnavailable => {
+                        ResumeExistence::Unknown
+                    }
+                };
+                ResumeProbeAnswer {
+                    existence,
+                    ever_observed_on_disk: probe.ever_observed_on_disk(provider, session_id),
+                }
+            })
+        })
+        .with_on_stale_resume({
+            let ledger = pane_ledger.clone(); // the Arc<PaneLedger> built above
+            std::sync::Arc::new(move |provider: &str, stale_id: &str| {
+                tracing::warn!(
+                    provider = %provider,
+                    stale_session_id = %stale_id,
+                    "resume validation (REST): cached session missing on disk; spawning fresh"
+                );
+                let _ = ledger.retire_missing(provider, stale_id);
+            })
+        })
+        .with_sidecar_liveness({
+            // MANDATORY (arm 2 of the door-3 liveness precondition): the SAME
+            // sidecar instances the WS door's D7 join consults -- built and
+            // frozen near the top of main, shared with WsState below. Same
+            // mode -> sidecar mapping as the WS door's sidecar arm
+            // (crates/freshell-ws/src/terminal.rs, Task 13b cross-kind
+            // live-guard); unknown modes contribute false.
+            let claude = fresh_claude_state.clone();
+            let codex = fresh_codex_state.clone();
+            let opencode = fresh_opencode_state.clone();
+            std::sync::Arc::new(move |mode: &str, session_id: &str| {
+                let claude = claude.clone();
+                let codex = codex.clone();
+                let opencode = opencode.clone();
+                let mode = mode.to_string();
+                let sid = session_id.to_string();
+                Box::pin(async move {
+                    match mode.as_str() {
+                        "claude" => claude.has_live_session(&sid).await,
+                        "codex" => codex.has_live_session(&sid).await,
+                        "opencode" => opencode.has_live_session(&sid).await,
+                        _ => false,
+                    }
+                })
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+            })
+        });
+    let ws_state = WsState {
+        auto_resume_tx,
+        auto_resume_cancels: Default::default(),
+        activity: Some(activity_hub.clone()),
+        identity: terminal_identity.clone(),
+        terminal_meta: terminal_meta.clone(),
+        opencode_locator: opencode_locator.clone(),
+        codex_locator: codex_locator.clone(),
+        session_existence: session_existence.clone(),
+        // §5.3 row 5: the ONE bounded index-warming deferral's budget
+        // (council-pinned single deferral, default 2000ms).
+        reconcile_deferral_budget_ms: freshell_ws::reconcile::RECONCILE_DEFERRAL_BUDGET_MS_DEFAULT,
+        // Per-boot fresh-agent respawn-answer counter (campaign §4.3, V2/A7):
+        // in-memory by design — a restart intentionally resets it.
+        fresh_agent_respawn_counts: Default::default(),
+        auth_token: Arc::clone(&auth_token),
+        // Shared (not moved) so `GET /api/health` reports the SAME `instanceId`.
+        server_instance_id: Arc::clone(&server_instance_id),
+        // Shared (not moved) so the DIAG-01 `server.started` lifecycle event
+        // (emitted after the listener binds, below) can log the SAME boot id.
+        boot_id: Arc::clone(&boot_id),
+        settings: Arc::clone(&settings),
+        // CFG-12: the /ws handshake's `settings.updated` resolves the LIVE
+        // store per connection (legacy parity: per-connection
+        // `handshakeSnapshotProvider` -> `configStore.getSettings()`), so a
+        // PATCH committed after boot reaches the next (re)connecting client.
+        // `settings` above stays the boot-frozen create-time view (CFG-06).
+        handshake_settings: settings_store.shared_settings_lock(),
+        config_fallback: config_fallback.clone(),
+        broadcast_tx: Arc::clone(&broadcast_tx),
+        fresh_codex: fresh_codex_state.clone(),
+        fresh_claude: fresh_claude_state.clone(),
+        fresh_opencode: fresh_opencode_state.clone(),
+        registry: registry.clone(),
+        tabs: tabs.clone(),
+        // The SAME store `fresh_agent_state.layout` holds (AUTO-01 spine).
+        layout: layout_store.clone(),
+        screenshots: screenshots.clone(),
+        subagent_interest: subagent_interest.clone(),
+        // Task 9: the SAME interest registry the collector's cadence delivers
+        // through + the injected concrete collector.
+        host_stats: freshell_ws::host_stats_collector::WsHostStatsState {
+            interest: host_stats_interest.clone(),
+            collector: Some(host_stats_collector.clone()),
+        },
+        terminals_revision: Arc::clone(&terminals_revision),
+        sessions_revision: Arc::clone(&sessions_revision),
+        cli_commands: Arc::clone(&cli_commands),
+        shutdown: Arc::clone(&shutdown_notify),
+        ping_interval_ms: resolve_ping_interval_ms(),
+        hello_timeout_ms: resolve_hello_timeout_ms(),
+        allowed_origins: Arc::new(resolve_allowed_origins()),
+        ws_max_payload_bytes: resolve_ws_max_payload_bytes(),
+        term09: freshell_ws::backpressure::Term09Config::from_env(),
+        create_protect,
+        // THE kata-enn3 pin: the WS door holds the SAME gate Arc as the
+        // REST door (never a second budget minted here).
+        spawn_gate: std::sync::Arc::clone(&spawn_gate),
+        shutdown_started: std::sync::Arc::clone(&shutdown_started),
+        create_dedupe: std::sync::Arc::new(freshell_ws::create_dedupe::CreateDedupe::default()),
+        pane_ledger: std::sync::Arc::clone(&pane_ledger),
+    };
+
+    // Lane D1 (Task 5): the auto-resume hub — consumes the crash events the
+    // PTY exit hook sends and drives bounded respawns. A boot-time background
+    // task, same precedent as `spawn_idle_monitor` above. The handle is
+    // deliberately discarded: the hub SELF-SUPERVISES (council 7w4h/xkhx,
+    // crusty) — a driver panic is caught inside the task, logged ERROR, and
+    // the loop restarted with bounded escalating backoff, so the task only
+    // ever ends when the crash-event channel closes at shutdown.
+    freshell_ws::auto_resume::spawn_auto_resume_hub(ws_state.clone(), auto_resume_rx);
+
+    // P1.8 boot hygiene: quarantine, stale-marker sweep, supersession
+    // repair, GC. Tombstone deletion keys on the DIRECT stat
+    // (`transcript_definitively_absent`) — never on probe.exists()==Absent
+    // (V10.md). Runs BEFORE the server accepts connections, so calling the
+    // blocking ledger API inline here is fine.
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        // `home` = the same Option<PathBuf> resolve_home() output the ledger
+        // root was derived from. No home => the ledger is disabled and the
+        // closure is never consulted; answering false (defer) is still safe.
+        let scan_home = home.clone();
+        // Delta-r6-r4 Finding 2: close evidence outlives its TTL exactly as
+        // long as a retained snapshot can reference it (no absolute-age
+        // re-offer gap).
+        let snapshot_refs = snapshot_close_evidence_references(&home);
+        let report = pane_ledger.boot_scan(
+            now,
+            &move |provider, session_id| {
+                scan_home
+                    .as_deref()
+                    .is_some_and(|h| transcript_definitively_absent(h, provider, session_id))
+            },
+            snapshot_refs.as_ref(),
+        );
+        if !report.quarantined.is_empty() {
+            tracing::error!(
+                count = report.quarantined.len(),
+                "pane_ledger_boot: rows quarantined (see per-row errors above)"
+            );
+        }
+        if !report.scan_errors.is_empty() {
+            tracing::error!(
+                count = report.scan_errors.len(),
+                "pane_ledger_boot: store scan faults during boot hygiene \
+                 (see per-path pane_ledger_scan_fault errors above)"
+            );
+        }
+    }
+
+    // Codex sidecar boot reconcile (Task 10, katas ynfn/da92): load the
+    // previous generation's sidecar records, prune stale rows (Dead/Mismatch
+    // — remove only, NEVER signal), hold verified survivors claimable for
+    // restore-time reattach, then arm the grace-delayed conservative sweep.
+    {
+        // Disablement must be LOUD (A10 validation, reports/V6.md): the
+        // restart script provably waits for old-process exit, so lock
+        // contention is not expected on the normal path — but a same-HOME
+        // scratch server on another port (e.g. the evidenced `--port 3499`
+        // runs) silently loses the flock, disabling sidecar tracking for
+        // this whole generation with no timing race at all.
+        if !codex_sidecar_store.is_enabled() {
+            tracing::error!(
+                "codex_sidecar_store_disabled: sidecar records are NOT being written or \
+                 reconciled this generation (lock contention or no resolvable home) — codex \
+                 terminal-pane sidecars spawned now will NOT survive a restart of this process"
+            );
+        }
+        let (reconciler, report) =
+            freshell_codex::sidecar_reconcile::SidecarReconciler::boot_reconcile(
+                codex_sidecar_store.clone(),
+            );
+        tracing::info!(
+            codex_sidecar_store_enabled = codex_sidecar_store.is_enabled(),
+            loaded = report.loaded,
+            pruned_dead = report.pruned_dead,
+            pruned_mismatch = report.pruned_mismatch,
+            held = report.held,
+            "codex_sidecar_boot_reconcile: previous generation's sidecar records reconciled"
+        );
+        let reconciler = std::sync::Arc::new(reconciler);
+        freshell_codex::sidecar_reconcile::set_codex_sidecar_reconciler(reconciler.clone());
+        // The grace-delayed conservative sweep (Task 9): restores get the
+        // whole grace window (default 30m — the incident's restores arrived
+        // 18m post-boot) to claim survivors before any unclaimed one is
+        // probed and, only when verified AND reap-eligible, reaped.
+        tokio::spawn(async move {
+            tokio::time::sleep(freshell_codex::sidecar_sweep::reap_grace_from_env()).await;
+            let outcomes = reconciler.sweep_unclaimed().await;
+            tracing::info!(
+                swept = outcomes.len(),
+                "codex_sidecar_sweep_done: unclaimed survivors swept \
+                 (per-record decisions logged above)"
+            );
+        });
+    }
+
+    // P1.8 periodic GC (boot-time + periodic, spec §4.2 lifecycle).
+    {
+        let ledger = std::sync::Arc::clone(&pane_ledger);
+        let gc_home = home.clone(); // same Option<PathBuf> as above
+        let gc_registry = registry.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60));
+            ticker.tick().await; // the immediate first tick — boot_scan already ran
+            loop {
+                ticker.tick().await;
+                let ledger = std::sync::Arc::clone(&ledger);
+                let home = gc_home.clone();
+                let registry = gc_registry.clone();
+                let joined = tokio::task::spawn_blocking(move || {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    // Orphan-rule live set (P2): a terminal is live iff it
+                    // appears in the registry. PERIODIC sweep only — the
+                    // boot_scan path above never runs the orphan rule (its
+                    // registry is necessarily empty pre-serve).
+                    let live: std::collections::HashSet<String> = registry
+                        .identity_probe_rows()
+                        .into_iter()
+                        .map(|r| r.terminal_id)
+                        .collect();
+                    // Same Option handling as the boot-scan closure above:
+                    // no home => defer (false) — never the destructive branch.
+                    // Delta-r6-r4 Finding 2: the close-evidence reference gate
+                    // rides the same snapshot store scan (fresh every pass).
+                    let snapshot_refs = snapshot_close_evidence_references(&home);
+                    ledger.gc(
+                        now,
+                        &|provider, session_id| {
+                            home.as_deref().is_some_and(|h| {
+                                transcript_definitively_absent(h, provider, session_id)
+                            })
+                        },
+                        Some(&live),
+                        snapshot_refs.as_ref(),
+                    );
+                })
+                .await;
+                if let Err(e) = joined {
+                    tracing::error!(
+                        error = %e,
+                        "pane_ledger_gc_join_failed: periodic GC task panicked or was cancelled"
+                    );
+                }
+            }
+        });
+    }
+
+    let api_state = ApiState {
+        auth_token: Arc::clone(&auth_token),
+        ready: true,
+        // Same version as `GET /api/version` and same instance id as the WS
+        // `ready` handshake, so `GET /api/health` (which the legacy Electron
+        // launcher's discovery probe consumes) is consistent with both.
+        version: Arc::clone(&app_version),
+        instance_id: Arc::clone(&server_instance_id),
+        started_at: Arc::clone(&started_at),
+    };
+    // Detect which coding-CLI agents are on PATH (so the PanePicker surfaces the real
+    // claude/codex/opencode agents, was `{}`) and serialize the client registry for
+    // `GET /api/extensions`, reusing the `extension_registry` scanned above.
+    let available_clis =
+        extensions::detect_available_clis_live(&extension_registry.cli_detection_specs());
+    let extensions_registry = Arc::new(extension_registry.to_client_registry());
+
+    // The boot REST surface the RETAINED React SPA fetches on first paint
+    // (bootstrap/platform/version/settings/session-directory/terminals/network),
+    // and the resolved `dist/client` dir the SPA is served from.
+    let boot_state = BootState {
+        auth_token: Arc::clone(&auth_token),
+        settings: settings_store.clone(),
+        platform: Arc::new(build_platform_payload(available_clis, ai_key.enabled())),
+        // The SAME resolved version `GET /api/health` reports (shared above), so
+        // `/api/version` `currentVersion` and health `version` never diverge.
+        app_version: Arc::clone(&app_version),
+        tabs: tabs.clone(),
+        extensions: Arc::clone(&extensions_registry),
+        // R5: one shared live GitHub update-checker (its own internal cache).
+        update_checker: updater::UpdateChecker::new(),
+    };
+    // The read-only network status surface (`GET /api/network/status`, Follow-up
+    // 3.19): the full `NetworkStatus` shape, with firewall/LAN facts detected
+    // lazily via READ-ONLY probes and cached. `effective_host` is the actual bind.
+    let rebind =
+        crate::net_bind::RebindController::new(port, crate::net_bind::reuse_port_enabled());
+    let managed_ports_store = Arc::new(managed_ports::ManagedPortsStore::windows(
+        home.clone(),
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        port,
+    ));
+    let network_state = network::NetworkState {
+        auth_token: Arc::clone(&auth_token),
+        settings: settings_store.clone(),
+        bind: Arc::new(network::BindState::new(bind_host.clone())),
+        port,
+        facts: Arc::new(network::NetworkFactsCache::new()),
+        probe: Arc::new(network::TcpPortProbe::default()),
+        broadcast_tx: Arc::clone(&broadcast_tx),
+        rebind: Arc::clone(&rebind),
+        net_mutation: Arc::new(tokio::sync::Mutex::new(())),
+        // Task 3.3: the confirmation/elevation gate + the instance-scoped
+        // managed-ports store (keyed by the real home/cwd/port) + the live
+        // elevated-dispatch seam (Unsupported off Windows -- no real OS
+        // mutation can occur on a non-Windows host).
+        gate: Arc::new(tokio::sync::Mutex::new(
+            freshell_platform::elevated::ConfirmationGate::new(),
+        )),
+        managed_ports: Arc::clone(&managed_ports_store),
+        elevated_dispatch: Arc::new(network::LiveElevatedDispatch),
+        // Task 3.5: the live post-`Started` verification seam (the TS
+        // `verifySuccess` spawn-callback step) — READ-ONLY recomputes.
+        elevation_verifier: Arc::new(network::LiveElevationVerifier {
+            port,
+            managed_ports: managed_ports_store,
+        }),
+    };
+
+    // The History read model (`GET /api/session-directory`, Follow-up 3.19): list
+    // the coding-CLI sessions from the isolated home's provider transcript dirs,
+    // reusing `freshell-sessions` parsers. Replaces the earlier empty-page stub.
+    //
+    // Warm the cache in the background so the first real request never pays
+    // the cold full-sweep cost. The scan itself runs in `spawn_blocking`
+    // (inside `SessionIndex::snapshot`), so this never delays serving other
+    // requests while it's in flight.
+    if let Some(index) = &session_index {
+        let warm_index = Arc::clone(index);
+        // DIAG-01: log the initial warm sweep's count + duration (an
+        // equivalent call to `index.warm()`'s own body -- `snapshot()` is
+        // what `warm()` calls internally -- but keeping the return value
+        // here lets this main.rs-scoped call site report a real count
+        // instead of discarding it).
+        tokio::spawn(async move {
+            let start = std::time::Instant::now();
+            let items = warm_index.snapshot().await;
+            tracing::info!(
+                event = "session_index_warm",
+                count = items.len(),
+                duration_ms = start.elapsed().as_millis() as u64,
+                "session index warm sweep complete"
+            );
+        });
+        // SESSION-09: start the periodic sessions.changed sweep -- see
+        // `spawn_sessions_sweep`'s doc comment for the full parity rationale.
+        // `ws_state` is Clone (cheap: every field is an Arc/primitive), so
+        // this borrows nothing from the `ws_state` binding consumed by the
+        // router merge below.
+        spawn_sessions_sweep(
+            Arc::clone(index),
+            ws_state.clone(),
+            terminal_identity.clone(),
+            SESSIONS_SWEEP_INTERVAL,
+        );
+        // Amplifier watch-reduction kata (Task 9): demand-driven subagent
+        // rescan cadence — 15s while any connected WS client lists
+        // subagents (the SAME registry instance wired into WsState and the
+        // watcher); zero otherwise. `mark_provider_dirty("amplifier")` only
+        // — never the index-global TTL, never a fetch-recency window.
+        subagent_cadence::spawn_subagent_cadence(
+            Arc::clone(index),
+            subagent_interest.clone(),
+            subagent_cadence::SUBAGENT_CADENCE_INTERVAL,
+        );
+        // Task 5: the background auto-name pass (dir -> first-message ->
+        // Gemini AI) -- `server/index.ts:868-950`. Same cadence + index
+        // accessor as the sessions sweep above; see `auto_title_sweep`'s
+        // module doc for the full semantics (only THIS sweep honors
+        // `settings.sidebar.autoGenerateTitles`).
+        auto_title_sweep::spawn_auto_title_sweep(
+            auto_title_sweep::AutoTitleSweepState {
+                settings: settings_store.clone(),
+                identity: terminal_identity.clone(),
+                registry: registry.clone(),
+                broadcast_tx: Arc::clone(&broadcast_tx),
+                sessions_revision: Arc::clone(&sessions_revision),
+                ai_key: ai_key.clone(),
+                gemini: gemini.clone(),
+                pending_ai_titles: Default::default(),
+                // Task 18: the SAME registry `ws_state.terminal_meta` holds,
+                // so the sweep's meta refresh feeds the handshake + broadcasts.
+                terminal_meta: terminal_meta.clone(),
+                git_meta_cache: Default::default(),
+            },
+            Arc::clone(index),
+            SESSIONS_SWEEP_INTERVAL,
+        );
+    }
+    // One-time boot migration (Node chains it onto the coding-CLI indexer's
+    // first full index, `server/index.ts:1039-1054`, fire-and-forget). The
+    // cleanup condition reads ONLY `sessionOverrides` -- never the index or
+    // live enrichment (Node's comment says exactly this) -- so a detached
+    // task here is observationally equivalent to Node's post-index timing.
+    {
+        let migration_settings = settings_store.clone();
+        tokio::spawn(async move {
+            migrations::run_ai_title_shadow_cleanup(&migration_settings).await;
+        });
+    }
+    // Identity invariant alarm — its own sweep, unconditional (kata qmpk:
+    // previously rode the amplifier locator sweep and died silently when
+    // provider_home() was None).
+    freshell_ws::invariants::spawn_identity_invariant_sweep(
+        ws_state.clone(),
+        IDENTITY_INVARIANT_SWEEP_INTERVAL,
+    );
+    // Version canary (kata qmpk): the pre-create path rests on amplifier's
+    // undocumented on-disk layout (upstream microsoft/amplifier#315/#316
+    // track a --session-id flag that would collapse this layer into a
+    // flag). Verify our slug/layout assumptions against sessions amplifier
+    // ITSELF wrote — loud on breakage, never blocking broker start.
+    tokio::task::spawn_blocking(|| {
+        use freshell_sessions::amplifier_stub::{
+            resolve_amplifier_home, verify_amplifier_layout_contract, CanaryOutcome,
+        };
+        let Some(amp_home) = resolve_amplifier_home() else {
+            return;
+        };
+        match verify_amplifier_layout_contract(&amp_home) {
+            CanaryOutcome::Broken { detail } => tracing::error!(
+                target: "freshell_ws::invariants",
+                %detail,
+                "amplifier_layout_contract_broken: amplifier's on-disk session layout no \
+                 longer matches the broker's stub pre-create assumptions — pre-created \
+                 identities may silently diverge from the CLI's own sessions"
+            ),
+            outcome => tracing::debug!(?outcome, "amplifier layout canary"),
+        }
+    });
+    // OpenCode terminal-pane restore fix: the opencode locator's polling
+    // cycle (its Enter/spawn<->session-row correlation is entirely
+    // poll-driven -- see `freshell_sessions::opencode_locator`'s module doc).
+    if opencode_locator.is_some() {
+        freshell_ws::opencode_association::spawn_opencode_locator_sweep(
+            ws_state.clone(),
+            LOCATOR_SWEEP_INTERVAL,
+        );
+    }
+    // Lane B2: codex locator sweep — same cadence as the sibling sweep.
+    if codex_locator.is_some() {
+        freshell_ws::codex_association::spawn_codex_locator_sweep(
+            ws_state.clone(),
+            LOCATOR_SWEEP_INTERVAL,
+        );
+    }
+    // DEV-0006 S5.a: proxy-event sink + router (the ONE consumer of managed
+    // codex launches' RemoteProxyEvent streams). UNCONDITIONAL — a managed
+    // pane's gate release depends on the router even when the locator is
+    // absent — and installed before the HTTP listener binds.
+    let (codex_proxy_events_tx, codex_proxy_events_rx) = tokio::sync::mpsc::unbounded_channel();
+    freshell_codex::launch_lifecycle::set_codex_proxy_event_sink(codex_proxy_events_tx);
+    freshell_ws::codex_proxy_route::spawn_codex_proxy_router(
+        ws_state.clone(),
+        codex_proxy_events_rx,
+    );
+    // P4 (stale-resume-identity): claude SessionStart signal sweep — drains
+    // the signal files Task 11's launch hook writes
+    // (`$HOME/.freshell/session-signals/claude/<terminal_id>__<nonce>.json`)
+    // and rebinds a live claude pane whose CLI reported a NEW session id
+    // mid-session (in-TUI /resume, /clear). `None` root (unresolvable HOME)
+    // skips the sweep, mirroring the sibling locators' Option convention.
+    if let Some(signal_root) = freshell_ws::claude_signal::ClaudeSignalWatcher::default_root() {
+        freshell_ws::claude_signal::spawn_claude_signal_sweep(
+            ws_state.clone(),
+            freshell_ws::claude_signal::ClaudeSignalWatcher::new(signal_root),
+        );
+    }
+    // Opencode TUI-plugin signal sweep — drains the signal files the injected
+    // freshell-rebind plugin writes
+    // (`$HOME/.freshell/session-signals/opencode/<terminal_id>__<nonce>.json`)
+    // and rebinds a live opencode pane whose TUI navigated to a NEW session
+    // mid-session (session_new / session_list / session_child_cycle). `None`
+    // root (unresolvable HOME) skips the sweep, mirroring the claude sweep.
+    if let Some(signal_root) = freshell_ws::opencode_signal::OpencodeSignalWatcher::default_root() {
+        freshell_ws::opencode_signal::spawn_opencode_signal_sweep(
+            ws_state.clone(),
+            freshell_ws::opencode_signal::OpencodeSignalWatcher::new(signal_root),
+        );
+    }
+    // SYNC-06: the resolve endpoint reads the SAME session index the History
+    // surfaces read (clone before the move below into `session_directory_state`).
+    let resolve_session_index = session_index.clone();
+    // DIAG-05: the diag router's `sessionsProjects` reads the SAME session
+    // index (clone before the move below into `session_directory_state`).
+    let diag_session_index = session_index.clone();
+    // Task 6: the sessions router's provider-generated short-circuit reads
+    // the SAME session index (another clone before the move below).
+    let sessions_state_index = session_index.clone();
+    // SESSION-06 store (`session-metadata.json`), created here (before the
+    // directory state) because BOTH the `POST /api/session-metadata` write
+    // route below and Task 20's session-directory read-join share it. Same
+    // isolated-home `.freshell` directory the settings store resolves
+    // (`settings_store.rs:246`), so a real deployment's existing
+    // `session-metadata.json` is discovered exactly like the legacy server
+    // discovers it.
+    let session_metadata_dir = home
+        .as_deref()
+        .map(|h| h.join(".freshell"))
+        .unwrap_or_else(|| PathBuf::from(".freshell"));
+    let session_metadata_store = session_metadata::SessionMetadataStore::new(session_metadata_dir);
+    let session_directory_state = session_directory::SessionDirectoryState {
+        auth_token: Arc::clone(&auth_token),
+        settings: settings_store.clone(),
+        session_index,
+        identity: terminal_identity.clone(),
+        // Task 20: the SAME store the POST route writes through -- the
+        // directory read-join must see every persisted `sessionType` tag.
+        metadata: session_metadata_store.clone(),
+        // STATUS-STRIP: sessions.cloned pages are client-ordered per instance.
+        server_instance: Arc::clone(&server_instance_id),
+    };
+
+    let client_dir = Arc::new(resolve_client_dir());
+
+    // The files REST surface the RETAINED SPA's DirectoryPicker fetches when a
+    // browser user opens a Fresh Agent pane (candidate dirs + validate-dir). Shares
+    // the auth token, the settings tree (for `defaultCwd`), and the terminal
+    // registry (for the running terminals' cwds).
+    let files_state = files::FilesState {
+        auth_token: Arc::clone(&auth_token),
+        settings: settings_store.clone(),
+        registry: registry.clone(),
+    };
+
+    // The repo-icon surface: same auth token and live settings tree as the
+    // files surface (the `allowed_file_paths` sandbox), plus an in-process
+    // per-repo-root icon cache.
+    let repo_icon_state = repo_icon::RepoIconState {
+        auth_token: Arc::clone(&auth_token),
+        settings: settings_store.clone(),
+        cache: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+    };
+
+    // The `/api/terminals` directory surface (GET list/page + PATCH/DELETE
+    // overrides): reads the SAME registry the WS terminal path owns, patches
+    // `config.terminalOverrides` through the live settings store, and broadcasts
+    // `terminals.changed` on the shared bus.
+    let terminals_state = terminals::TerminalsState {
+        auth_token: Arc::clone(&auth_token),
+        settings: settings_store.clone(),
+        registry: registry.clone(),
+        broadcast_tx: Arc::clone(&broadcast_tx),
+        terminals_revision: Arc::clone(&terminals_revision),
+        identity: terminal_identity.clone(),
+    };
+
+    // The browser-pane HTTP reverse proxy (`/api/proxy/http/{port}/*`): the SPA's
+    // BrowserPane rewrites loopback URLs to this same-origin path so its iframe can
+    // render dev-server content with the iframe-blocking headers stripped.
+    let proxy_state = proxy::ProxyState::new(Arc::clone(&auth_token));
+
+    // The agent screenshot endpoint (`POST /api/screenshots`): drives the WS
+    // `screenshot.capture` round-trip through the shared broker and writes the PNG.
+    let screenshots_state = screenshots::ScreenshotsState {
+        auth_token: Arc::clone(&auth_token),
+        broker: screenshots.clone(),
+    };
+
+    // One axum app serving REST (`/api/health` + fresh-agent + `PATCH /api/settings`
+    // + the SPA boot endpoints + files) + the WS upgrade (`/ws`) + static
+    // `dist/client` with SPA-fallback routing. The fallback also returns a clean 404
+    // (or 401, matching the original's auth-first middleware ordering \u2014 R12)
+    // for any unmatched `/api/*` (never the HTML shell), mirroring the original ordering.
+    let fallback_auth_token = Arc::clone(&auth_token);
+    // The fresh-agent thread-snapshot REST endpoint (Batch D PR-5): `GET
+    // /api/fresh-agent/threads/:sessionType/:provider/:threadId`, the SPA's
+    // `commitSnapshot` read path (`src/lib/api.ts:312` `getFreshAgentThreadSnapshot`).
+    // Shares the already-constructed codex/opencode/claude slices -- no new session
+    // state. The claude slice feeds the Task 3 live-pending overlay (cards survive
+    // reload: `capabilities.approvals/questions` + `pendingApprovals/pendingQuestions`).
+    let snapshot_state = freshell_freshagent::SnapshotState::new(
+        Arc::clone(&auth_token),
+        fresh_codex_state.clone(),
+        fresh_agent_state.clone(),
+        fresh_claude_state.clone(),
+    );
+
+    // `POST /api/session-metadata` (`server/sessions-router.ts:220-244` +
+    // `session-metadata-store.ts`): persists sidebar/fresh-agent `sessionType` tags to
+    // `<home>/.freshell/session-metadata.json` through the SAME store instance Task 20's
+    // session-directory read-join reads (created above, before the directory state).
+    let session_metadata_state = session_metadata::SessionMetadataApiState {
+        auth_token: Arc::clone(&auth_token),
+        store: session_metadata_store.clone(),
+        // W5 fix-forward: the SAME shared `sessions.changed` bus + revision
+        // counter minted above (and already wired into
+        // `ws_state`/`fresh_agent_state`/`sessions::SessionsState`) so a
+        // metadata tag change broadcasts on the ONE unified sequence.
+        broadcast_tx: Arc::clone(&broadcast_tx),
+        sessions_revision: Arc::clone(&sessions_revision),
+    };
+
+    // `POST /api/fresh-agent/checkpoints` (`fresh-agent-extras-router.ts:346-368`):
+    // the fire-and-forget pre-turn shadow-git snapshot the SPA takes on every
+    // fresh-agent send. `home` mirrors `os.homedir()` (checkpoints live under
+    // `<home>/.freshell/checkpoints/`, same isolated home the session-metadata
+    // store above resolves) -- a `None` home (no `FRESHELL_HOME`/`HOME`) falls
+    // back to the cwd-relative `.` the other home-relative state above uses.
+    let checkpoints_state = checkpoints::CheckpointsApiState {
+        auth_token: Arc::clone(&auth_token),
+        home: Arc::new(home.clone().unwrap_or_else(|| PathBuf::from("."))),
+    };
+
+    // `POST /api/fresh-agent/attachments` (`fresh-agent-extras-router.ts:260-287`):
+    // the paperclip upload route the fresh-agent composer POSTs raw file bytes
+    // to before every attachment-bearing send. `home` is the SAME boot-resolved
+    // value as checkpoints above (uploads live under
+    // `<home>/.freshell/attachments/`) -- a `None` home falls back to the
+    // cwd-relative `.` likewise.
+    let attachments_state = attachments::AttachmentsApiState {
+        auth_token: Arc::clone(&auth_token),
+        home: Arc::new(home.clone().unwrap_or_else(|| PathBuf::from("."))),
+    };
+
+    // SAFE-02: the global authenticated API rate limiter (checklist:
+    // `docs/plans/2026-07-14-rust-tauri-parity-completion-checklist.md:539`).
+    // ONE process-wide token bucket, wired below as the outermost-but-one
+    // layer (see `rate_limit`'s module doc comment for the full legacy-parity
+    // derivation of these defaults and the deliberate global-vs-per-IP scope
+    // decision).
+    let rate_limiter =
+        rate_limit::RateLimiter::new_gate_aware(rate_limit::RateLimitConfig::default_api());
+
+    // DIAG-05: `/api/server-info`, `/api/debug`, `/api/perf` -- shares the
+    // live settings store, terminal registry, tabs registry, and session
+    // index every other authenticated REST surface above already threads.
+    let diag_state = diag::DiagState {
+        auth_token: Arc::clone(&auth_token),
+        app_version: Arc::clone(&app_version),
+        boot_instant,
+        settings: settings_store.clone(),
+        registry: registry.clone(),
+        tabs: tabs.clone(),
+        session_index: diag_session_index,
+        broadcast_tx: Arc::clone(&broadcast_tx),
+    };
+
+    let app = freshell_api::router(api_state)
+        .merge(diag::router(diag_state))
+        .merge(freshell_ws::router(ws_state))
+        .merge(freshell_freshagent::router(fresh_agent_state.clone()))
+        .merge(freshell_freshagent::snapshot::router(snapshot_state))
+        .merge(session_metadata::router(session_metadata_state))
+        .merge(checkpoints::router(checkpoints_state))
+        .merge(attachments::router(attachments_state))
+        // R1/R2/R3/R4: the ONE `/api/settings` router (GET+PATCH+PUT), backed by
+        // the live `settings_store` \u2014 replaces the old split between this boot
+        // module's frozen GET and the freshcodex slice's disconnected PATCH.
+        .merge(settings_store::router(
+            settings_store::SettingsRouterState {
+                store: settings_store.clone(),
+                auth_token: Arc::clone(&auth_token),
+                broadcast_tx: Arc::clone(&broadcast_tx),
+                fresh_codex: fresh_codex_state.clone(),
+                // NARROW live-reload fix: same shared registry seeded at boot
+                // (TERM-11/TERM-13, above) so a successful PATCH also pushes
+                // `safety.autoKillIdleMinutes`/`terminal.scrollback` live.
+                registry: registry.clone(),
+                // Task 2: the SAME process-local AI key cell constructed at
+                // boot, so every settings save force-re-applies the key.
+                ai_key: ai_key.clone(),
+            },
+        ))
+        .merge(boot::router(boot_state))
+        // Continuity trio Task 2: the tabs-sync snapshot read surface. The
+        // `snapshots_dir` MUST match the `tabs-snapshots` dir wired into the
+        // `TabsRegistry` above so the reads serve exactly what pushes persist.
+        .merge(tabs_snapshots::router(tabs_snapshots::TabsSnapshotsState {
+            auth_token: Arc::clone(&auth_token),
+            snapshots_dir: home
+                .as_ref()
+                .map(|h| h.join(".freshell").join("tabs-snapshots")),
+        }))
+        // B3/P1.9 Task 2: the recovery-inventory read surface. Joins the SAME
+        // tabs-snapshots store as `tabs_snapshots` above (read-only), the
+        // pane-identity ledger (`:427`), and the shared terminal registry
+        // (`:249`, the D7 liveness join).
+        .merge(recovery_inventory::router(
+            recovery_inventory::RecoveryInventoryState {
+                auth_token: auth_token.as_ref().clone(),
+                snapshots_dir: home
+                    .as_ref()
+                    .map(|h| h.join(".freshell").join("tabs-snapshots")),
+                ledger: std::sync::Arc::clone(&pane_ledger),
+                registry: registry.clone(),
+                identity: terminal_identity.clone(),
+            },
+        ))
+        .merge(network::router(network_state))
+        .merge(session_directory::router(session_directory_state))
+        // Task 7: `POST /api/ai/terminals/:terminalId/summary` — the SAME key
+        // cell / Gemini transport the sweep and generate-title use, plus the
+        // shared terminal registry for the scrollback snapshot.
+        .merge(ai_router::router(ai_router::AiRouterState {
+            auth_token: Arc::clone(&auth_token),
+            registry: registry.clone(),
+            ai_key: ai_key.clone(),
+            gemini: gemini.clone(),
+        }))
+        .merge(sessions::router(sessions::SessionsState {
+            auth_token: Arc::clone(&auth_token),
+            settings: settings_store.clone(),
+            identity: terminal_identity.clone(),
+            registry: registry.clone(),
+            broadcast_tx: Arc::clone(&broadcast_tx),
+            terminals_revision: Arc::clone(&terminals_revision),
+            // GAP-1 fix (reviewer Important, SESSION-09 follow-up): the SAME
+            // shared `sessions.changed` revision counter minted above (and
+            // already wired into `fresh_agent_state`/`ws_state`) so an
+            // override write (rename/archive/delete) broadcasts on the ONE
+            // unified sequence instead of drifting out of sync with the
+            // sweep/fresh-agent producers.
+            sessions_revision: Arc::clone(&sessions_revision),
+            // Task 6: the SAME key cell / Gemini transport the auto-title
+            // sweep uses (generate-title's AI branch gates on key presence
+            // ONLY -- never on `settings.sidebar.autoGenerateTitles`), plus
+            // the shared session index for the provider-generated
+            // short-circuit.
+            ai_key: ai_key.clone(),
+            gemini: gemini.clone(),
+            index: sessions_state_index,
+        }))
+        .merge(project_colors::router(project_colors::ProjectColorsState {
+            auth_token: Arc::clone(&auth_token),
+            settings: settings_store.clone(),
+            broadcast_tx: Arc::clone(&broadcast_tx),
+            // SESSION-05: a project-color write broadcasts `sessions.changed`
+            // on the SAME unified revision sequence as the override-write/
+            // sweep producers (the sweep is structurally blind to this
+            // config-only change; see `sessions::SessionsState::sessions_revision`).
+            sessions_revision: Arc::clone(&sessions_revision),
+        }))
+        .merge(resolve::router(resolve::ResolveState {
+            auth_token: Arc::clone(&auth_token),
+            // SYNC-06 deleted-override filter: the SAME settings store the
+            // sidebar overlay (`SessionDirectoryState.settings`) and
+            // `PATCH /api/sessions/{id}` write path use (constructed once
+            // at ~line 196; Clone shares the Arc-backed innards).
+            settings: settings_store.clone(),
+            session_index: resolve_session_index,
+            // SYNC-06 sessionType overlay: the SAME store `POST
+            // /api/session-metadata` writes (Node overlays it in
+            // `session-indexer.ts:1159-1161`).
+            session_metadata: session_metadata_store.clone(),
+            // Resolve fallbacks mirror Node's buildResolveFallbacks over the
+            // FIXED provider registry (server/index.ts wires ALL FOUR
+            // codingCliProviders into it unconditionally): settings do NOT
+            // gate the exact-id fallbacks — they only gate INDEXING and feed
+            // unsearchedProviders. Both closures are therefore ALWAYS wired;
+            // gating them on boot-time settings would produce false misses
+            // after a live settings change and diverge from Node for
+            // disabled-provider exact IDs.
+            //
+            // opencode `ses_*` exact-id fallback: the SAME data home the
+            // OpencodeSource uses, answered by the hardened direct by-id row
+            // query (`opencode_session_row_by_id`, Node's
+            // `opencode-by-id-query.ts`) — archived + child sessions
+            // included, full row (title/lastActivityAt) returned. Read
+            // errors REPORT as `Err(ProviderFailure)` (the provider-health
+            // channel) — never a silent `Ok(None)` miss.
+            opencode_session_by_id: Some({
+                std::sync::Arc::new(|session_id: &str| {
+                    let data_home = freshell_sessions::parse::default_opencode_data_home();
+                    freshell_sessions::parse::opencode_session_row_by_id(&data_home, session_id)
+                        .map(|row| {
+                            row.map(|r| freshell_sessions::resume_resolve::OpencodeByIdHit {
+                                session_id: r.session_id,
+                                cwd: r.cwd,
+                                title: r.title,
+                                last_activity_at: r.last_activity_at,
+                            })
+                        })
+                        .map_err(|e| {
+                            // Node production parity: the opencode worker
+                            // boundary STRIPS `.code` — the worker serializes
+                            // only {name, message}
+                            // (`opencode-by-id.worker.ts:41-42`) and the
+                            // runner rebuilds the Error without it
+                            // (`opencode-by-id-runner.ts:103-106`), so Node's
+                            // wire entry is message-only
+                            // (`sessions-resolve-router.test.ts:308-320`).
+                            // Emitting SQLITE_* codes here would DIVERGE from
+                            // Node. Task 4's OpencodeByIdError still carries
+                            // the code — log it (structured, with provider +
+                            // code) for diagnosability, then drop it from the
+                            // wire.
+                            tracing::warn!(
+                                provider = "opencode",
+                                code = ?e.code,
+                                message = %e.message,
+                                "opencode by-id lookup failed"
+                            );
+                            freshell_sessions::resume_resolve::ProviderFailure {
+                                code: None,
+                                message: e.message,
+                            }
+                        })
+                }) as crate::resolve::OpencodeByIdLookup
+            }),
+            // claude transcript exact-id fallback: the CHECKED locator over
+            // Node's authoritative two layouts (direct + `<parent>/subagents/
+            // <id>.jsonl`) with the CHECKED bounded cwd reader — read errors
+            // REPORT as `Err(ProviderFailure)` carrying the symbolic errno
+            // (Node preserves `cause.code` verbatim). Node's locator
+            // lowercases the id before scanning and returns the lowercased
+            // id — mirrored here.
+            locate_claude_transcript: Some(std::sync::Arc::new(|session_id: &str| {
+                resolve_claude_exact_id_fallback(session_id)
+            }) as crate::resolve::ClaudeLocator),
+            // See `resolve_wire_home_dir` for the Node `os.homedir()` parity
+            // derivation (USERPROFILE on Windows; HOME else passwd-entry
+            // home on POSIX).
+            home_dir: resolve_wire_home_dir(),
+            // Node's hard 15 s by-id worker timeout, applied to EACH
+            // blocking fallback dispatch (permit wait + fallback) — never
+            // the in-memory resolver around it (see `resolve.rs` for the
+            // abandonment semantics).
+            resolve_deadline: resolve::RESOLVE_FALLBACK_DEADLINE,
+            // Admission cap on concurrent blocking fallback tasks — see
+            // `RESOLVE_MAX_CONCURRENCY` for why abandoned (uncancellable)
+            // blocking tasks must be bounded in COUNT, not just latency.
+            resolve_permits: Arc::new(tokio::sync::Semaphore::new(
+                resolve::RESOLVE_MAX_CONCURRENCY,
+            )),
+        }))
+        .merge(files::router(files_state))
+        .merge(repo_icon::router(repo_icon_state))
+        .merge(terminals::router(terminals_state))
+        .merge(proxy::router(proxy_state))
+        .merge(screenshots::router(screenshots_state))
+        // HARNESS-14: the test-clock control surface exists ONLY when
+        // `FRESHELL_TEST_CLOCK` enabled the clock at boot (and its handlers
+        // re-check the gate, so even a misplaced merge could never expose
+        // it). A normal build answers 404 like any unmatched `/api/*`.
+        .merge(test_clock_router::router(
+            test_clock_router::TestClockState {
+                auth_token: Arc::clone(&auth_token),
+            },
+        ))
+        .fallback({
+            let client_dir = Arc::clone(&client_dir);
+            move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
+                let client_dir = Arc::clone(&client_dir);
+                let auth_token = Arc::clone(&fallback_auth_token);
+                async move { serve_client::serve(uri, headers, client_dir, auth_token).await }
+            }
+        })
+        // S1: the original (Express `res.json`) always emits
+        // `application/json; charset=utf-8`; axum's `Json` extractor emits bare
+        // `application/json`. Normalize every plain-`application/json` response to
+        // the original's exact charset suffix, globally, so no individual handler
+        // has to remember it.
+        .layer(axum::middleware::map_response(ensure_json_charset))
+        // SAFE-02: the global authenticated API rate limit. Sits ABOVE (outside)
+        // `ensure_json_charset` -- a rejection here short-circuits before that
+        // inner layer runs, so `rate_limit::rate_limited_response` sets its own
+        // `application/json; charset=utf-8` content-type directly rather than
+        // depending on it. `rate_limit::enforce` itself exempts `/api/health`
+        // and everything outside the `/api` prefix (the `/ws` upgrade, the
+        // retained SPA's static assets) -- see that module's doc comment for
+        // the full legacy-parity derivation (`server/index.ts:161-170`).
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let rate_limiter = Arc::clone(&rate_limiter);
+            async move { rate_limit::enforce(rate_limiter, req, next).await }
+        }))
+        // DIAG-01: the outermost layer, so it wraps every route INCLUDING the
+        // fallback (unmatched-path 404/401, the retained SPA, and the `/ws`
+        // upgrade) -- one `http_request` JSONL event per response, carrying a
+        // fresh `request_id`, the sanitized route, method, status, and
+        // duration. See `logging.rs` for exactly what this does and does not
+        // cover (WS post-upgrade lifecycle is out of scope for this layer).
+        .layer(axum::middleware::from_fn(
+            logging::request_logging_middleware,
+        ));
+
+    // Slice 2 (Task 2.2): the boot listener is served through the
+    // RebindController — the same transactional bind/swap path the network
+    // mutation endpoints (2.3/2.4) use — so there is exactly ONE serving
+    // mechanism to reason about. `serve_on` binds (proof) and starts the
+    // accept loop; a bind failure here is the old bind-error exit path.
+    rebind.set_app(app.clone());
+    let boot_ip: IpAddr = bind_host.parse().unwrap_or(IpAddr::from([127, 0, 0, 1]));
+    if let Err(err) = rebind.serve_on(boot_ip).await {
+        eprintln!("freshell-server: failed to bind {boot_ip}:{port}: {err}");
+        return ExitCode::FAILURE;
+    }
+    // Single startup line (stderr, so it never pollutes any stdout protocol).
+    // Provenance-hardening lane (#613): timestamp + pid + commit + dirty
+    // (the same `commit`/`buildDirty` values `GET /api/server-info` reports,
+    // `diag.rs::build_commit()`/`build_dirty_str()`) means an operator
+    // tailing append-mode boot logs can always attribute a line to a run
+    // and its exact source commit without a separate authenticated request.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    eprintln!(
+        "{}",
+        diag::boot_line(
+            &format!("{boot_ip}:{port}"),
+            diag::build_commit(),
+            diag::build_dirty_str(),
+            std::process::id(),
+            &diag::iso8601_utc(now_secs),
+        )
+    );
+    // DIAG-01 lifecycle context: the ONE authoritative STRUCTURED boot
+    // record (the stderr line above is for terminal tails; this event is
+    // what log parses key on). `app_version`/`server_pid` are stamped on
+    // every line by the logging layer, so the boot record carries the
+    // per-installation identity (`instance_id`, CFG-07), the per-boot
+    // restart signal (`boot_id`), and build provenance (`commit`/`dirty`,
+    // the same values `GET /api/server-info` reports).
+    tracing::info!(
+        bind = %boot_ip,
+        port,
+        boot_id = %boot_id.as_str(),
+        instance_id = %server_instance_id.as_str(),
+        commit = diag::build_commit(),
+        dirty = diag::build_dirty_str(),
+        "server.started"
+    );
+
+    // Block until SIGTERM/SIGINT (the same graceful-shutdown trigger the old
+    // `axum::serve(...).with_graceful_shutdown(...)` used), then drain the
+    // live listener so every owned child (PTY terminals, the
+    // Codex/claude/opencode sidecars) is reaped — no orphans.
+    shutdown_signal(
+        Arc::clone(&shutdown_notify),
+        std::sync::Arc::clone(&shutdown_started),
+    )
+    .await;
+    rebind.shutdown_all().await;
+    // SAFE-11/TERM-22: reap every owned child tree before exit. Legacy parity
+    // (`server/index.ts:981-1049`'s `shutdown()`): after the HTTP/WS surface is
+    // drained, `joinCodexShutdownOwners` reaps `registry.shutdownGracefully()`
+    // (terminals) and the Codex/opencode sidecars together, then
+    // `codingCliSessionManager.shutdown()` covers any remaining coding-CLI
+    // session. This port's equivalents run in the same spot:
+    //   * `registry.kill_all()` — every tracked PTY terminal (`mode:'shell'`
+    //     and any other registry-tracked terminal, e.g. a plain `sleep 300`
+    //     shell) — the gap this fix closes; nothing previously killed these.
+    //   * `fresh_agent_state.shutdown()` — the shared opencode `serve`
+    //     sidecar. Legacy parity note: the original DOES tear this down on a
+    //     general server shutdown (`codexFreshAgentRuntime.shutdown()` in
+    //     `server/index.ts:330-332` calls `opencodeFreshAgentAdapter.shutdown`,
+    //     which reaches `OpencodeServeManager.shutdown()`,
+    //     `server/fresh-agent/adapters/opencode/serve-manager.ts:573-591`) — it
+    //     is NOT deliberately left running across a general restart, so this
+    //     port matches that (already implemented before this fix).
+    //   * `fresh_codex_state.shutdown()` / `fresh_claude_state.shutdown()` —
+    //     the Codex app-server and claude Node sidecars (already implemented).
+    //
+    // SAFE-11 deliberate deviation (Task 10, kata ynfn): TRACKED codex
+    // terminal-pane sidecars (the launch manager's adopted, record-bearing
+    // spawns) are now RETAINED across this shutdown instead of reaped —
+    // "killing sidecars at shutdown is NOT acceptable; surviving restarts is
+    // a feature." Everything else above still reaps exactly as before, and
+    // record-less codex sidecars (disabled store / non-Linux) are still torn
+    // down (retaining them would orphan silently).
+    //
+    // Codex sidecar retention flag: flipped BEFORE the PTY kill below so the
+    // exit hooks (`notify_terminal_exit`) retain adopted terminal-pane codex
+    // sidecars — proxies close, tracked runtimes get
+    // `prepare_retention("server-shutdown")` and their records flip to
+    // Retained — instead of handing them to the teardown worker.
+    //
+    // Supervisor caveat (recorded, no code — reports/V6.md NA-1): the in-repo
+    // systemd unit is NOT installed today (restarts are script-driven). If it
+    // is ever adopted, its KillMode must not be `control-group` — a cgroup
+    // kill would slaughter the retained sidecars this deliberately keeps
+    // alive (`process_group(0)` detaches the pgid, not the cgroup).
+    freshell_codex::launch_lifecycle::CodexTerminalLaunchManager::global()
+        .begin_shutdown_retention();
+    registry.kill_all();
+    // A10 re-sweep (V3): kill_all() snapshots the id set ONCE
+    // (registry.rs:889-892); a detached gated create settling during the
+    // drain can insert AFTER that snapshot, and neither registry-Drop (the
+    // PTY reader thread's exit hook holds a registry Arc — terminal.rs:1047,
+    // pty.rs:464/512, circular) nor the watchdog's std::process::exit(1)
+    // (skips Drops) would ever reap it. Give in-flight create tasks a short
+    // settling window, then sweep again. Second line of defense behind
+    // create_gate.rs's shutdown_started checks.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let _ = registry.kill_all();
+    fresh_agent_state.shutdown().await;
+    // Reap every owned codex app-server sidecar (SIGKILL + `/proc` ownership sweep) so a
+    // freshcodex T2 run leaves no orphaned app-server.
+    fresh_codex_state.shutdown().await;
+    // Reap every owned claude Node sidecar (SIGTERM → it kills its own claude CLI via the
+    // SDK abort → SIGKILL straggler + `/proc` ownership sweep) so a freshclaude T2 run
+    // leaves no orphaned sidecar or claude CLI grandchild.
+    fresh_claude_state.shutdown().await;
+    // DEV-0006 S4 + Task 10 retention: stop accepting codex managed-launch plans
+    // (mirrors legacy's close-time `codexLaunchPlanner.shutdown()` among the shutdown
+    // owners, `server/index.ts:981-1049`). With the retention flag set above, this now
+    // RETAINS adopted terminal-pane sidecars (proxy-close +
+    // `prepare_retention("server-shutdown")`; records flip to Retained) and still
+    // tears down unadopted in-flight plans (no pane to reattach to). The runtime-level
+    // retention gate still reaps record-less sidecars exactly as before. Runs AFTER
+    // `registry.kill_all()` above, so adopted launches whose exit hooks already queued
+    // retention are simply re-retained (idempotent). No-op when the managed-launch
+    // flag never planned anything.
+    freshell_codex::launch_lifecycle::CodexTerminalLaunchManager::global()
+        .shutdown()
+        .await;
+    // DIAG-01 lifecycle context: the terminal "we are done" marker. Every
+    // owner above has run (WS drain, registry kill_all, all three fresh-agent
+    // sidecar reapers, the codex launch manager); the logging writer flushes
+    // synchronously per line, so this line is guaranteed on disk before the
+    // process exits -- the DIAG-03 "final shutdown event is flushed" clause
+    // holds by construction here.
+    tracing::info!("server.stopped");
+    ExitCode::SUCCESS
+}
+
+/// SAFE-11: the hard ceiling on the whole shutdown sequence — WS drain +
+/// terminal/sidecar reaping — measured from the moment a shutdown signal
+/// arrives. "Use the full grace period" (not less), but never hang forever:
+/// [`shutdown_signal`] arms a watchdog at this exact instant that force-exits
+/// nonzero if the process is still alive once it elapses.
+const SHUTDOWN_HARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Resolve once a shutdown signal arrives (SIGTERM from the oracle harness's
+/// `stop()`, or Ctrl-C). Drives `axum`'s graceful shutdown so every owned
+/// child (PTY terminals, the Codex/claude/opencode sidecars) is reaped before
+/// exit.
+async fn shutdown_signal(
+    notify_ws: Arc<tokio::sync::Notify>,
+    shutdown_started: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            // If the SIGTERM handler cannot be installed, fall back to never-resolving
+            // so Ctrl-C still drives shutdown.
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    // RCA 2026-07-06 §6.4: SIGHUP is what a dying terminal/session host
+    // sends; without a handler the process dies immediately with no
+    // shutdown log at all.
+    #[cfg(unix)]
+    let hangup = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let hangup = std::future::pending::<()>();
+
+    let signal_name: &'static str = tokio::select! {
+        _ = ctrl_c => "SIGINT",
+        _ = terminate => "SIGTERM",
+        _ = hangup => "SIGHUP",
+    };
+
+    // DIAG-01 lifecycle context: the clean "we are going down" marker, FIRST
+    // (before the drain below), so a log tail always answers "did this
+    // server stop intentionally, and on which signal".
+    tracing::info!(signal = signal_name, "server.stopping");
+
+    // Latch FIRST (Task 7 wired this — keep it before any teardown): gated
+    // creates consult this flag around registry.create.
+    shutdown_started.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Forensics FIRST, before any teardown step, so the record survives even
+    // if teardown hangs. Sync + bounded (a handful of tiny /proc reads) —
+    // it cannot meaningfully delay arming the watchdog below.
+    shutdown_forensics::log_shutdown_forensics(signal_name);
+
+    // SAFE-11 fail-safe watchdog: arm the hard timeout THE INSTANT the signal
+    // arrives (not at process boot — a long-lived server must never carry a
+    // ticking bomb while just serving requests). If the graceful sequence
+    // below (WS drain, then `registry.kill_all()` + every fresh-agent
+    // sidecar's `shutdown()`) hasn't exited the process by the time this
+    // fires, something hung — log it and force-exit nonzero rather than
+    // leave the operator's terminal blocked forever.
+    tokio::spawn(async {
+        tokio::time::sleep(SHUTDOWN_HARD_TIMEOUT).await;
+        eprintln!(
+            "freshell-server: graceful shutdown exceeded {SHUTDOWN_HARD_TIMEOUT:?}; force-exiting"
+        );
+        std::process::exit(1);
+    });
+
+    // Close every live WS connection with `4009 "Server shutting down"`
+    // (ws-handler.ts:3843 parity) and give the close frames a beat to flush
+    // before axum tears the listener down.
+    notify_ws.notify_waiters();
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+}
+
+/// S1 fix: rewrite a bare `application/json` response Content-Type to the
+/// original's exact `application/json; charset=utf-8` (Express's `res.json`
+/// always emits the charset suffix; axum's `Json` extractor does not). Applied
+/// as a global response-mapping layer so no individual handler has to remember
+/// it. Idempotent: a response that already carries a charset (or isn't JSON at
+/// all, e.g. the SPA/static responses) passes through unchanged.
+async fn ensure_json_charset(mut response: axum::response::Response) -> axum::response::Response {
+    use axum::http::{header, HeaderValue};
+    let is_bare_json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        == Some("application/json");
+    if is_bare_json {
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+    }
+    response
+}
+
+/// Default/weak `AUTH_TOKEN` values the original refuses to start with
+/// (`server/auth.ts` `DEFAULT_BAD_TOKENS`, exact set, case-insensitive).
+const DEFAULT_BAD_TOKENS: [&str; 4] = ["changeme", "default", "password", "token"];
+
+/// SAFE-01 startup hardening (mirrors `server/auth.ts#validateStartupSecurity`,
+/// called from the `AUTH_TOKEN` env read above). Checked in the original's
+/// order — empty, then too short, then default/weak — with one deliberate
+/// addition: a whitespace-only token is rejected even if it is >= 16
+/// characters. The original's own check (`!token`) is JS-falsy-only, so
+/// `"                "` (16 spaces) would pass it; a whitespace secret is
+/// never an effective one, so this crate closes that gap rather than port it.
+fn validate_auth_token(token: &str) -> Result<(), String> {
+    if token.trim().is_empty() {
+        return Err(
+            "AUTH_TOKEN is required. Refusing to start without authentication.".to_string(),
+        );
+    }
+    if token.len() < 16 {
+        return Err("AUTH_TOKEN is too short. Use at least 16 characters.".to_string());
+    }
+    if DEFAULT_BAD_TOKENS.contains(&token.to_lowercase().as_str()) {
+        return Err(
+            "AUTH_TOKEN appears to be a default/weak value. Refusing to start.".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Resolve the port to bind. Mirrors `server/index.ts`: `PORT` env or 3001.
+fn resolve_port() -> u16 {
+    std::env::var("PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(3001)
+}
+
+/// Resolve the WS keepalive ping interval, milliseconds. Mirrors
+/// `ws-handler.ts:224`: `Number(process.env.PING_INTERVAL_MS || 30_000)`.
+fn resolve_ping_interval_ms() -> u64 {
+    std::env::var("PING_INTERVAL_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30_000)
+}
+
+/// SAFE-05: resolve the hello-handshake deadline, milliseconds. Mirrors
+/// `ws-handler.ts:223`: `helloTimeoutMs: Number(process.env.HELLO_TIMEOUT_MS
+/// || 5_000)`.
+fn resolve_hello_timeout_ms() -> u64 {
+    std::env::var("HELLO_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(5_000)
+}
+
+/// SAFE-06: resolve the inbound WS frame/message size bound. Mirrors
+/// `ws-handler.ts:226`: `wsMaxPayloadBytes: Number(process.env.WS_MAX_PAYLOAD_BYTES
+/// || 16 * 1024 * 1024)`.
+fn resolve_ws_max_payload_bytes() -> usize {
+    std::env::var("WS_MAX_PAYLOAD_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(16 * 1024 * 1024)
+}
+
+/// SAFE-03: resolve the WS Origin allow-list from process env, mirroring
+/// `server/auth.ts#parseAllowedOrigins` (`ALLOWED_ORIGINS`) plus
+/// `server/network-manager.ts`'s user-facing `EXTRA_ALLOWED_ORIGINS` knob
+/// (see [`freshell_ws::origin`]).
+fn resolve_allowed_origins() -> Vec<String> {
+    freshell_ws::origin::resolve_allowed_origins(
+        std::env::var("ALLOWED_ORIGINS").ok().as_deref(),
+        std::env::var("EXTRA_ALLOWED_ORIGINS").ok().as_deref(),
+    )
+}
+
+/// Resolve the bind host, faithfully to `server/get-network-host.ts`:
+/// an explicit `FRESHELL_BIND_HOST` (`0.0.0.0`/`127.0.0.1`) wins; then the
+/// persisted `settings.network` when `configured: true` (NET-02/06 restart
+/// truthfulness — a disable that persisted loopback survives a restart);
+/// otherwise **on WSL bind `0.0.0.0`** so the Windows host (browser / the
+/// legacy Electron app) can reach the server across the WSL2 NAT boundary —
+/// "not remote access, basic WSL2 functionality"
+/// (get-network-host.ts:11-13,40-42); else the config host hint, the `HOST`
+/// env fallback, and finally `127.0.0.1`.
+///
+/// NOTE: the harness always forces `FRESHELL_BIND_HOST=127.0.0.1` for test
+/// isolation — which this still honors (it outranks the persisted config),
+/// so T0/T1/T2/T3 remain loopback and unaffected.
+fn resolve_bind_host(network: &freshell_protocol::settings::SettingsNetwork) -> String {
+    let is_wsl = is_wsl_proc(read_proc_version().as_deref());
+    freshell_platform::network::resolve_bind_host(
+        &freshell_platform::RealEnv,
+        is_wsl,
+        network::boot_bind_config(network),
+    )
+}
+
+/// Resolve the isolated home whose `.freshell/config.json` supplies the network
+/// overlay. `FRESHELL_HOME` takes precedence over `HOME` (matches the harness,
+/// which sets both to the same temp dir).
+/// TERM-15: resolve a RESUMED amplifier terminal's session id to its
+/// `events.jsonl` — one bounded walk of `<amplifier_home>/projects/*/sessions/
+/// <id>/events.jsonl` at terminal-create time (the session dir already exists
+/// for a resume; fresh sessions get their path from the locator association
+/// instead). `None` when the dir/file doesn't exist — the activity hub then
+/// simply runs the PTY-only provisional lane for that terminal.
+fn resolve_amplifier_events_path(projects_root: &Path, session_id: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(projects_root).ok()?;
+    for entry in entries.flatten() {
+        let candidate = entry
+            .path()
+            .join("sessions")
+            .join(session_id)
+            .join("events.jsonl");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Wire error code for a provider-error summary. Node preserves the ORIGINAL
+/// `cause.code` VERBATIM (`ClaudeTranscriptLocatorError`,
+/// `claude-transcript-locator.ts:19-27`): EPERM stays EPERM, EIO stays EIO.
+/// So derive the symbolic errno name from the RAW OS errno — do NOT map from
+/// `ErrorKind`, which would collapse EPERM into EACCES and drop EIO/EMFILE
+/// entirely.
+#[cfg(unix)]
+fn errno_code(err: &std::io::Error) -> Option<String> {
+    let raw = err.raw_os_error()?;
+    let name = match raw {
+        libc::EACCES => "EACCES",
+        libc::EPERM => "EPERM",
+        libc::ENOENT => "ENOENT",
+        libc::ENOTDIR => "ENOTDIR",
+        libc::EIO => "EIO",
+        libc::EMFILE => "EMFILE",
+        libc::ENFILE => "ENFILE",
+        libc::ELOOP => "ELOOP",
+        libc::ENAMETOOLONG => "ENAMETOOLONG",
+        libc::EBADF => "EBADF",
+        libc::EINVAL => "EINVAL",
+        _ => return None, // unknown errno ⇒ omit code, keep the message
+    };
+    Some(name.to_string())
+}
+
+/// Non-unix fallback: `raw_os_error()` is a Win32 code there, not an errno;
+/// map the coarse kinds Node's libuv also names. (The resolve fallbacks'
+/// primary target is unix; parity of the fine-grained codes is a unix
+/// concern.)
+#[cfg(not(unix))]
+fn errno_code(err: &std::io::Error) -> Option<String> {
+    match err.kind() {
+        std::io::ErrorKind::PermissionDenied => Some("EACCES".to_string()),
+        std::io::ErrorKind::NotFound => Some("ENOENT".to_string()),
+        _ => None,
+    }
+}
+
+fn resolve_home() -> Option<PathBuf> {
+    std::env::var("FRESHELL_HOME")
+        .ok()
+        .or_else(|| std::env::var("HOME").ok())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// The `homeDir` wire field for `POST /api/sessions/resolve`. Node sends
+/// `os.homedir()` (`sessions-router.ts:306-314`) — the USER's home, which on
+/// Windows is `USERPROFILE`-backed and on POSIX is HOME (set and non-empty)
+/// else the passwd-entry home. Resolved via the SAME
+/// `session_directory::provider_home()` helper the session index sources use
+/// (it implements exactly those platform semantics). Do NOT reuse
+/// `resolve_home()`: it prefers `FRESHELL_HOME`, a config/storage root that
+/// can differ from the real home, and the dialog would prefill a cwd-less
+/// resume into the wrong directory.
+fn resolve_wire_home_dir() -> Option<Arc<String>> {
+    session_directory::provider_home().map(|h| Arc::new(h.to_string_lossy().into_owned()))
+}
+
+/// The production claude exact-id fallback body (`crate::resolve::ClaudeLocator`):
+/// the CHECKED locator over Node's authoritative two layouts (direct +
+/// `<parent>/subagents/<id>.jsonl`) with the CHECKED bounded cwd reader —
+/// read errors REPORT as `Err(ProviderFailure)` carrying the symbolic errno
+/// (Node preserves `cause.code` verbatim). Node's locator lowercases the id
+/// before scanning and returns the lowercased id — mirrored here.
+///
+/// Root resolution is Node-parity (`server/claude-home.ts:4-7` +
+/// `providers/claude.ts:524-535`): `CLAUDE_HOME` (non-empty) else
+/// `<home>/.claude`, joined with `projects` — the SAME
+/// `session_directory::provider_home()` root the session index uses (Node
+/// `os.homedir()` platform semantics: USERPROFILE on Windows, where Tauri
+/// deliberately leaves HOME unset; on POSIX HOME when set and non-empty,
+/// else the passwd-entry home — USERPROFILE is never consulted there).
+/// Note CLAUDE_HOME alone suffices even when no home resolves (Node's
+/// `getClaudeHome()` honors it directly); no root ⇒ `Ok(None)`, a miss.
+/// Deliberately NOT `claude_home_candidates()`: its extra
+/// CLAUDE_CONFIG_DIR/bare-CLAUDE_HOME roots would expose transcripts from
+/// roots Node never searches.
+fn resolve_claude_exact_id_fallback(
+    session_id: &str,
+) -> Result<
+    Option<freshell_sessions::resume_resolve::ClaudeTranscriptHit>,
+    freshell_sessions::resume_resolve::ProviderFailure,
+> {
+    let lowered = session_id.to_ascii_lowercase();
+    let claude_home = match std::env::var("CLAUDE_HOME").ok().filter(|v| !v.is_empty()) {
+        Some(v) => Some(std::path::PathBuf::from(v)),
+        None => session_directory::provider_home().map(|h| h.join(".claude")),
+    };
+    let roots: Vec<std::path::PathBuf> = match claude_home {
+        Some(h) => vec![h.join("projects")],
+        None => return Ok(None),
+    };
+    match freshell_freshagent::locate_transcript_checked(&roots, &lowered) {
+        Ok(Some(path)) => match freshell_freshagent::transcript_cwd_checked(&path) {
+            Ok(cwd) => Ok(Some(
+                freshell_sessions::resume_resolve::ClaudeTranscriptHit {
+                    cwd,
+                    session_id: lowered,
+                },
+            )),
+            Err(e) => Err(freshell_sessions::resume_resolve::ProviderFailure {
+                code: errno_code(&e),
+                message: format!("Claude transcript read failed: {e}"),
+            }),
+        },
+        Ok(None) => Ok(None),
+        Err(e) => Err(freshell_sessions::resume_resolve::ProviderFailure {
+            code: errno_code(&e),
+            message: format!("Claude transcript scan failed: {e}"),
+        }),
+    }
+}
+
+/// P1.8 tombstone-deletion gate (V10.md): `true` ONLY when a DIRECT
+/// filesystem check by provider path convention finds no transcript.
+/// Mirror each provider's on-disk convention from its freshell-sessions
+/// source (claude discover: directory_index.rs:206; codex walk: :375 with
+/// filename-UUID extraction :414-421; amplifier: amplifier.rs session dirs).
+/// Providers without a cheap direct check (opencode: sqlite-backed) answer
+/// `false` — deletion deferred, never risked. Unknown providers: `false`.
+fn transcript_definitively_absent(
+    home: &std::path::Path,
+    provider: &str,
+    session_id: &str,
+) -> bool {
+    use freshell_sessions::provider_layout::ProviderLayout;
+    match provider {
+        "claude" => {
+            // ~/.claude/projects/<proj>/<session_id>.jsonl — any match means present.
+            let projects = freshell_sessions::provider_layout::ClaudeLayout
+                .session_root(&session_directory::claude_home(home));
+            let Ok(dirs) = std::fs::read_dir(&projects) else {
+                return false; // unreadable => defer
+            };
+            for entry in dirs {
+                let Ok(entry) = entry else {
+                    return false; // per-entry read error => defer
+                };
+                let candidate = entry.path().join(format!("{session_id}.jsonl"));
+                match std::fs::metadata(&candidate) {
+                    Ok(meta) if meta.is_file() => return false, // present => never delete
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // definitely not here
+                    Err(_) => return false, // couldn't tell (e.g. unreadable subdir) => defer
+                }
+            }
+            true
+        }
+        "codex" => {
+            // ~/.codex/sessions/** rollout files carry the session UUID in the
+            // filename — walk and match (bounded: sessions tree only).
+            let root = freshell_sessions::provider_layout::CodexLayout
+                .session_root(&session_directory::codex_home(home));
+            if !root.is_dir() {
+                return false; // unreadable/missing home => defer
+            }
+            !walk_contains_filename_fragment(&root, session_id)
+        }
+        "amplifier" => {
+            // <amplifier_home>/projects/<slug>/sessions/<session_id>/ — the
+            // session dir named by session id. Mirrors the SAME
+            // `amplifier_home` resolution (`$FRESHELL_AMPLIFIER_HOME` used
+            // as-is when set and non-empty, else `<home>/.amplifier`;
+            // `AMPLIFIER_HOME` is never consulted broker-side) main.rs
+            // already computes for the `AmplifierSource` construction above.
+            let projects = freshell_sessions::provider_layout::AmplifierLayout
+                .session_root(&freshell_sessions::amplifier::amplifier_home(home));
+            let Ok(dirs) = std::fs::read_dir(&projects) else {
+                return false; // unreadable => defer
+            };
+            for entry in dirs {
+                let Ok(entry) = entry else {
+                    return false; // per-entry read error => defer
+                };
+                let candidate = entry.path().join("sessions").join(session_id);
+                match std::fs::metadata(&candidate) {
+                    Ok(meta) if meta.is_dir() => return false, // present => never delete
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // definitely not here
+                    Err(_) => return false, // couldn't tell (e.g. unreadable subdir) => defer
+                }
+            }
+            true
+        }
+        _ => false, // opencode (sqlite) + unknown providers: defer deletion
+    }
+}
+
+/// Bounded recursive walk: does any filename under `root` contain `fragment`?
+/// Deletion-defer bias (V10.md): ANY read error answers `true` ("assume a
+/// match exists"), so [`transcript_definitively_absent`] reports the
+/// transcript as present and tombstone deletion is deferred, never risked.
+fn walk_contains_filename_fragment(root: &std::path::Path, fragment: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return true; // read error => "found" => outer fn defers deletion
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true; // read error => defer, same as above
+        };
+        let path = entry.path();
+        if path.is_dir() {
+            if walk_contains_filename_fragment(&path, fragment) {
+                return true;
+            }
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains(fragment))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Legacy `platform-router.ts:15-18` parity for the kilroy feature flag:
+/// `isTruthy(process.env.KILROY_ENABLED)` is EXACTLY
+/// `value === '1' || value.toLowerCase() === 'true'` — the validated truthy set is
+/// {'1', any case variant of 'true'}; unset/empty/'0'/'yes'/'on' are all FALSE (the
+/// 'yes'-accepting helper in `server/cli/index.ts:106` is a DIFFERENT function —
+/// do NOT mirror it). A non-Unicode value reads as Err → FALSE (Node would see
+/// replacement characters, never '1'/'true').
+fn kilroy_enabled_flag() -> bool {
+    match std::env::var("KILROY_ENABLED") {
+        Ok(value) => value == "1" || value.to_lowercase() == "true",
+        Err(_) => false,
+    }
+}
+
+/// Build the `{ platform, availableClis, hostName, featureFlags }` payload the
+/// SPA reads on boot (mirrors `server/platform-router.ts`). `platform` is the
+/// real `/proc/version`-derived string (`detect_platform_proc`); `availableClis`
+/// is the extension-driven `which`/`where.exe` detection result (Follow-up 3.19,
+/// so the PanePicker surfaces the real coding-CLI agents); `featureFlags.kilroy`
+/// is the legacy `isTruthy(process.env.KILROY_ENABLED)` read
+/// (`platform-router.ts:20-29` → [`kilroy_enabled_flag`]); `featureFlags.aiEnabled`
+/// mirrors `AI_CONFIG.enabled()` (`server/ai-prompts.ts:12-15`) — since Task 2
+/// backed by [`ai_title::AiKeyCell::enabled`] (env boot precedence + settings
+/// key fallback), not the raw env var alone.
+/// `featureFlags.sessionResolve` is the unconditional literal both servers
+/// declare now that the hardened resolve response surface
+/// (degraded/providerErrors/unsearchedProviders/homeDir, warming default)
+/// landed — see `docs/plans/2026-07-30-rust-resolve-parity-hardened.md`
+/// Tasks 2-6 (SYNC-06). `featureFlags.hostStatsAvailable` mirrors Node's
+/// `process.platform !== 'win32'` as boot-static `cfg!(not(target_os =
+/// "windows"))`.
+fn build_platform_payload(
+    available_clis: serde_json::Value,
+    ai_enabled: bool,
+) -> serde_json::Value {
+    let platform = detect_platform_proc(host_os_live(), read_proc_version().as_deref());
+    // Boot-static host-stats availability (mirrors Node's
+    // `process.platform !== 'win32'` in `detectFeatureFlags`): the collector
+    // reads /proc + /sys, so Windows reports `false`; no /proc probe at boot —
+    // readers degrade to `available: false` on failure.
+    let host_stats_available = cfg!(not(target_os = "windows"));
+    serde_json::json!({
+        "platform": platform,
+        "availableClis": available_clis,
+        "hostName": read_host_name(),
+        "featureFlags": { "kilroy": kilroy_enabled_flag(), "aiEnabled": ai_enabled, "sessionResolve": true, "hostStatsAvailable": host_stats_available },
+    })
+}
+
+/// The OS hostname (mirrors `detectHostName`). `/proc/sys/kernel/hostname` →
+/// `$HOSTNAME` → `"localhost"`.
+fn read_host_name() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
+/// Resolve the built `dist/client` directory to serve the SPA from. Mirrors the
+/// original's `path.join(distRoot, 'client')`, with an explicit override for the
+/// oracle harness:
+/// * `FRESHELL_CLIENT_DIR` (explicit) →
+/// * `<worktree>/dist/client` (compile-time fallback, for a local run) →
+/// * `./dist/client` (cwd-relative last resort).
+fn resolve_client_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("FRESHELL_CLIENT_DIR") {
+        return PathBuf::from(dir);
+    }
+    let compiled = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dist/client");
+    if compiled.exists() {
+        return compiled;
+    }
+    PathBuf::from("dist/client")
+}
+
+/// SESSION-09 sweep cadence (identity ticker fallback). The sessions sweep is
+/// now event-driven: `SessionWatcher` feeds inotify events into the index's
+/// dirty-marking, and `subscribe_changes()` wakes the sweep loop on each
+/// refresh. This interval serves as an identity-ticker fallback — it fires
+/// a `snapshot()` every 2s so that terminal identity and session metadata
+/// changes propagate to the sidebar without waiting for the index's
+/// 15-minute TTL (`DEFAULT_TTL`). The watcher handles the ~98.2% of
+/// filesystem events it catches; this ticker and the TTL cover the rest.
+const SESSIONS_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2000);
+
+/// The opencode/codex locators' poll cadence. Well under their ~2s
+/// correlation windows so a session row/rollout that appears anywhere in a
+/// window is observed well before that window closes -- the
+/// `freshell_sessions::opencode_locator` module doc has the full
+/// poll-vs-watcher rationale. (Renamed from AMPLIFIER_LOCATOR_SWEEP_INTERVAL
+/// when the amplifier correlation-window locator was deleted, kata qmpk.)
+const LOCATOR_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// 2s cadence against a 10s grace: prompt enough to warn within ~12s of
+/// create, cheap enough to never matter. (The deleted amplifier locator
+/// ticked at 150ms because it was correlating filesystem events; the alarm
+/// has no such need.)
+const IDENTITY_INVARIANT_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// SESSION-09 (live sidebar updates): the signature a sessions-sweep tick
+/// compares against the previous tick's signature to decide whether a
+/// `sessions.changed` broadcast is warranted: `(corpus size, max
+/// lastActivityAt)`. Cheap -- one pass over the already-parsed
+/// `IndexedSession`s the sweep's `snapshot()` call already produced, no
+/// extra I/O.
+///
+/// ROLE (post-D1-3): this triple gates ONLY the 2s identity ticker. The
+/// change-generation wake arm broadcasts unconditionally — a generation
+/// advance already means "a refresh republished changed content", which
+/// this triple provably under-detects (title/summary edits beneath a
+/// static global max).
+///
+/// BOTH halves matter; max-`lastActivityAt` ALONE is not sufficient. A real
+/// session-directory corpus routinely has some provider already sitting at
+/// a later `lastActivityAt` than a session that just landed (e.g. a
+/// restored/imported claude session appearing alongside codex/opencode
+/// sessions dated further ahead -- exactly the shape
+/// `session-directory-matrix.spec.ts`'s seeded corpus has). In that case the
+/// max never moves, so a max-only token would silently swallow a real
+/// corpus change (caught by `new_older_session_file_is_still_detected_as_a_change`
+/// below -- this is not a hypothetical). Including the item COUNT catches
+/// any add/remove regardless of the new item's own timestamp; the max
+/// half still catches same-count changes (a new turn appended to an
+/// existing session, bumping ITS `lastActivityAt` without changing corpus
+/// size).
+///
+/// KNOWN GAPS (this sweep's signature ALONE is blind to all three; see the
+/// per-item notes below for what closes or accepts each one):
+///
+/// 1. **Override-only changes (title/summary/archived/deleted overrides) --
+///    CLOSED at the write site, not here.** `IndexedSession` carries no
+///    override fields at all, so a rename/archive/delete PATCH never moves
+///    this signature. Reviewer finding (Important): legacy broadcasts
+///    `sessions.changed` on ANY sidebar-visible change (its differ,
+///    `hasSessionDirectorySnapshotChange` / `projection.ts:23`, diffs the
+///    FULL comparable snapshot including `archived`/`title`, re-run on
+///    every `codingCliIndexer.refresh()` the legacy PATCH route triggers).
+///    This port closes the gap at the SOURCE instead of widening the
+///    sweep's signature: `sessions::patch_session` broadcasts
+///    `sessions.changed` directly on a successful override write, sharing
+///    this SAME `sessions_revision` counter (see
+///    `sessions::SessionsState::sessions_revision`'s doc comment). Proven
+///    by `patch_rename_broadcasts_sessions_changed_with_increased_revision`
+///    and `patch_archive_broadcasts_sessions_changed_and_revision_is_monotonic`
+///    in `sessions.rs`.
+///
+/// 2. **Delete+add in the SAME tick, count-neutral AND max-neutral --
+///    CLOSED on the generation-advance wake.** If one session is deleted
+///    and a different one added within the same sweep window, leaving both
+///    `len()` and the max `lastActivityAt` unchanged, this signature cannot
+///    distinguish the pre/post corpus — but the index's change generation
+///    DOES advance on any republished content, and the `changed()` wake arm
+///    broadcasts on the generation advance itself (delta review D1-3), so
+///    watcher-driven changes never depend on this triple. The triple still
+///    gates the 2s identity ticker (which fires unconditionally).
+///
+/// 3. **External-process override edits (bake-in with the legacy Node
+///    server writing the SAME `config.json`) -- ACCEPTED for bake-in.** The
+///    `SettingsStore`'s mtime-checked freshness reload
+///    (`maybe_reload_overrides`, `settings_store.rs`) adopts an
+///    externally-written override into THIS process's in-memory settings
+///    on the next override READ, but that reload is READ-path-triggered
+///    and does not itself broadcast -- so a bake-in-partner write to
+///    `config.json` (not routed through THIS process's `patch_session`)
+///    updates what the next request sees without pushing a
+///    `sessions.changed` frame to already-connected WS clients. Only
+///    writes that go through `sessions::patch_session` on THIS process
+///    close gap 1 above; a foreign process's direct file write does not.
+///    Accepted: bake-in is a transitional deployment mode, not the target
+///    single-process architecture.
+///
+/// 4. **Terminal identity-registry changes (locator adoption, terminal open/close) --
+///    CLOSED by folding terminal identity into the digest.** The identity
+///    registry tracks live coding-CLI panes; when a new pane opens, a locator
+///    session-id is adopted (recorded on the terminal), or a pane exits, the
+///    registry changes but the disk corpus does NOT. This signature now
+///    includes a (terminal_id, provider, session_id) digest (NOT updated_at or
+///    cwd; see identity_updated_at_alone_does_not_move_the_sweep_signature and
+///    the test comments) so locator adoptions and terminal state changes push
+///    sessions.changed within one 2s tick.
+///
+/// No committed provider parser currently allows a title-only rename with
+/// no new turn to ALSO leave the sweep signature blind at the source-file
+/// level (a title is always derived from message content that also carries
+/// its own timestamp) -- gap 1 above is about the OVERRIDE layer
+/// (`sessionOverrides` in `config.json`), which is orthogonal to the
+/// parsed-file layer this signature covers. Legacy's fuller comparison
+/// (`hasSessionDirectorySnapshotChange`,
+/// `server/sessions-sync/service.ts`) additionally hashes file
+/// content/mtime to catch this class of edit; that fuller comparison is
+/// intentionally NOT ported here.
+/// Signature of the session-directory view as the sidebar sees it:
+/// disk corpus (count + max activity) PLUS a digest of the live identity
+/// registry (terminal_id, provider, session_id triples -- NOT updated_at,
+/// see identity_updated_at_alone_does_not_move_the_sweep_signature).
+fn sessions_sweep_signature(
+    items: &[freshell_sessions::directory_index::IndexedSession],
+    identities: &[freshell_ws::identity::TerminalIdentity],
+) -> (usize, i64, u64) {
+    use std::hash::{Hash, Hasher};
+    let max_last_activity_at = items.iter().map(|s| s.last_activity_at).max().unwrap_or(0);
+    let mut refs: Vec<(&str, &str, &str)> = identities
+        .iter()
+        .map(|i| {
+            (
+                i.terminal_id.as_str(),
+                i.provider.as_deref().unwrap_or(""),
+                i.session_id.as_deref().unwrap_or(""),
+            )
+        })
+        .collect();
+    refs.sort_unstable();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    refs.hash(&mut hasher);
+    (items.len(), max_last_activity_at, hasher.finish())
+}
+
+/// SESSION-09: event-driven sweep that detects session-directory changes and
+/// broadcasts `sessions.changed` so the sidebar refetches its active session
+/// window WITHOUT a page reload.
+///
+/// Two wake sources:
+/// 1. `subscribe_changes()` — the SessionWatcher feeds inotify events into
+///    SessionIndex::mark_dirty, which bumps the change generation. This
+///    covers ~98.2% of file changes with sub-second latency.
+/// 2. A 2s identity ticker — terminal identity changes (provider/session_id
+///    bindings) don't flow through the file watcher, so we poll for them.
+///
+/// NOTE: The FENCE prohibiting filesystem watchers in this function is now
+/// superseded — the SessionWatcher (started above) feeds inotify events
+/// into SessionIndex::mark_dirty, and this sweep subscribes to
+/// snapshot-change notifications instead of polling.
+fn spawn_sessions_sweep(
+    session_index: Arc<freshell_sessions::directory_index::SessionIndex>,
+    ws_state: WsState,
+    identity: freshell_ws::identity::TerminalIdentityRegistry,
+    _interval: std::time::Duration, // kept for API compat; ignored
+) {
+    tokio::spawn(async move {
+        let mut rx = session_index.subscribe_changes();
+        let mut last_signature =
+            sessions_sweep_signature(&session_index.snapshot().await, &identity.list());
+
+        // Also check identity changes on a slower interval (identities
+        // don't flow through the file watcher).
+        let mut identity_ticker = tokio::time::interval(std::time::Duration::from_secs(2));
+        identity_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                result = rx.changed() => {
+                    if result.is_err() {
+                        break; // sender dropped
+                    }
+                    let items = session_index.snapshot().await;
+                    // D1-3 (amplifier watch-reduction delta review): a
+                    // `changed()` wake means the index's change generation
+                    // ADVANCED, which happens only when a refresh actually
+                    // republished changed content. Broadcast unconditionally
+                    // here: the (count, max, digest) triple is an
+                    // UNDER-approximation of "sidebar-visible change" — a
+                    // title/summary edit with the global max timestamp held
+                    // static (e.g. the 15s subagent cadence's discover
+                    // picking up one subagent row edit while another row
+                    // holds the max) leaves the triple untouched, and
+                    // suppressing here would break the cadence's 15s
+                    // freshness promise indefinitely. The triple's
+                    // suppression stays ONLY on the identity ticker below,
+                    // which fires unconditionally every 2s and therefore
+                    // NEEDS a change gate.
+                    last_signature = sessions_sweep_signature(&items, &identity.list());
+                    freshell_ws::terminal::broadcast_sessions_changed(&ws_state);
+                }
+                _ = identity_ticker.tick() => {
+                    // Check if identity changes alone moved the signature.
+                    // (File-driven changes never reach this arm first —
+                    // they broadcast at the generation advance above.)
+                    let items = session_index.snapshot().await;
+                    let signature = sessions_sweep_signature(&items, &identity.list());
+                    if signature != last_signature {
+                        last_signature = signature;
+                        freshell_ws::terminal::broadcast_sessions_changed(&ws_state);
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod sessions_sweep_tests {
+    use super::*;
+    use freshell_sessions::directory_index::{
+        ClaudeSource, IndexedSession, SessionIndex, SessionSource,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        std::env::temp_dir().join(format!(
+            "freshell-sessions-sweep-{label}-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ))
+    }
+
+    /// A minimal `<home>/.claude/projects/-p/<name>.jsonl` layout (same
+    /// two-level shape `freshell_sessions::directory_index`'s own
+    /// `claude_home_with` test helper uses -- that one is private to its
+    /// crate, so this is a from-scratch equivalent, not a reuse). Each
+    /// session gets ONE `user`-typed line carrying a canonical-shaped
+    /// (36-char, dashed, v4) `sessionId`, a real `cwd` (required -- R10b
+    /// excludes cwd-less files), and an explicit `timestamp` so the test
+    /// fully controls `lastActivityAt` instead of depending on committed
+    /// fixture content.
+    fn write_claude_session(claude_home: &Path, session_id: &str, cwd: &str, timestamp: &str) {
+        let project = claude_home.join("projects").join("-p");
+        std::fs::create_dir_all(&project).unwrap();
+        let line = serde_json::json!({
+            "type": "user",
+            "sessionId": session_id,
+            "cwd": cwd,
+            "message": { "role": "user", "content": "hello" },
+            "timestamp": timestamp,
+        })
+        .to_string();
+        std::fs::write(
+            project.join(format!("{session_id}.jsonl")),
+            format!("{line}\n"),
+        )
+        .unwrap();
+    }
+
+    fn mk_indexed(last_activity_at: i64) -> IndexedSession {
+        IndexedSession {
+            session_id: "s".to_string(),
+            legacy_session_id: None,
+            provider: "claude".to_string(),
+            project_path: "/tmp".to_string(),
+            title: None,
+            title_provider_generated: false,
+            summary: None,
+            first_user_message: None,
+            title_source: None,
+            last_activity_at,
+            created_at: None,
+            cwd: Some("/tmp".to_string()),
+            git_branch: None,
+            is_subagent: false,
+            is_non_interactive: false,
+            source_file: None,
+            token_usage: None,
+        }
+    }
+
+    /// The undocumented fourth gap, closed: the sweep signature must move when
+    /// the identity registry changes -- a locator adoption (session_id appears
+    /// on a live terminal) alters the session-directory join result, so the
+    /// sidebar needs a sessions.changed push.
+    #[test]
+    fn identity_registry_changes_move_the_sweep_signature() {
+        let identity = freshell_ws::identity::TerminalIdentityRegistry::new();
+        let items: Vec<IndexedSession> = Vec::new();
+
+        let empty = sessions_sweep_signature(&items, &identity.list());
+
+        identity.upsert("term-1", Some("codex"), None, None, 1_000);
+        let with_terminal = sessions_sweep_signature(&items, &identity.list());
+        assert_ne!(
+            empty, with_terminal,
+            "a new live coding terminal must move the signature"
+        );
+
+        identity.upsert("term-1", Some("codex"), Some("thread-a"), None, 2_000);
+        let adopted = sessions_sweep_signature(&items, &identity.list());
+        assert_ne!(
+            with_terminal, adopted,
+            "locator adoption must move the signature"
+        );
+
+        identity.retire("term-1");
+        let retired = sessions_sweep_signature(&items, &identity.list());
+        assert_ne!(adopted, retired, "terminal exit must move the signature");
+    }
+
+    /// updated_at alone must NOT move the signature -- it changes on every
+    /// heartbeat-ish upsert and would turn the sweep into a 2s firehose.
+    #[test]
+    fn identity_updated_at_alone_does_not_move_the_sweep_signature() {
+        let identity = freshell_ws::identity::TerminalIdentityRegistry::new();
+        let items: Vec<IndexedSession> = Vec::new();
+        identity.upsert("term-1", Some("codex"), Some("thread-a"), None, 1_000);
+        let a = sessions_sweep_signature(&items, &identity.list());
+        identity.upsert("term-1", Some("codex"), Some("thread-a"), None, 9_000);
+        let b = sessions_sweep_signature(&items, &identity.list());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn empty_snapshot_signature_is_zero_count_zero_activity() {
+        // Hash of an empty identity list is consistent but non-zero (it's the hash
+        // of an empty vec). The important assertion is that count and activity are zero.
+        let sig = sessions_sweep_signature(&[], &[]);
+        assert_eq!(sig.0, 0);
+        assert_eq!(sig.1, 0);
+    }
+
+    #[test]
+    fn signature_pairs_count_with_the_max_last_activity_at() {
+        let items = vec![mk_indexed(100), mk_indexed(500), mk_indexed(200)];
+        let sig = sessions_sweep_signature(&items, &[]);
+        assert_eq!(sig.0, 3);
+        assert_eq!(sig.1, 500);
+        // Hash component is stable but implementation-dependent; not asserted here
+    }
+
+    /// The scenario the sweep task depends on: writing a NEW session file
+    /// (with a later `lastActivityAt`) into the watched home changes the
+    /// signature on the next `SessionIndex::snapshot()` call. An explicit
+    /// zero TTL forces every `snapshot()` call to re-validate against disk
+    /// (no TTL window to wait out); the explicit `None` cache path keeps the
+    /// tempdir fixture isolated from the developer's persistent cache.
+    #[tokio::test]
+    async fn new_session_file_changes_the_signature() {
+        let claude_home = unique_temp_dir("advance").join(".claude");
+        write_claude_session(
+            &claude_home,
+            "11111111-1111-4111-8111-111111111111",
+            "/tmp/sweep-test/alpha",
+            "2025-01-01T00:00:00.000Z",
+        );
+        let index = SessionIndex::with_ttl_and_cache_path(
+            vec![Arc::new(ClaudeSource::new(claude_home.clone())) as Arc<dyn SessionSource>],
+            std::time::Duration::from_millis(0),
+            None,
+        );
+        let before = sessions_sweep_signature(&index.snapshot().await, &[]);
+        assert_ne!(
+            (before.0, before.1),
+            (0, 0),
+            "seed session should produce a nonzero signature"
+        );
+
+        // A second, distinct session with a LATER timestamp lands in the
+        // same watched home -- simulating a real provider write mid-session.
+        write_claude_session(
+            &claude_home,
+            "22222222-2222-4222-8222-222222222222",
+            "/tmp/sweep-test/beta",
+            "2025-01-02T00:00:00.000Z",
+        );
+        // Stale-while-revalidate (rust-tauri-port bounded-warm-sweep fix): the
+        // triggering `snapshot()` call may return the OLD signature
+        // immediately while the actual re-scan runs detached in the
+        // background -- poll until it settles instead of asserting on the
+        // immediate return value (the periodic `spawn_sessions_sweep` this
+        // mirrors already tolerates this same one-tick lag in production).
+        let mut after = sessions_sweep_signature(&index.snapshot().await, &[]);
+        for _ in 0..50 {
+            if after != before {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            after = sessions_sweep_signature(&index.snapshot().await, &[]);
+        }
+        assert_ne!(
+            after, before,
+            "signature should change after a new, later-activity session file appears (before={before:?}, after={after:?})"
+        );
+
+        std::fs::remove_dir_all(claude_home.parent().unwrap()).ok();
+    }
+
+    /// The corpus-composition bug this reproduces: a REAL session-directory
+    /// mix routinely has SOME provider already at a later `lastActivityAt`
+    /// than a brand-new session that just landed (e.g. codex/opencode seeds
+    /// dated ahead of a freshly-restored/imported claude session). A pure
+    /// max-`lastActivityAt` token would NOT change here, silently swallowing
+    /// a real corpus change. The sweep signature must also account for
+    /// corpus SIZE so a new session is detected even when its own activity
+    /// timestamp is not the new maximum.
+    #[tokio::test]
+    async fn new_older_session_file_is_still_detected_as_a_change() {
+        let claude_home = unique_temp_dir("older").join(".claude");
+        // Seed session is ALREADY the max-activity session in the corpus.
+        write_claude_session(
+            &claude_home,
+            "44444444-4444-4444-8444-444444444444",
+            "/tmp/sweep-test/already-latest",
+            "2030-01-01T00:00:00.000Z",
+        );
+        let index = SessionIndex::with_ttl_and_cache_path(
+            vec![Arc::new(ClaudeSource::new(claude_home.clone())) as Arc<dyn SessionSource>],
+            std::time::Duration::from_millis(0),
+            None,
+        );
+        let before = sessions_sweep_signature(&index.snapshot().await, &[]);
+
+        // A new session lands with an OLDER timestamp than the existing
+        // max -- e.g. a restored/imported session, or (as in the
+        // `session-directory-matrix` E2E corpus) a claude session seeded
+        // alongside codex/opencode sessions dated further ahead.
+        write_claude_session(
+            &claude_home,
+            "55555555-5555-4555-8555-555555555555",
+            "/tmp/sweep-test/new-but-older",
+            "2020-01-01T00:00:00.000Z",
+        );
+        // Stale-while-revalidate: poll until the detached background sweep
+        // settles (see `new_session_file_changes_the_signature`'s comment).
+        let mut after = sessions_sweep_signature(&index.snapshot().await, &[]);
+        for _ in 0..50 {
+            if after != before {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            after = sessions_sweep_signature(&index.snapshot().await, &[]);
+        }
+        assert_ne!(
+            after, before,
+            "a new session file must be detected as a change even when its own \
+             activity timestamp is older than an already-present session (before={before:?}, after={after:?})"
+        );
+
+        std::fs::remove_dir_all(claude_home.parent().unwrap()).ok();
+    }
+
+    /// The counterpart: an UNCHANGED home (no writes between sweeps) must
+    /// keep a stable signature -- the sweep must never broadcast spuriously.
+    #[tokio::test]
+    async fn unchanged_home_keeps_a_stable_signature() {
+        let claude_home = unique_temp_dir("stable").join(".claude");
+        write_claude_session(
+            &claude_home,
+            "33333333-3333-4333-8333-333333333333",
+            "/tmp/sweep-test/gamma",
+            "2025-01-01T00:00:00.000Z",
+        );
+        let index = SessionIndex::with_ttl_and_cache_path(
+            vec![Arc::new(ClaudeSource::new(claude_home.clone())) as Arc<dyn SessionSource>],
+            std::time::Duration::from_millis(0),
+            None,
+        );
+        let first = sessions_sweep_signature(&index.snapshot().await, &[]);
+        let second = sessions_sweep_signature(&index.snapshot().await, &[]);
+        assert_eq!(first, second, "an unchanged home must yield a stable token");
+
+        std::fs::remove_dir_all(claude_home.parent().unwrap()).ok();
+    }
+
+    /// Delta-review D1-3 (the demand-driven 15s amplifier subagent cadence's
+    /// promise vs the sweep's suppression predicate): when the sweep's wake
+    /// is an index change-GENERATION advance — a refresh that republished
+    /// content — `sessions.changed` must reach clients even when the
+    /// (count, max `lastActivityAt`, identity digest) triple did not move.
+    /// This test reproduces the finding directly: a title-only update to an
+    /// existing amplifier row (e.g. a subagent's title/summary edit) with
+    /// the corpus count static AND the global max timestamp held static by
+    /// an unrelated anchor row. Pre-fix the wake folded into
+    /// `signature == last_signature` and the broadcast was swallowed
+    /// indefinitely; post-fix the generation advance itself broadcasts.
+    /// Integration-level: drives the REAL `spawn_sessions_sweep` task
+    /// against a REAL `SessionIndex` (watcher marks → refresh → publish)
+    /// and observes the actual broadcast channel of a REAL `WsState`.
+    #[tokio::test]
+    async fn title_only_row_update_with_static_max_still_broadcasts_sessions_changed() {
+        use freshell_sessions::directory_index::FileStat;
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        /// In-memory corpus double: full control over (count, max, title)
+        /// with NO filesystem timing. `discover` reports the current
+        /// (mtime, size); `parse` materializes the row. A title flip bumps
+        /// the entry's mtime+size so the index's stat-driven change
+        /// detection re-parses it — mirroring a metadata rewrite on disk.
+        /// The corpus lives in its own Arc so the test can mutate it after
+        /// the source moves into the index.
+        struct FlipSource {
+            corpus: Arc<Mutex<HashMap<PathBuf, (i64, IndexedSession)>>>,
+        }
+        impl SessionSource for FlipSource {
+            fn discover(&self) -> Vec<FileStat> {
+                self.corpus
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(path, (mtime_ms, item))| FileStat {
+                        path: path.clone(),
+                        mtime_ms: *mtime_ms,
+                        // Size participates in the unchanged check; derive
+                        // it from content so a title flip always moves it.
+                        size: item.title.as_deref().unwrap_or("").len() as u64,
+                    })
+                    .collect()
+            }
+            fn parse(&self, path: &Path) -> Option<IndexedSession> {
+                Some(self.corpus.lock().unwrap().get(path)?.1.clone())
+            }
+            fn provider_name(&self) -> Option<&'static str> {
+                Some("amplifier")
+            }
+        }
+
+        let anchor_path = PathBuf::from("/flip/anchor");
+        let flipped_path = PathBuf::from("/flip/flipped");
+        let mut anchor = mk_indexed(9_000_000); // the global max holder — static forever
+        anchor.session_id = "anchor".to_string();
+        anchor.provider = "amplifier".to_string();
+        anchor.title = Some("anchor".to_string());
+        let mut flipped = mk_indexed(1_000); // strictly below the max, always
+        flipped.session_id = "flipped".to_string();
+        flipped.provider = "amplifier".to_string();
+        flipped.is_subagent = true; // the finding's subagent-row shape
+        flipped.title = Some("before".to_string());
+
+        let corpus = Arc::new(Mutex::new(HashMap::from([
+            (anchor_path, (100, anchor)),
+            (flipped_path.clone(), (100, flipped)),
+        ])));
+        let source = Arc::new(FlipSource {
+            corpus: Arc::clone(&corpus),
+        });
+        let index = Arc::new(SessionIndex::with_ttl_and_cache_path(
+            vec![source as Arc<dyn SessionSource>],
+            std::time::Duration::from_secs(3600),
+            None,
+        ));
+
+        // A REAL WsState (the sessions_prefs.rs harness literal, rerooted
+        // in-process): the sweep broadcasts through its shared channel.
+        let auth_token = Arc::new("tok".to_string());
+        let broadcast_tx = Arc::new(tokio::sync::broadcast::channel::<String>(16).0);
+        let mut broadcast_rx = broadcast_tx.subscribe();
+        let settings_json = serde_json::json!({
+            "ai": {},
+            "codingCli": { "enabledProviders": [], "mcpServer": true, "providers": {} },
+            "editor": { "externalEditor": "auto" },
+            "extensions": { "disabled": [] },
+            "freshAgent": { "defaultPlugins": [], "enabled": false, "providers": {} },
+            "logging": { "debug": false },
+            "network": { "configured": true, "host": "127.0.0.1" },
+            "panes": { "defaultNewPane": "ask" },
+            "safety": { "autoKillIdleMinutes": 15 },
+            "sidebar": {
+                "autoGenerateTitles": true,
+                "excludeFirstChatMustStart": false,
+                "excludeFirstChatSubstrings": []
+            },
+            "terminal": { "scrollback": 10000 }
+        });
+        let identity = freshell_ws::identity::TerminalIdentityRegistry::new();
+        let ws_state = WsState {
+            pane_ledger: std::sync::Arc::new(freshell_ws::pane_ledger::PaneLedger::disabled()),
+            layout: Default::default(),
+            identity: identity.clone(),
+            terminal_meta: Default::default(),
+            auth_token: Arc::clone(&auth_token),
+            server_instance_id: Arc::new("srv-test".to_string()),
+            boot_id: Arc::new("boot-test".to_string()),
+            settings: Arc::new(serde_json::from_value(settings_json.clone()).unwrap()),
+            handshake_settings: Arc::new(tokio::sync::RwLock::new(
+                serde_json::from_value(settings_json).unwrap(),
+            )),
+            broadcast_tx: Arc::clone(&broadcast_tx),
+            auto_resume_tx: tokio::sync::mpsc::unbounded_channel().0,
+            auto_resume_cancels: Default::default(),
+            fresh_codex: freshell_freshagent::FreshCodexState::new(
+                Arc::clone(&auth_token),
+                Arc::clone(&broadcast_tx),
+                serde_json::json!({ "freshAgent": { "enabled": false } }),
+            ),
+            fresh_claude: freshell_freshagent::FreshClaudeState::new(Arc::clone(&broadcast_tx)),
+            fresh_opencode: freshell_freshagent::FreshOpencodeState::new(
+                freshell_freshagent::FreshAgentState::new(auth_token, Arc::clone(&broadcast_tx)),
+            ),
+            registry: freshell_terminal::TerminalRegistry::new(),
+            shutdown: Arc::new(tokio::sync::Notify::new()),
+            tabs: freshell_ws::tabs::TabsRegistry::new(),
+            screenshots: freshell_ws::screenshot::ScreenshotBroker::new(Arc::clone(&broadcast_tx)),
+            subagent_interest: Default::default(),
+            host_stats: Default::default(),
+            terminals_revision: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            sessions_revision: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            cli_commands: Arc::new(Vec::new()),
+            ping_interval_ms: 30_000,
+            hello_timeout_ms: 5_000,
+            allowed_origins: Arc::new(freshell_ws::origin::default_allowed_origins()),
+            ws_max_payload_bytes: 16 * 1024 * 1024,
+            term09: freshell_ws::backpressure::Term09Config::default(),
+            create_protect: freshell_ws::create_limit::CreateProtectConfig::default(),
+            spawn_gate: std::sync::Arc::new(freshell_ws::spawn_gate::SpawnGate::new(4, 64)),
+            shutdown_started: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            create_dedupe: std::sync::Arc::new(freshell_ws::create_dedupe::CreateDedupe::default()),
+            config_fallback: None,
+            opencode_locator: None,
+            codex_locator: None,
+            activity: None,
+            session_existence: std::sync::Arc::new(freshell_ws::existence::NoIndexProbe::default()),
+            reconcile_deferral_budget_ms:
+                freshell_ws::reconcile::RECONCILE_DEFERRAL_BUDGET_MS_DEFAULT,
+            fresh_agent_respawn_counts: Default::default(),
+        };
+
+        let mut gen_rx = index.subscribe_changes();
+        spawn_sessions_sweep(
+            Arc::clone(&index),
+            ws_state,
+            identity,
+            std::time::Duration::from_secs(2),
+        );
+
+        // Settle the startup publish (the sweep's own cold snapshot), then
+        // drain any startup frame so the ONLY frame the assertion below can
+        // observe is the post-flip one.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), gen_rx.changed()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        while broadcast_rx.try_recv().is_ok() {}
+
+        // THE flip: title-only, mtime+size moved, count static, max held
+        // by the static anchor. Exactly the finding's swallowed-broadcast
+        // shape.
+        {
+            let mut corpus = corpus.lock().unwrap();
+            let entry = corpus.get_mut(&flipped_path).unwrap();
+            entry.0 += 1;
+            entry.1.title = Some("after".to_string());
+        }
+        // The cadence's mark, in miniature: watcher-equivalent provider
+        // dirty → refresh → publish.
+        index.mark_provider_dirty("amplifier");
+
+        // Both pre- and post-fix the generation MUST advance (the refresh
+        // republished); if it does not, the test is vacuous, not red.
+        tokio::time::timeout(std::time::Duration::from_secs(3), gen_rx.changed())
+            .await
+            .expect("the title-flip refresh must advance the change generation")
+            .unwrap();
+
+        // PRE-FIX: suppressed — (count=2, max=9_000_000, digest) identical,
+        // so the wake folded to a no-broadcast and this recv timed out.
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(3), broadcast_rx.recv())
+            .await
+            .expect(
+                "a generation advance must broadcast sessions.changed even \
+                     when (count, max, digest) is unchanged",
+            )
+            .expect("broadcast channel open");
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(v["type"], serde_json::json!("sessions.changed"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Save-and-restore guard for one env var (tests below mutate real
+    /// process env; the shared `HOME_ENV_TEST_LOCK` serializes them
+    /// crate-wide). Restores on drop, panic included.
+    struct EnvVarGuard {
+        name: &'static str,
+        saved: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn unset(name: &'static str) -> Self {
+            let saved = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self { name, saved }
+        }
+
+        fn set(name: &'static str, value: &str) -> Self {
+            let saved = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, saved }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.saved.take() {
+                Some(v) => std::env::set_var(self.name, v),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    fn env_test_temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "frs-main-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir temp dir");
+        dir
+    }
+
+    // -- Node `os.homedir()` platform parity for the resolve wiring
+    // (reviewer findings, iterations 2 + 3): production Tauri inherits the
+    // desktop environment WITHOUT setting `HOME` on native Windows, where
+    // Node's `os.homedir()` reads USERPROFILE (HOME is never consulted); on
+    // POSIX it reads HOME when set and non-empty, else the effective user's
+    // passwd-entry home — USERPROFILE is never consulted there. Every home
+    // consumer on the resolve path (the exact-id claude fallback, the
+    // `homeDir` wire field) routes through
+    // `session_directory::provider_home()`, which implements exactly those
+    // platform semantics.
+
+    #[cfg(unix)]
+    #[test]
+    fn wire_home_dir_unix_treats_empty_home_as_unset_using_passwd_entry() {
+        let _lock = crate::session_directory::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _home = EnvVarGuard::set("HOME", "");
+        let _userprofile = EnvVarGuard::set("USERPROFILE", "/Users/win-fixture-wire");
+        let resolved = resolve_wire_home_dir().map(|h| h.as_str().to_string());
+        assert_ne!(
+            resolved.as_deref(),
+            Some("/Users/win-fixture-wire"),
+            "POSIX must NEVER consult USERPROFILE (Node os.homedir() reads it on Windows only)"
+        );
+        assert_eq!(
+            resolved,
+            Some(
+                crate::session_directory::passwd_entry_home()
+                    .to_string_lossy()
+                    .into_owned()
+            ),
+            "an EMPTY HOME must fall back to the passwd-entry home (Node os.homedir() POSIX parity)"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wire_home_dir_windows_uses_userprofile_never_home() {
+        let _lock = crate::session_directory::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _home = EnvVarGuard::set("HOME", "C:\\never-consulted");
+        let _userprofile = EnvVarGuard::set("USERPROFILE", "C:\\Users\\win-fixture-wire");
+        assert_eq!(
+            resolve_wire_home_dir().map(|h| h.as_str().to_string()),
+            Some("C:\\Users\\win-fixture-wire".to_string()),
+            "Windows must read USERPROFILE and never consult HOME (Node os.homedir() parity)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_exact_id_fallback_finds_transcript_under_home() {
+        // The exact-id fallback itself — not just `provider_home()` — must
+        // find the transcript under `<home>/.claude/projects`, or a
+        // cwd-less/subagent transcript omitted from the index produces a
+        // healthy-looking ready-empty where Node (os.homedir()) finds it.
+        const SESSION_ID: &str = "AB2AFDA6-A340-443E-BA60-024A1B3554B4";
+        let _lock = crate::session_directory::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = env_test_temp_dir("claude-fallback");
+        let _home = EnvVarGuard::set("HOME", home.to_str().unwrap());
+        let _claude_home = EnvVarGuard::unset("CLAUDE_HOME");
+
+        let project = home.join(".claude").join("projects").join("-repo-alpha");
+        std::fs::create_dir_all(&project).expect("mkdir claude project dir");
+        std::fs::write(
+            project.join(format!("{}.jsonl", SESSION_ID.to_ascii_lowercase())),
+            "{\"cwd\":\"/repo/alpha\"}\n",
+        )
+        .expect("write transcript fixture");
+
+        let hit = resolve_claude_exact_id_fallback(SESSION_ID)
+            .expect("fallback must not report a provider failure")
+            .expect("fallback must FIND the transcript under HOME/.claude");
+        assert_eq!(hit.session_id, SESSION_ID.to_ascii_lowercase());
+        assert_eq!(hit.cwd.as_deref(), Some("/repo/alpha"));
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_exact_id_fallback_unix_never_reads_userprofile() {
+        // Node's `os.homedir()` on POSIX never consults USERPROFILE: with
+        // HOME unset, the fallback root is the passwd-entry home — a
+        // transcript living ONLY under `USERPROFILE/.claude` must NOT be
+        // surfaced (the pre-fix HOME||USERPROFILE approximation found it).
+        const SESSION_ID: &str = "0C7B39D1-52E4-4F0F-9E7C-4E2B7A11D9AA";
+        let _lock = crate::session_directory::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let profile = env_test_temp_dir("claude-fallback-userprofile");
+        let _home = EnvVarGuard::unset("HOME");
+        let _claude_home = EnvVarGuard::unset("CLAUDE_HOME");
+        let _userprofile = EnvVarGuard::set("USERPROFILE", profile.to_str().unwrap());
+
+        let project = profile.join(".claude").join("projects").join("-repo-beta");
+        std::fs::create_dir_all(&project).expect("mkdir claude project dir");
+        std::fs::write(
+            project.join(format!("{}.jsonl", SESSION_ID.to_ascii_lowercase())),
+            "{\"cwd\":\"/repo/beta\"}\n",
+        )
+        .expect("write transcript fixture");
+
+        let hit = resolve_claude_exact_id_fallback(SESSION_ID)
+            .expect("fallback must not report a provider failure");
+        assert!(
+            hit.is_none(),
+            "POSIX must resolve the passwd-entry home, never USERPROFILE/.claude"
+        );
+
+        std::fs::remove_dir_all(&profile).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_exact_id_fallback_finds_transcript_in_a_userprofile_only_environment() {
+        // The documented Tauri environment: USERPROFILE = the real user home
+        // containing `.claude/projects/...` (Node's `os.homedir()` is
+        // USERPROFILE-backed on Windows). The exact-id fallback itself —
+        // not just `provider_home()` — must find the transcript there.
+        const SESSION_ID: &str = "AB2AFDA6-A340-443E-BA60-024A1B3554B4";
+        let _lock = crate::session_directory::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = env_test_temp_dir("claude-fallback");
+        let _claude_home = EnvVarGuard::unset("CLAUDE_HOME");
+        let _userprofile = EnvVarGuard::set("USERPROFILE", home.to_str().unwrap());
+
+        let project = home.join(".claude").join("projects").join("-repo-alpha");
+        std::fs::create_dir_all(&project).expect("mkdir claude project dir");
+        std::fs::write(
+            project.join(format!("{}.jsonl", SESSION_ID.to_ascii_lowercase())),
+            "{\"cwd\":\"/repo/alpha\"}\n",
+        )
+        .expect("write transcript fixture");
+
+        let hit = resolve_claude_exact_id_fallback(SESSION_ID)
+            .expect("fallback must not report a provider failure")
+            .expect("fallback must FIND the transcript under USERPROFILE/.claude");
+        assert_eq!(hit.session_id, SESSION_ID.to_ascii_lowercase());
+        assert_eq!(hit.cwd.as_deref(), Some("/repo/alpha"));
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    // -- Task 6 (resolve parity): errno-name derivation for provider errors.
+    // Node preserves the ORIGINAL `cause.code` VERBATIM
+    // (`ClaudeTranscriptLocatorError`, `claude-transcript-locator.ts:19-27`):
+    // EPERM stays EPERM — a kind-based mapping would collapse it into EACCES
+    // (both are `ErrorKind::PermissionDenied`) and drop EIO entirely.
+
+    #[cfg(unix)]
+    #[test]
+    fn errno_code_preserves_the_raw_errno_name_verbatim() {
+        use std::io;
+        assert_eq!(
+            errno_code(&io::Error::from_raw_os_error(libc::EPERM)).as_deref(),
+            Some("EPERM")
+        );
+        assert_eq!(
+            errno_code(&io::Error::from_raw_os_error(libc::EACCES)).as_deref(),
+            Some("EACCES")
+        );
+        assert_eq!(
+            errno_code(&io::Error::from_raw_os_error(libc::EIO)).as_deref(),
+            Some("EIO")
+        );
+        // Synthetic error without a raw errno: omit the code, keep the message.
+        assert_eq!(
+            errno_code(&io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "no raw errno"
+            )),
+            None
+        );
+    }
+
+    // -- P1.8: `transcript_definitively_absent`, the tombstone-DELETION gate
+    // (V10.md). Deletion is the destructive branch, so every uncertain path
+    // must answer `false` (present => defer); only a readable tree with NO
+    // matching transcript answers `true`.
+
+    #[test]
+    fn claude_transcript_present_is_not_absent() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let proj = home.path().join(".claude").join("projects").join("-p");
+        std::fs::create_dir_all(&proj).expect("mkdir projects/-p");
+        std::fs::write(proj.join("sess-1.jsonl"), "{}\n").expect("write transcript");
+        assert!(
+            !transcript_definitively_absent(home.path(), "claude", "sess-1"),
+            "an existing <proj>/<sessionId>.jsonl means PRESENT (never delete)"
+        );
+    }
+
+    #[test]
+    fn claude_empty_projects_tree_is_definitively_absent() {
+        let home = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(home.path().join(".claude").join("projects"))
+            .expect("mkdir empty projects");
+        assert!(
+            transcript_definitively_absent(home.path(), "claude", "sess-1"),
+            "a readable projects tree with no match is DEFINITIVELY absent"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_unreadable_projects_root_defers() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().expect("tempdir");
+        let projects = home.path().join(".claude").join("projects");
+        std::fs::create_dir_all(&projects).expect("mkdir projects");
+        std::fs::set_permissions(&projects, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 000");
+        let verdict = transcript_definitively_absent(home.path(), "claude", "sess-1");
+        // Restore so the tempdir can be cleaned up regardless of the assert.
+        std::fs::set_permissions(&projects, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod 755");
+        assert!(
+            !verdict,
+            "an unreadable projects root must DEFER (false), never delete"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_unreadable_project_subdir_defers() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().expect("tempdir");
+        let projects = home.path().join(".claude").join("projects");
+        let proj = projects.join("-p");
+        std::fs::create_dir_all(&proj).expect("mkdir projects/-p");
+        std::fs::set_permissions(&proj, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 000 subdir");
+        let verdict = transcript_definitively_absent(home.path(), "claude", "sess-1");
+        // Restore so the tempdir can be cleaned up regardless of the assert.
+        std::fs::set_permissions(&proj, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod 755 subdir");
+        assert!(
+            !verdict,
+            "a readable projects root with an UNREADABLE project subdir must \
+             DEFER (false) - the transcript may live in exactly that subdir"
+        );
+    }
+
+    #[test]
+    fn missing_projects_root_defers() {
+        let home = tempfile::tempdir().expect("tempdir");
+        assert!(
+            !transcript_definitively_absent(home.path(), "claude", "sess-1"),
+            "no ~/.claude/projects at all => defer (read error branch)"
+        );
+    }
+
+    #[test]
+    fn opencode_and_unknown_providers_always_defer() {
+        let home = tempfile::tempdir().expect("tempdir");
+        assert!(!transcript_definitively_absent(
+            home.path(),
+            "opencode",
+            "s"
+        ));
+        assert!(!transcript_definitively_absent(home.path(), "no-such", "s"));
+    }
+
+    // `AI_CONFIG.enabled()` (`server/ai-prompts.ts:12-15`) — since Task 2
+    // backed by the process-local [`ai_title::AiKeyCell`] (boot: env key wins
+    // over settings key, non-forcing). Each test constructs its own cell, so
+    // no env-isolation guard is needed.
+
+    #[test]
+    fn ai_enabled_true_when_env_key_set_non_empty() {
+        let cell = ai_title::AiKeyCell::init(Some("sk-live-abc123".into()), None);
+        assert!(cell.enabled());
+    }
+
+    #[test]
+    fn ai_enabled_true_when_settings_key_present_without_env() {
+        // The settings-key case: env absent + settings.ai.geminiApiKey present
+        // → the feature flag is on (Node: applySettingsKey at boot, index.ts:251).
+        let cell = ai_title::AiKeyCell::init(None, Some("settings-key".into()));
+        assert!(cell.enabled());
+    }
+
+    #[test]
+    fn ai_enabled_false_when_no_key_anywhere() {
+        assert!(!ai_title::AiKeyCell::init(None, None).enabled());
+    }
+
+    #[test]
+    fn ai_enabled_false_when_keys_explicitly_empty() {
+        // JS `Boolean("")` is `false` — explicitly-empty values are still falsy.
+        let cell = ai_title::AiKeyCell::init(Some(String::new()), Some(String::new()));
+        assert!(!cell.enabled());
+    }
+
+    /// `featureFlags.kilroy` under a given `KILROY_ENABLED` value (`None` = unset).
+    /// Serializes on the crate-wide `HOME_ENV_TEST_LOCK`; [`EnvVarGuard`] restores
+    /// the prior value on drop (panic included), so a real-world `KILROY_ENABLED`
+    /// never leaks across tests in either direction.
+    fn kilroy_flag_for_env(value: Option<&str>) -> bool {
+        let _lock = crate::session_directory::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _kilroy = match value {
+            Some(v) => EnvVarGuard::set("KILROY_ENABLED", v),
+            None => EnvVarGuard::unset("KILROY_ENABLED"),
+        };
+        build_platform_payload(serde_json::json!({}), false)["featureFlags"]["kilroy"]
+            .as_bool()
+            .expect("featureFlags.kilroy is always a bool")
+    }
+
+    // `featureFlags.kilroy` mirrors legacy `detectFeatureFlags`'s
+    // `isTruthy(process.env.KILROY_ENABLED)` (server/platform-router.ts:15-18, 20-29):
+    // EXACTLY `value === '1' || value.toLowerCase() === 'true'` — the validated set is
+    // {'1', any case variant of 'true'}; '0'/'yes'/'on'/empty/unset are all FALSE (the
+    // 'yes'-accepting helper in server/cli/index.ts:106 is a DIFFERENT function — do
+    // NOT mirror it). Each env case is its own test under the shared env-mutation lock.
+
+    #[test]
+    fn platform_payload_kilroy_true_when_kilroy_enabled_is_1() {
+        assert!(kilroy_flag_for_env(Some("1")));
+    }
+
+    #[test]
+    fn platform_payload_kilroy_true_when_kilroy_enabled_is_true() {
+        assert!(kilroy_flag_for_env(Some("true")));
+    }
+
+    #[test]
+    fn platform_payload_kilroy_true_when_kilroy_enabled_is_uppercase_true() {
+        // JS `value.toLowerCase() === 'true'`: 'TRUE' lowercases to 'true' → TRUE.
+        assert!(kilroy_flag_for_env(Some("TRUE")));
+    }
+
+    #[test]
+    fn platform_payload_kilroy_true_when_kilroy_enabled_is_mixed_case_true() {
+        assert!(kilroy_flag_for_env(Some("True")));
+    }
+
+    #[test]
+    fn platform_payload_kilroy_false_when_kilroy_enabled_unset() {
+        // JS `!value` → false for undefined.
+        assert!(!kilroy_flag_for_env(None));
+    }
+
+    #[test]
+    fn platform_payload_kilroy_false_when_kilroy_enabled_empty() {
+        // JS `!value` → false for ''.
+        assert!(!kilroy_flag_for_env(Some("")));
+    }
+
+    #[test]
+    fn platform_payload_kilroy_false_when_kilroy_enabled_is_0() {
+        assert!(!kilroy_flag_for_env(Some("0")));
+    }
+
+    #[test]
+    fn platform_payload_kilroy_false_when_kilroy_enabled_is_yes() {
+        // 'yes' is accepted by server/cli/index.ts:106's DIFFERENT helper, not by
+        // the platform feature-flag `isTruthy` — FALSE here.
+        assert!(!kilroy_flag_for_env(Some("yes")));
+    }
+
+    #[test]
+    fn platform_payload_kilroy_false_when_kilroy_enabled_is_on() {
+        assert!(!kilroy_flag_for_env(Some("on")));
+    }
+
+    #[test]
+    fn platform_payload_feature_flags_shape_matches_legacy() {
+        // `server/platform-router.ts#detectFeatureFlags`: `{ kilroy, aiEnabled,
+        // sessionResolve, hostStatsAvailable }`, camelCase, no extra fields —
+        // mirrored 1:1 in the Rust payload. `sessionResolve` is TRUE: the
+        // hardened resolve response surface
+        // (degraded/providerErrors/unsearchedProviders/
+        // homeDir, warming default) landed via the hardened plan Tasks 2-6
+        // (SYNC-06), so the flag is genuinely earned. `hostStatsAvailable` is
+        // boot-static on the build target (`cfg!(not(target_os = "windows"))`,
+        // mirroring Node's `process.platform !== 'win32'`). `KILROY_ENABLED` is
+        // pinned off under the shared lock so the assertion is
+        // environment-independent.
+        let _lock = crate::session_directory::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _kilroy = EnvVarGuard::unset("KILROY_ENABLED");
+        let cell = ai_title::AiKeyCell::init(Some("sk-live-abc123".into()), None);
+        let payload = build_platform_payload(serde_json::json!({}), cell.enabled());
+        assert_eq!(
+            payload["featureFlags"],
+            serde_json::json!({ "kilroy": false, "aiEnabled": true, "sessionResolve": true, "hostStatsAvailable": cfg!(not(target_os = "windows")) })
+        );
+    }
+
+    #[test]
+    fn platform_payload_ai_enabled_false_without_key() {
+        let _lock = crate::session_directory::HOME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _kilroy = EnvVarGuard::unset("KILROY_ENABLED");
+        let cell = ai_title::AiKeyCell::init(None, None);
+        let payload = build_platform_payload(serde_json::json!({}), cell.enabled());
+        assert_eq!(
+            payload["featureFlags"],
+            serde_json::json!({ "kilroy": false, "aiEnabled": false, "sessionResolve": true, "hostStatsAvailable": cfg!(not(target_os = "windows")) })
+        );
+    }
+
+    #[test]
+    fn host_stats_flag_present_in_platform_payload() {
+        // Host-stats collection reads Linux `/proc` + `/sys`; both servers expose
+        // a boot-static availability flag so clients can degrade to
+        // `available: false` instead of probing — Node mirrors
+        // `process.platform !== 'win32'` (server/platform-router.ts), Rust uses
+        // the build target. Present-and-boolean regardless of host runtime.
+        let payload = build_platform_payload(serde_json::json!({}), false);
+        assert_eq!(
+            payload["featureFlags"]["hostStatsAvailable"],
+            serde_json::json!(cfg!(not(target_os = "windows")))
+        );
+    }
+
+    // `load_dotenv_from` (legacy parity: `import 'dotenv/config'`,
+    // `server/index.ts:2-3`). Each test uses its own temp dir + a uniquely-named
+    // sentinel var, so parallel test execution can't collide.
+
+    #[test]
+    fn load_dotenv_from_sets_var_absent_from_process_env() {
+        let dir = std::env::temp_dir().join("freshell-dotenv-test-unset");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "FRESHELL_TASK7_TEST_VAR_UNSET=from-dotenv\n",
+        )
+        .unwrap();
+        std::env::remove_var("FRESHELL_TASK7_TEST_VAR_UNSET");
+
+        load_dotenv_from(&dir);
+
+        assert_eq!(
+            std::env::var("FRESHELL_TASK7_TEST_VAR_UNSET").as_deref(),
+            Ok("from-dotenv")
+        );
+
+        std::env::remove_var("FRESHELL_TASK7_TEST_VAR_UNSET");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_dotenv_from_never_overrides_existing_process_env_var() {
+        let dir = std::env::temp_dir().join("freshell-dotenv-test-set");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "FRESHELL_TASK7_TEST_VAR_SET=from-dotenv\n",
+        )
+        .unwrap();
+        std::env::set_var("FRESHELL_TASK7_TEST_VAR_SET", "already-set");
+
+        load_dotenv_from(&dir);
+
+        assert_eq!(
+            std::env::var("FRESHELL_TASK7_TEST_VAR_SET").as_deref(),
+            Ok("already-set")
+        );
+
+        std::env::remove_var("FRESHELL_TASK7_TEST_VAR_SET");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // SAFE-01: startup token hardening (`server/auth.ts#validateStartupSecurity`).
+    // Order mirrors legacy: empty/whitespace -> too short (<16) -> default/weak
+    // value (case-insensitive exact match). Whitespace-only is beyond-legacy
+    // hardening (the original's `!token` check is JS-falsy-only, so a
+    // whitespace string of length >= 16 would pass it; we reject it here
+    // because a whitespace token is never a deliberate, effective secret).
+
+    #[test]
+    fn rejects_empty_token() {
+        assert!(validate_auth_token("").is_err());
+    }
+
+    #[test]
+    fn rejects_whitespace_only_token() {
+        // 20 spaces: long enough to pass the length check, still rejected.
+        assert!(validate_auth_token("                    ").is_err());
+    }
+
+    #[test]
+    fn rejects_token_shorter_than_16_chars() {
+        assert!(validate_auth_token("short123").is_err());
+    }
+
+    #[test]
+    fn rejects_default_weak_tokens_case_insensitive() {
+        for weak in [
+            "changeme", "CHANGEME", "ChangeMe", "default", "password", "TOKEN",
+        ] {
+            assert!(
+                validate_auth_token(weak).is_err(),
+                "expected {weak:?} to be rejected as a weak/default token"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_strong_token() {
+        assert!(validate_auth_token("s3cr3t-token-abcdef").is_ok());
+    }
+
+    #[test]
+    fn load_dotenv_from_missing_file_is_noop() {
+        let dir = std::env::temp_dir().join("freshell-dotenv-test-missing");
+        // Deliberately no `.env` written into this dir.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::remove_file(dir.join(".env")).ok();
+
+        // Must not panic.
+        load_dotenv_from(&dir);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

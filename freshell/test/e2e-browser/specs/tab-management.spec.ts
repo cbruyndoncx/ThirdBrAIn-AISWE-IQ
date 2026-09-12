@@ -1,0 +1,276 @@
+import { test, expect } from '../helpers/fixtures.js'
+
+test.describe('Tab Management', () => {
+  function getTerminalId(layout: any): string | null {
+    if (!layout) return null
+    if (layout.type === 'leaf' && layout.content?.kind === 'terminal') {
+      return typeof layout.content.terminalId === 'string' ? layout.content.terminalId : null
+    }
+    if (layout.type === 'split' && Array.isArray(layout.children)) {
+      for (const child of layout.children) {
+        const terminalId = getTerminalId(child)
+        if (terminalId) return terminalId
+      }
+    }
+    return null
+  }
+
+  async function selectShellForActiveTab(page: any): Promise<void> {
+    const shellNames = ['Shell', 'WSL', 'CMD', 'PowerShell', 'Bash']
+    for (const name of shellNames) {
+      try {
+        const button = page.getByRole('button', { name: new RegExp(`^${name}$`, 'i') })
+        if (await button.isVisible().catch(() => false)) {
+          await button.click({ timeout: 5000 })
+          await page.locator('.xterm').last().waitFor({ state: 'visible', timeout: 30_000 })
+          return
+        }
+      } catch {
+        continue
+      }
+    }
+    throw new Error('No shell option available for the active tab')
+  }
+
+  test('starts with one tab', async ({ freshellPage, harness }) => {
+    const tabCount = await harness.getTabCount()
+    expect(tabCount).toBe(1)
+  })
+
+  test('add tab button creates new tab', async ({ freshellPage, page, harness }) => {
+    const addButton = page.locator('[data-context="tab-add"]')
+    await addButton.click()
+    await harness.waitForTabCount(2)
+  })
+
+  test('clicking tab switches to it', async ({ freshellPage, page, harness }) => {
+    // Create second tab
+    const addButton = page.locator('[data-context="tab-add"]')
+    await addButton.click()
+    await harness.waitForTabCount(2)
+
+    // Click first tab
+    const firstTab = page.locator('[data-context="tab"]').first()
+    await firstTab.click()
+
+    // Verify active tab changed
+    const state = await harness.getState()
+    expect(state.tabs.activeTabId).toBe(state.tabs.tabs[0].id)
+  })
+
+  test('close tab removes it', async ({ freshellPage, page, harness }) => {
+    // Create second tab
+    const addButton = page.locator('[data-context="tab-add"]')
+    await addButton.click()
+    await harness.waitForTabCount(2)
+
+    // Close the second tab (close button on tab has title="Close (Shift+Click to kill)")
+    const secondTab = page.locator('[data-context="tab"]').last()
+    const closeButton = secondTab.getByRole('button', { name: /close/i })
+    await closeButton.click()
+
+    await harness.waitForTabCount(1)
+  })
+
+  test('cannot close last tab', async ({ freshellPage, page, harness }) => {
+    const tabCount = await harness.getTabCount()
+    expect(tabCount).toBe(1)
+
+    // Try to close the only tab
+    const tab = page.locator('[data-context="tab"]').first()
+    const closeButton = tab.getByRole('button', { name: /close/i })
+
+    // If close button exists, clicking it should either be prevented
+    // or create a replacement tab — either way we should still have >= 1 tab
+    if (await closeButton.isVisible()) {
+      await closeButton.click()
+      await page.waitForTimeout(500)
+    }
+
+    const finalTabCount = await harness.getTabCount()
+    expect(finalTabCount).toBeGreaterThanOrEqual(1)
+  })
+
+  test('tab rename via double-click', async ({ freshellPage, page, harness }) => {
+    // Double-click the tab to enter rename mode
+    const tab = page.locator('[data-context="tab"]').first()
+    await tab.dblclick()
+
+    // The rename input appears INSIDE the tab element (replaces the title span)
+    const renameInput = tab.locator('input')
+    await expect(renameInput).toBeVisible({ timeout: 5_000 })
+
+    // Type new name
+    await renameInput.fill('My Custom Tab')
+    await renameInput.press('Enter')
+
+    // Verify the tab shows the new name (look within the tab area)
+    await expect(tab.getByText('My Custom Tab')).toBeVisible({ timeout: 5_000 })
+  })
+
+  test('restored top tabs stay hot across page reload and still switch without replay', async ({
+    freshellPage,
+    page,
+    harness,
+    serverInfo,
+    terminal,
+  }) => {
+    await terminal.waitForTerminal()
+    await terminal.waitForPrompt()
+    await terminal.executeCommand('echo "restored-tab-one"')
+    await terminal.waitForOutput('restored-tab-one')
+    const firstTabId = await harness.getActiveTabId()
+    const firstLayout = await harness.getPaneLayout(firstTabId!)
+    const firstTerminalId = getTerminalId(firstLayout)
+    expect(firstTerminalId).toBeTruthy()
+
+    const addButton = page.locator('[data-context="tab-add"]')
+    await addButton.click()
+    await harness.waitForTabCount(2)
+    await selectShellForActiveTab(page)
+    const secondTabId = await harness.getActiveTabId()
+    const secondLayout = await harness.getPaneLayout(secondTabId!)
+    const secondTerminalId = getTerminalId(secondLayout)
+    expect(secondTerminalId).toBeTruthy()
+    await terminal.waitForPrompt({ timeout: 30_000, terminalId: secondTerminalId! })
+    await terminal.executeCommand('echo "restored-tab-two"', 1)
+    await terminal.waitForOutput('restored-tab-two', { terminalId: secondTerminalId! })
+
+    await page.goto(`${serverInfo.baseUrl}/?token=${serverInfo.token}&e2e=1`)
+    await harness.waitForHarness()
+    await harness.waitForConnection()
+    await harness.waitForTabCount(2)
+
+    const tabs = page.locator('[data-context="tab"]')
+    await terminal.waitForOutput('restored-tab-two', { timeout: 30_000, terminalId: secondTerminalId! })
+
+    await tabs.first().click()
+    await terminal.waitForOutput('restored-tab-one', { terminalId: firstTerminalId! })
+    await tabs.last().click()
+    await terminal.waitForOutput('restored-tab-two', { terminalId: secondTerminalId! })
+
+    await page.waitForTimeout(200)
+    await harness.clearSentWsMessages()
+
+    await tabs.first().click()
+    await terminal.waitForOutput('restored-tab-one', { terminalId: firstTerminalId! })
+    await tabs.last().click()
+    await terminal.waitForOutput('restored-tab-two', { terminalId: secondTerminalId! })
+    await tabs.first().click()
+    await terminal.waitForOutput('restored-tab-one', { terminalId: firstTerminalId! })
+
+    const sent = await harness.getSentWsMessages()
+    expect(sent.filter((msg: any) => msg?.type === 'terminal.attach')).toHaveLength(0)
+    expect(sent.filter((msg: any) => msg?.type === 'terminal.resize')).toHaveLength(0)
+  })
+
+  test('keyboard shortcut creates new tab', async ({ freshellPage, page, harness }) => {
+    await page.keyboard.press('Alt+T')
+    await harness.waitForTabCount(2)
+  })
+
+  test('tab overflow shows scroll controls', async ({ freshellPage, page, harness }) => {
+    // Create many tabs to trigger overflow
+    const addButton = page.locator('[data-context="tab-add"]')
+    for (let i = 0; i < 10; i++) {
+      await addButton.click()
+    }
+    await harness.waitForTabCount(11)
+
+    // Check that tabs are still navigable
+    const tabs = page.locator('[data-context="tab"]')
+    const tabCount = await tabs.count()
+    expect(tabCount).toBe(11)
+  })
+
+  test('drag and drop reorders tabs', async ({ freshellPage, page, harness }) => {
+    // Create tabs
+    const addButton = page.locator('[data-context="tab-add"]')
+    await addButton.click()
+    await addButton.click()
+    await harness.waitForTabCount(3)
+
+    // Get initial tab order
+    const stateBefore = await harness.getState()
+    const tabIdsBefore = stateBefore.tabs.tabs.map((t: any) => t.id)
+
+    // Drag first tab to last position
+    const firstTab = page.locator('[data-context="tab"]').first()
+    const lastTab = page.locator('[data-context="tab"]').last()
+
+    const firstBox = await firstTab.boundingBox()
+    const lastBox = await lastTab.boundingBox()
+    expect(firstBox).toBeTruthy()
+    expect(lastBox).toBeTruthy()
+
+    await page.mouse.move(firstBox!.x + firstBox!.width / 2, firstBox!.y + firstBox!.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(lastBox!.x + lastBox!.width / 2, lastBox!.y + lastBox!.height / 2, { steps: 10 })
+    await page.mouse.up()
+
+    // Verify order changed
+    await page.waitForTimeout(500)
+    const stateAfter = await harness.getState()
+    const tabIdsAfter = stateAfter.tabs.tabs.map((t: any) => t.id)
+    // Tab order should have changed
+    expect(tabIdsAfter).not.toEqual(tabIdsBefore)
+  })
+
+  test('Ctrl+Shift+brackets follow reordered tab order from a focused terminal', async ({ freshellPage, page, harness, terminal }) => {
+    const addButton = page.locator('[data-context="tab-add"]')
+    await addButton.click()
+    await selectShellForActiveTab(page)
+    await addButton.click()
+    await selectShellForActiveTab(page)
+    await harness.waitForTabCount(3)
+    await harness.waitForTerminalStatus('running')
+
+    const stateBefore = await harness.getState()
+    const orderedBefore = stateBefore.tabs.tabs.map((tab: { id: string }) => tab.id)
+
+    const firstTab = page.locator('[data-context="tab"]').first()
+    const lastTab = page.locator('[data-context="tab"]').last()
+    const firstBox = await firstTab.boundingBox()
+    const lastBox = await lastTab.boundingBox()
+    expect(firstBox).toBeTruthy()
+    expect(lastBox).toBeTruthy()
+
+    await page.mouse.move(firstBox!.x + firstBox!.width / 2, firstBox!.y + firstBox!.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(lastBox!.x + lastBox!.width / 2, lastBox!.y + lastBox!.height / 2, { steps: 10 })
+    await page.mouse.up()
+
+    await page.waitForFunction((before: string[]) => {
+      const state = window.__FRESHELL_TEST_HARNESS__?.getState()
+      if (!state) return false
+      const after = state.tabs.tabs.map((tab: { id: string }) => tab.id)
+      return JSON.stringify(after) !== JSON.stringify(before)
+    }, orderedBefore)
+
+    const reordered = await harness.getState()
+    const orderedIds = reordered.tabs.tabs.map((tab: { id: string }) => tab.id)
+    const startingActiveId = reordered.tabs.activeTabId as string
+    const startingIndex = orderedIds.indexOf(startingActiveId)
+    const expectedPrevIndex = (startingIndex - 1 + orderedIds.length) % orderedIds.length
+    const expectedPrevId = orderedIds[(startingIndex - 1 + orderedIds.length) % orderedIds.length]
+    const expectedNextId = orderedIds[(startingIndex + 1) % orderedIds.length]
+
+    await terminal.waitForTerminal(startingIndex)
+    await terminal.getTerminalContainer(startingIndex).click()
+    await expect(terminal.getTerminalInput(startingIndex)).toBeFocused()
+    await page.keyboard.press('Control+Shift+[')
+    await expect.poll(() => harness.getActiveTabId()).toBe(expectedPrevId)
+
+    await terminal.getTerminalContainer(expectedPrevIndex).click()
+    await page.keyboard.press('Control+Shift+]')
+    await expect.poll(() => harness.getActiveTabId()).toBe(startingActiveId)
+
+    await terminal.getTerminalContainer(startingIndex).click()
+    await page.keyboard.press('Control+Shift+]')
+    await expect.poll(() => harness.getActiveTabId()).toBe(expectedNextId)
+
+    // This test intentionally drives the terminal-focused path only.
+    // FreshClaude fallback coverage already exists in
+    // test/e2e/agent-chat-tab-shortcut-focus.test.tsx.
+  })
+})

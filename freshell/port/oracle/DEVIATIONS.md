@@ -1,0 +1,1344 @@
+# Deviation ledger — where the port INTENTIONALLY differs from the original
+
+User directive: **fix bugs as found; do not replicate bug-for-bug.** Therefore
+the port is behavior-equivalent to the original EXCEPT for the entries below.
+The oracle whitelists exactly these diffs (by fingerprint); any *unlisted*
+old-vs-new divergence is always a failure (a port defect to fix).
+
+## Entry rules (enforced by the antagonist reviewer, not the implementer)
+
+An entry may be added ONLY when the original is **objectively defective** — one
+of: panics/crashes/errors, resource leak, violates the WS protocol schema,
+contradicts documented behavior (AGENTS.md / docs / lab-notes), corrupts data,
+or breaks an invariant the code itself asserts. Aesthetic preference is NOT a
+defect and must be rejected as scope creep.
+
+Every entry requires:
+- **id**: DEV-NNNN
+- **objective_defect**: which bar above, with evidence (`file:line`, error, or
+  schema/doc citation)
+- **original_behavior**: what freshell does today
+- **port_behavior**: the corrected behavior
+- **fingerprint**: how the differ recognizes this specific diff (tier + matcher)
+- **pinning_test**: path to the new positive test asserting the fixed behavior
+- **adjudicated_by**: antagonist-reviewer session id
+- **status**: proposed | accepted | rejected | closed
+  ("closed" added 2026-07-30 with DEV-0006/DEV-0008 — the first records to complete their adjudicated closure conditions.)
+
+## Ledger
+
+### DEV-0001 — opencode `serve` cold-start health probe is unbounded (defeats the bounded health-wait)
+
+**Antagonist adjudication (two decisions):**
+1. **Defect classification: ACCEPTED as OBJECTIVE** — the PORT shall bound the health probe.
+2. **Submitted edit to the ORIGINAL source (`server/fresh-agent/adapters/opencode/serve-manager.ts`,
+   `waitForHealth`): REJECTED — revert to pristine.** Bug-fixes go in the PORT (`port/AGENTS.md:40`);
+   the ledger — not source mutation — records the original's defect. Editing the reference baseline
+   erases the very divergence this ledger exists to whitelist and lets the implementer grade its own
+   new T2 harness by doctoring the system-under-test.
+
+- **objective_defect:** *breaks an invariant the code itself asserts* + internal inconsistency.
+  - Bounded-wait invariant: `while (Date.now() < deadline)` at
+    `server/fresh-agent/adapters/opencode/serve-manager.ts:276`, which throws
+    `"opencode serve did not become healthy within ${healthTimeoutMs}ms"` once the deadline passes.
+  - The inner health GET is UN-timed (`this.fetchFn(\`${baseUrl}/global/health\`, { method: 'GET' })`,
+    pre-patch). A cold `opencode serve` accepts the TCP connection then withholds the response, so a
+    single probe blocks (up to the undici headersTimeout — far past the deadline, not truly infinite)
+    and the loop never re-evaluates `Date.now() < deadline`. The asserted bound is defeated.
+  - Contradicts the class's OWN tested contract that fetches must not wait forever:
+    `fetchWithRequestTimeout` (`serve-manager.ts:145-179`) + passing test *"aborts and fails hung JSON
+    requests instead of waiting forever"* (`test/unit/server/fresh-agent/opencode-serve-manager.test.ts:325`).
+    The health probe is the sole fetch that bypasses that protection.
+  - Coverage gap (why it survived): the only deadline tests
+    (`opencode-serve-manager.test.ts:187-192`, `:212-223`) use immediately-resolving mocks; no test
+    injects a never-resolving `/global/health` fetch.
+- **original_behavior:** On a cold/first `opencode serve` in an isolated home,
+  `OpencodeServeManager.ensureStarted()` issues one un-timed GET `/global/health`; the serve holds the
+  connection, so the probe blocks well beyond `healthTimeoutMs` (implementer A/B: `ensureStarted
+  TIMEOUT ~35s`). The user's WARM production server answers instantly, so this is invisible in normal use.
+- **port_behavior:** Each probe is bounded by a 2000 ms AbortController; on abort/refusal the loop
+  retries every 150 ms until the serve answers or the overall `healthTimeoutMs` deadline elapses. Cold
+  start then completes within the deadline (implementer A/B: `~3.5s`). A genuinely wedged serve still
+  fails as the intended bounded `"did not become healthy within ${healthTimeoutMs}ms"` — the 2 s/retry
+  does NOT mask a wedge, because the outer deadline is unchanged.
+- **fingerprint:** T2 / opencode cold-serve-start slice. Differ tolerates: original `ensureStarted`
+  {blocks past deadline | throws "did not become healthy"} vs port {healthy within `healthTimeoutMs`}.
+  The port is NOT required to reproduce the original's cold-start block; every other opencode T2
+  invariant must still match.
+- **pinning_test (SATISFIED — Phase 3.6, `crates/freshell-opencode/tests/serve_health_bounded.rs`, 3 tests
+  RED→GREEN: never-resolving health settles-not-hangs + stall-then-succeed resolves + healthy stays fast):**
+  port-side test that injects a health source whose
+  `/global/health` never resolves, drives the readiness wait, and asserts it settles within the deadline
+  (rejects with the bounded "did not become healthy" message, i.e. the loop advanced) rather than
+  hanging; plus a companion where the probe stalls on the first N attempts then succeeds, asserting
+  `ensureStarted()` resolves. Target: the port's opencode serve-manager suite
+  (`crates/freshell-server/tests/opencode_serve_health.rs`; interim TS mirror
+  `test/unit/port/oracle/opencode-health-probe-bounded.test.ts`). This is the exact case the current
+  suite lacks.
+- **adjudicated_by:** antagonist-reviewer session `0000000000000000-670a1870c51a41b5_anchors-architect`
+  (parent `1d2dea08-9a63-4ecf-bc4b-ee25a852a4d8`), 2026-07-04.
+- **status:** accepted (deviation) — **original-source edit REJECTED; revert required.**
+
+**Conditions before this deviation is satisfied / committable:**
+1. `git checkout -- server/fresh-agent/adapters/opencode/serve-manager.ts` — restore the pristine original.
+2. Implement the bounded probe in the PORT and land the pinning test above (red → green).
+3. PIN the real T2 stall first. `port/oracle/harness/t2-live.ts:52` states the stall point
+   (health-probe vs createSession) is unpinned, and the live drive still stalls (`turnAccepted=false`,
+   behavioral assertions skipped) even after this work — so this health fix must NOT be credited with
+   unblocking T2 until the stall is proven to be the health probe. Do not let it mask the deeper
+   "never flips to idle" / createSession stall (`t2-live.ts:32-33,44-52`).
+4. T2 must obtain its original-side baseline WITHOUT mutating the original — drive a warm sidecar
+   (`t2-live.ts:50-51` notes a directly-spawned serve with bounded polling already works; the user's
+   warm server is unaffected).
+
+### DEV-0002 — coding-CLI session-indexer crashes the whole process on a late provider session-root
+
+**Antagonist adjudication (two decisions):**
+1. **Defect classification: ACCEPTED as OBJECTIVE (crash / uncaught exception).** The PORT's Rust
+   session-indexer must guard the late-root watcher: a provider home that exists while its
+   session-root subdir is absent at boot, then gains that subdir at runtime, must **log + degrade and
+   keep the process alive**, never abort.
+2. **Harness env workaround (`seedClaudeCredsIntoHome()` `mkdir -p <HOME>/.claude/projects`,
+   `port/oracle/harness/t2-live-claude.ts:221-238`): ACCEPTED for T2 baseline capture.** It is
+   legitimate environment parity (make the isolated HOME match a real user's steady state), exactly
+   the DEV-0001 warm-sidecar pattern — NOT a source mutation. Verified: `server/**` is pristine
+   (`git status`: only `port/oracle/**` + `test/**` touched; `server/coding-cli/session-indexer.ts`
+   unmodified). This does NOT self-approve the port fix; the pinning test below is mandatory and the
+   port is held to the higher "no crash" bar the harness deliberately sidesteps for the original.
+
+- **objective_defect:** *crashes / uncaught error* — a process-fatal, unhandled `'error'` on a
+  chokidar `FSWatcher`. Independently reproduced (throwaway repro, zero model cost, repo chokidar
+  3.6.0) with the byte-identical stack the implementer reported:
+  ```
+  TypeError: Cannot read properties of undefined (reading 'on')
+      at NodeFsHandler._handleRead  (chokidar/lib/nodefs-handler.js:472:5)
+      at NodeFsHandler._handleDir   (…/nodefs-handler.js:563:18)
+      at NodeFsHandler._addToNodeFs (…/nodefs-handler.js:617:27)
+  Emitted 'error' event on FSWatcher instance at:
+      at FSWatcher._handleError     (chokidar/index.js:647:10)
+      at NodeFsHandler._addToNodeFs (…/nodefs-handler.js:645:18)
+  Node.js v22.21.1   → process.exit(1)
+  ```
+  Root cause is a **self-inflicted close-during-add race**, confirmed line-by-line:
+  - claude root = `<HOME>/.claude/projects` (`providers/claude.ts:521-522`), watch-base = `<HOME>/.claude`
+    (`providers/claude.ts:525-526`). Seeding only `.credentials.json` makes `<HOME>/.claude` exist but
+    `…/projects` absent, so `startRootWatcher` walks to the nearest existing ancestor `<HOME>/.claude`
+    (`session-indexer.ts:516-528`) and arms `chokidar.watch([ancestor], { depth: 1 })`
+    (`session-indexer.ts:538-541`).
+  - When the first turn creates `…/projects`, the rootWatcher's own `'addDir'` handler fires
+    `void this.reconfigureWatchers()` (`session-indexer.ts:553-556`). The watcher-key now changes
+    (root exists), so reconfigure closes the *old* rootWatcher (`session-indexer.ts:479-482`).
+  - chokidar `close()` synchronously sets `closed = true` **and `this.removeAllListeners()`**
+    (`chokidar/index.js:502-507`) — destroying the `'error'` guard installed at
+    `session-indexer.ts:597`.
+  - The in-flight `_addToNodeFs` for the new dir resumes on a later microtask; `_readdirp` now returns
+    `undefined` because the watcher is closed (`chokidar/index.js:939-940`), so
+    `undefined.on(STR_DATA, …)` throws (`nodefs-handler.js:468-472`). The `catch` re-routes it to
+    `_handleError` (`nodefs-handler.js:644-645`), which `emit('error', …)` for a code-less TypeError
+    (`chokidar/index.js:642-647`) — now on a **listener-less** FSWatcher → Node aborts the process.
+  - Repro proof: root **absent** at boot → `CRASHED=true`, exit 1, the `'error'` handler never fires
+    (removeAllListeners stripped it first); root **pre-created** → clean exit 0. Matches the
+    implementer's table (`notes/t2-claude-haiku.md:51-57`).
+  - Not merely an isolated-home artifact: the late-root watcher exists *specifically* to handle
+    "root absent at startup, appears later" (`session-indexer.ts:432-435`), and it handles that
+    designed-for case by crashing. Reachable by real users on a fresh Claude-Code install / after
+    deleting `~/.claude/projects` while keeping creds; and structurally provider-agnostic (opencode's
+    watch-base `path.dirname(homeDir)` = `~/.local/share` commonly exists on real Linux hosts —
+    `providers/opencode.ts:334-335` — so it can hit the same race; it is spared only in the empty
+    isolated HOME). claude is the sole crasher *in the oracle's isolated HOME* because it is the only
+    provider whose ancestor exists there (creds seeding), per `notes/t2-claude-haiku.md:41-44` — verified.
+- **original_behavior:** With `<provider-home>` present but its session-root subdir absent at server
+  boot, freshell arms a depth-limited late-root watcher on the ancestor; the instant the subdir is
+  created at runtime (e.g. the first freshclaude turn writing `…/projects/<hash>/<uuid>.jsonl`),
+  chokidar throws an uncaught `TypeError` on the FSWatcher `'error'` path and **the entire freshell
+  process exits mid-turn** (captured transcript stops at `system/init`, `msgs=0`; no assistant reply).
+- **port_behavior:** The Rust session-indexer's late-root watcher tolerates the subdir appearing:
+  on the reconfigure-triggered teardown it must not deref a closed watcher; a watcher error is
+  **logged and the indexer degrades** (schedules a full rescan) while the **process stays up**; once
+  the subdir exists, precise-root watching + indexing **resume** and the new session becomes visible.
+- **fingerprint:** **Not a wire-message diff — a process-liveness / lifecycle invariant.** The T2
+  live differ will *never* observe this diff: the harness pre-creates `…/projects` for BOTH original
+  and port (env parity), so neither side crashes during baseline capture and there is nothing for the
+  message-differ to whitelist. Therefore this deviation is **pinned by a dedicated liveness test, not
+  whitelisted in the differ.** If any future harness/chaos run *omits* the pre-create, the expected
+  (whitelisted) divergence is: original → abnormal WS close + `process.exit` (turn aborts, no further
+  messages) vs port → process stays alive, WS open, `sessions.changed`/rescan proceeds once the subdir
+  appears. Keyed on the env precondition {provider-home exists ∧ session-root subdir absent at boot ∧
+  subdir created at runtime}, never on a message payload.
+- **pinning_test (SATISFIED — Phase 3.5, relocated in kata v0h9):** port-side liveness test —
+  `crates/freshell-sessions/src/session_watcher.rs` (`watcher_handles_late_root_appearance` test:
+  a real-`notify` end-to-end that arranges a provider home that exists but whose session root subdir
+  is absent, starts the watcher on the nearest existing ancestor, creates the root + a session file
+  at runtime, and asserts the new session becomes visible via inotify). This test verifies the happy
+  path of the late-root lifecycle (the process stays alive and indexes the new session). It does NOT
+  cover injected watcher-arm failure, backend error propagation, or watcher reconfiguration — those
+  error paths are guarded structurally by code inspection: arm failures add the provider to the
+  absent-retry list for periodic re-arming (`run_watcher_loop`), watcher errors send a
+  `ProviderRescan` event that marks the specific provider dirty for a full re-discovery, and the
+  15-minute TTL reconciliation provides a safety net for any missed events. The
+  `watcher_rearms_when_absent_provider_appears` test covers the re-arm happy path (provider root
+  appears → watcher armed → sessions detected) but does NOT inject watcher construction or arm
+  failures. The original 4-test `late_root_watcher_liveness.rs` was
+  replaced when the dead `indexer.rs` module (which the tests pinned) was deleted in favour of the
+  event-driven `SessionWatcher`. The 15-minute TTL reconciliation covers any events the watcher misses.
+  Interim TS red-documenting-original mirror (optional, proves the ledger's claim about the reference):
+  `test/unit/port/oracle/session-indexer-late-root-liveness.test.ts` asserting the *current* TS original
+  crashes/emits-uncaught under the precondition. The authoritative green assertion lives in the Rust
+  session_watcher test.
+- **adjudicated_by:** antagonist-reviewer session `0000000000000000-07e6276da5bd45cc_anchors-architect`
+  (parent `1d2dea08-9a63-4ecf-bc4b-ee25a852a4d8`), 2026-07-04.
+- **status:** accepted (deviation) — **no source mutation this time (harness/env fix only); harness
+  workaround APPROVED for baseline capture; port owes the guarded watcher + pinning test above.**
+
+**Conditions before this deviation is satisfied / committable:**
+1. Keep `server/coding-cli/session-indexer.ts` pristine (confirmed unmodified). The fix lands only in
+   the PORT.
+2. Land the port-side liveness pinning test above (red on a naive port that mirrors the crash → green
+   once the watcher is guarded).
+3. The T2 claude/Haiku baseline may rely on the pre-created `…/projects` env parity, but the port must
+   NOT be exempted from the projects-absent path — the pinning test is the sole mechanism that verifies
+   the fix, since the T2 differ is blind to this lifecycle defect by construction.
+
+### DEV-0003 — freshcodex reasoning-effort `none`/`minimal` "silent stall" (proposed as DEV-CODEX-EFFORT) — **REJECTED / NOT PROVEN**
+
+**Antagonist adjudication: REJECTED — the objective-defect bar is NOT met, and the stated root cause is
+contradicted by freshell's own committed codex contract.** This entry is recorded for traceability only.
+It grants the differ **NO tolerance** (see fingerprint) — an unlisted original-vs-port divergence in codex
+effort handling remains a port defect to fix, exactly as if this entry did not exist. Source stays pristine
+(it already is; `git status` shows only `port/oracle/**` touched). The T2 codex slice is NOT blocked by this
+rejection: it captured its baseline with `effort='low'` and stands on its own.
+
+**What the implementer proposed:** freshcodex offers efforts `none`/`minimal`/`max`
+(`shared/fresh-agent-models.ts:34,40,46`) and forwards `none`/`minimal` to the codex app-server verbatim
+(`server/fresh-agent/adapters/codex/adapter.ts:130-131`, sent on `turn/start` at `:978`); a live run #1 with
+`effort='minimal'` stalled ~180s with no reply and no error; therefore the PORT should map/clamp `none`/`minimal`
+to a codex-valid effort. Proposed as an objective *hang*.
+
+**Why REJECTED (independently verified, `file:line`):**
+1. **The premise "codex accepts efforts ONLY `{low,medium,high,xhigh}`; `none`/`minimal` are rejected" is
+   directly contradicted by freshell's own codex app-server protocol model.**
+   - `CodexReasoningEffortSchema = z.enum(['none','minimal','low','medium','high','xhigh'])`
+     (`server/coding-cli/codex-app-server/protocol.ts:26`) — `none`/`minimal` are modeled as VALID codex
+     efforts. Set deliberately in commit `d4c7f5b5` ("Bring main to tested dev stack"), not incidental.
+   - That schema governs BOTH the outbound `turn/start` params (`protocol.ts:312`, `effort:
+     CodexReasoningEffortSchema…`) AND the inbound `thread` operation RESULT the app-server RETURNS
+     (`protocol.ts:233`, `reasoningEffort: CodexReasoningEffortSchema…`). freshell modeling the server as
+     *returning* `reasoningEffort ∈ {none,minimal,…}` means its authors observed/expected the server to
+     accept and echo those values.
+   - freshell's real-codex **contract-harness `model/list` fixture advertises `minimal` as a
+     `supportedReasoningEffort`** (`test/helpers/coding-cli/real-session-contract-harness.ts:1121-1130`,
+     `defaultReasoningEffort:'high'` at `:1120`). So `minimal` is a first-class codex effort in freshell's own
+     model of the wire — the opposite of "not accepted by the codex models."
+2. **The claimed failure mode (silent stall, NO error) is inconsistent with "the server rejected the value."**
+   A schema-invalid/unsupported param yields a JSON-RPC error, which `startTurn`
+   (`server/coding-cli/codex-app-server/runtime.ts:1017-1020`) would REJECT on and surface — not a silent hang.
+   A silent 180s stall is evidence *against* "server rejected the effort" and *for* an unrelated stall
+   (mirroring this campaign's earlier opencode "never emits idle" misdiagnosis, which was actually the
+   DEV-0001 health wedge, and the false-green the antagonist previously caught).
+3. **The stall is un-pinned and unreproducible from any deterministic artifact.** The fake app-server ignores
+   `effort` entirely and always completes the turn (`test/fixtures/coding-cli/codex-app-server/fake-app-server.mjs:228-232`;
+   `turn/completed` only fires if the harness scripts it, `:333-345,547`). Nothing in the suite substantiates
+   an effort-dependent hang; the sole evidence is one live observation whose interpretation conflicts with the
+   committed contract. Burden of proof is on the party asserting the original is objectively defective; it is
+   not discharged.
+4. **`max` is NOT a defect — it is correctly handled.** `max`/`xhigh`→`xhigh` on the wire
+   (`adapter.ts:129`), tested at `test/unit/server/fresh-agent/codex-adapter.test.ts:1418→1438`; and
+   `normalizeFreshAgentEffort` already clamps any effort NOT in a model's declared list back to the model's
+   `defaultEffort` (`shared/fresh-agent-models.ts:142-151`), tested at `codex-adapter.test.ts:1477-1509`
+   (`gpt-5.4-flash` + `xhigh` → wire `high`). `none`/`minimal` survive only because freshell *declares them in
+   the model's `thinkingEfforts`* — consistent with the protocol treating them as valid.
+5. **Accepting would prescribe a silent behavior regression on contested evidence.** Clamping/mapping
+   `none`/`minimal` would change a user's selected effort and diverge from the original with no *proven*
+   objective defect — precisely the "scope creep / grading your own homework" failure the ledger's Entry rules
+   (this file, "Entry rules", lines 8-14) and the DEV-0001 adjudication exist to prevent.
+
+**One or two defects? Neither is adjudicable as objective right now:**
+- *(A) Menu vs. reality:* `shared/fresh-agent-models.ts` HARDCODES per-model effort menus instead of deriving
+  them from the app-server's live `model/list.supportedReasoningEfforts`, which is the DOCUMENTED design intent
+  (`docs/plans/2026-04-30-freshcodex-contract-foundation.md:980-981,2625-2629`;
+  `docs/plans/2026-05-03-freshcodex-contract-foundation-test-plan.md:406`, "efforts come from app-server
+  model/list … not stale defaults"). A hardcoded-vs-dynamic gap is a completeness/design item (plausibly
+  intended-future work), NOT a proven hang, and not what was proposed. If a real menu/reality mismatch is ever
+  pinned, the fix belongs in the port's model-catalog layer (derive efforts from `model/list`), not a blind
+  effort clamp.
+- *(B) No turn-completion timeout:* `runtime.startTurn` returns after the JSON-RPC ack
+  (`runtime.ts:1017-1020`); completion arrives only via the async `onTurnCompleted` notification
+  (`adapter.ts:911-928`) with NO deadline — so a turn that never completes (for ANY reason) hangs unbounded
+  with no user-visible error. This robustness gap is code-real and verifiable, but (i) it is orthogonal to the
+  effort vocabulary, (ii) unbounded turns are a general/legitimate agentic property, (iii) freshell asserts no
+  bounded-turn invariant anywhere (unlike DEV-0001's explicit `while (Date.now() < deadline)`), and adding a
+  turn timeout could break legitimate long turns. Not an objective defect as-is, and not what was proposed.
+
+- **objective_defect:** NONE ESTABLISHED. Fails every bar: no crash/error (a rejected effort would error, not
+  hang), no leak, no WS-schema violation, no contradiction of documented behavior (the protocol schema +
+  contract fixture document `none`/`minimal` as VALID), no data corruption, no code-asserted invariant broken.
+  The only bar invoked — *hang* — is asserted from a single un-pinned live run and is refuted as to cause by
+  `protocol.ts:26,233,312` and `real-session-contract-harness.ts:1121-1130`.
+- **original_behavior:** freshcodex offers `none`/`minimal`/`max`, maps `max→xhigh`, and forwards
+  `none`/`minimal` verbatim on `turn/start` (`adapter.ts:129-131,978`) as values its own protocol schema deems
+  valid (`protocol.ts:26,312`). Claimed 180s silent stall on `minimal` is NOT reproduced/root-caused.
+- **port_behavior:** UNCHANGED from the original until/unless the defect is proven. The port must reproduce the
+  original's effort handling; it MUST NOT silently clamp `none`/`minimal` on the strength of this rejected claim.
+- **fingerprint:** **NONE — this is not a whitelisted deviation.** The T2 codex differ must treat ANY
+  original-vs-port divergence in effort handling (including `none`/`minimal` forwarding) as a **failure**, not a
+  tolerated diff. No matcher is registered.
+- **pinning_test:** N/A (rejected). See reconciliation conditions below for what a future *accepted* version
+  would require.
+- **adjudicated_by:** antagonist-reviewer session `0000000000000000-6ff6320fb70d4149_anchors-architect`
+  (parent `1d2dea08-9a63-4ecf-bc4b-ee25a852a4d8`), 2026-07-04.
+- **status:** rejected
+
+**Reconciliation conditions to RE-OPEN (the burden is on the implementer):**
+1. Resolve the contradiction with the committed contract: either (a) produce a captured, non-inference artifact
+   (raw `turn/start` request + the app-server's response/behavior + that specific model's live
+   `supportedReasoningEfforts`) showing the server does NOT accept `none`/`minimal` for the model in use — in
+   which case the objective defect is a **schema/data mismatch** and the fix updates `CodexReasoningEffortSchema`
+   / the model catalog (pinned by the real-codex **contract** test), NOT a blind effort clamp; OR (b) accept
+   that the server DOES accept `none`/`minimal` (as `protocol.ts:26,233` and
+   `real-session-contract-harness.ts:1121-1130` assert) — in which case there is no effort defect and the
+   observed stall must be **re-pinned to its true cause** before any deviation is proposed (do not repeat the
+   opencode-idle misdiagnosis).
+2. Prove the failure mode: demonstrate the hang is caused by the effort value specifically (not setup/health
+   races, not a slow/looping turn, not a dropped completion notification), with an artifact a deterministic test
+   could assert against — otherwise it is not an objective *hang* attributable to effort.
+3. Only after 1–2, a fresh candidate may be filed; harness pinning `effort='low'` for baseline capture remains
+   acceptable test hygiene either way and needs no deviation.
+
+### DEV-BATCH-0001 — live node-ORIGINAL uppercases PTY output in THIS session — **RECLASSIFIED: ENVIRONMENT/RUNTIME ARTIFACT (→ ENV-0001), NOT A DEVIATION; case-fold oracle-weakening REJECTED**
+
+> **✅ RESOLVED (2026-07-06, commit follows).** Root cause CONFIRMED = a stale/corrupt `dist/server`
+> build (the one bundled at 21:40 during this session). A **clean rebuild** (`rm -rf dist/server && npm
+> run build:server` from the still-pristine source) restored the live node-original to correct lowercase
+> output. Re-running both live legs afterward: `t1-equivalence-rust` **10/10 byte-exact, 0 skips** and
+> `t1-batch-equivalence-rust` **44/44 byte-exact, 0 skips** — the node original is now byte-identical to
+> rust and to the committed goldens (`echo-hello` sha `cd2eca35…` on both sides). The detect-and-quarantine
+> posture **self-extinguished exactly as designed** (full byte-exact strictness auto-returned the instant
+> `original == golden`). Confirms the port was byte-for-byte correct throughout; the quarantine is retained
+> as a self-arming safety net for any future env drift. Precise mechanism of the stale build's fold remains
+> unknown but is moot (the artifact is gone; source pristine; :3001 untouched throughout).
+
+**Antagonist adjudication (session `0000000000000000-cb72533e1e304bd5_anchors-architect`, parent
+`1d2dea08-9a63-4ecf-bc4b-ee25a852a4d8`, 2026-07-05). Two rulings:**
+1. **This is NOT a ledger deviation.** The ledger records objective defects in the ORIGINAL that the PORT
+   faithfully-or-deliberately handles (see Entry rules, lines 8-14). This is neither: the **port is
+   byte-for-byte CORRECT**, and the pristine source is NOT objectively defective — its own earlier goldens
+   AND a direct node-pty spawn of the exact shell it uses are both lowercase. The fold is an artifact of the
+   **live node-original process's runtime in this session only**. Kept here for traceability, reclassified as
+   **ENV-0001** (environment / oracle-infra note, below). No source change, no port change, and — critically —
+   **NO differ whitelist and NO tolerance**: the T1/batch differ must NEVER case-fold; any real port
+   case/letter corruption must still fail.
+2. **The implementer's `original.toUpperCase() === rust.toUpperCase()` oracle weakening is REJECTED.** A
+   case-insensitive equivalence assertion masks real divergence — it would pass a port that mangled case,
+   dropped an SGR `m`→`M`, or corrupted any letter — and violates this campaign's byte-exact oracle
+   principle (the same "weaken the oracle so it passes" move rejected in DEV-0001). It is replaced by the
+   **detect-and-quarantine** posture specified below: keep `rust ≡ committed golden` byte-exact and hard, and
+   only SKIP the *live-original* cross-check leg (loudly, with reason) while the live original is provably the
+   case-folded image of its own golden — auto-restoring full strictness the instant the environment recovers.
+
+**What I independently verified (not taken on report):**
+- **Reproduced live, right now**, via the pristine committed `t1-equivalence-rust.test.ts` (unmodified):
+  RUST `echo-hello` = `hello\r\n` sha256 `cd2eca35…` = the committed golden (leg (a) GREEN); NODE original
+  = `HELLO\r\n` sha256 `be947859…`. `seq-3` and `fixed-width-fill` (no lowercase) are node≡rust **exact**;
+  `echo-hello`/`multi-line` (lowercase) diverge. The sole divergence is a **pure ASCII lowercase→uppercase
+  fold — nothing else** (2 failed / 8 passed).
+- **node-pty is NOT the cause.** A direct `node-pty` spawn (same shared binary, `node-pty@1.2.0-beta.11`,
+  native `pty.node` mtime **2026-05-19** — not rebuilt today) of **`/bin/bash -l`** (exactly what
+  `terminal-registry` spawns) AND of plain `/bin/bash` both return **lowercase** `hello`. node-pty and the
+  login-shell/profile path are exonerated.
+- **Not a source or bundle transform.** `git diff server/ shared/` is empty (source pristine); grepping the
+  built `dist/server/**` finds `toUpperCase` only in unrelated label/key/drive/model-name code — none on the
+  terminal-output byte path.
+- **The port is provably correct off the live original entirely:** the deterministic
+  `crates/freshell-terminal/tests/batch_wire_golden.rs` is **2/2 GREEN** (batch framing reproduces every
+  committed golden byte-for-byte + the UTF-16 `endOffset` proof), and RUST≡committed-golden is GREEN on the
+  live wire. Neither touches the compromised live original.
+- The node original boots from `dist/server/index.js` (`external-server.ts:25`; `ensureNodeBundle` →
+  `npm run build:server`), mtime **2026-07-05 21:40** (today) vs newest source **2026-07-04 20:13** — so the
+  node original executes a bundle rebuilt today. **Honesty caveat:** that rebuilt bundle contains no output
+  case-transform and node-pty's addon predates today, so the *precise trigger* of the fold (why this live
+  server-runtime uppercases when a direct node-pty of the same shell does not) is **UNDETERMINED**. This does
+  NOT change the classification — it is confined to the live node-original runtime and is neither the port
+  nor an inherent source defect — but I will not assert the rebuild is the proven cause.
+
+- **objective_defect:** NONE in the port or the pristine source. The "corrupts data" bar applies only to the
+  *live node-original process in this session*, not to freshell's code ⇒ no ledger deviation.
+- **original_behavior (pristine / durable):** case-correct lowercase (the committed goldens; a direct
+  node-pty of `/bin/bash -l`). **Live node-original (this session only):** folds ASCII lowercase→uppercase on
+  the PTY output byte stream, incl. inside ANSI (`\x1b[31m`→`\x1b[31M`).
+- **port_behavior:** portable-pty preserves case; reproduces every committed `<name>.golden` and
+  `<name>.batch.golden` byte-for-byte. **The port is CORRECT; nothing to change.**
+- **fingerprint:** **NONE — not a whitelisted deviation.** The differ gets zero tolerance and must never
+  case-fold. The environmental fault is handled by the oracle-test *quarantine* below, not by the differ.
+- **pinning_proof (port correctness, env-independent):** `crates/freshell-terminal/tests/batch_wire_golden.rs`
+  (2/2) + the `rust ≡ committed golden` legs of `t1-equivalence-rust.test.ts` /
+  `t1-batch-equivalence-rust.test.ts`.
+- **adjudicated_by:** antagonist-reviewer session `0000000000000000-cb72533e1e304bd5_anchors-architect`
+  (parent `1d2dea08-9a63-4ecf-bc4b-ee25a852a4d8`), 2026-07-05.
+- **status:** reclassified — environment/runtime artifact (ENV-0001); **not a deviation; case-fold
+  oracle-weakening REJECTED.**
+
+**EXACT oracle-test posture fix (to be applied by the IMPLEMENTER — I did NOT touch the harness/tests):**
+Keep the durable proof HARD; quarantine only the *live-original* leg. For each scenario let `g` = committed
+golden text, `o`/`r` = live-original / rust captures.
+- **Always-hard, unchanged (the real proof — currently GREEN):** every `rust ≡ committed golden` assertion —
+  `t1-equivalence-rust.test.ts` leg (a); `t1-batch-equivalence-rust.test.ts` legs (a)(b)(c)(d)(e)(f). No
+  case-folding anywhere in these.
+- **`t1-batch-equivalence-rust.test.ts`, the `(PRIZE)` block (lines 265-293):** DELETE the
+  `o.toUpperCase() === r.toUpperCase()` assertions and gate instead:
+  - if `o === g` → `expect(o).toBe(r)` **byte-exact** (full live equivalence);
+  - else if `r === g` **and** `o === g.toUpperCase()` (the original is exactly the ASCII-uppercased image of
+    the golden — the detected ENV-0001 signature) → **SKIP this leg loudly** via `ctx.skip()` (or
+    `it.skipIf(...)`) with, e.g. `[T1-batch][PRIZE] live-original leg SKIPPED for "<name>": node-original
+    ENV-0001 case-fold; rust proven ≡ committed golden. See DEVIATIONS.md ENV-0001.` — derive NO pass from
+    `o`;
+  - else → `expect(o).toBe(r)` (fails — a real, non-case divergence).
+  Keep the `seq-3` exact tail assertion (line 292): it proves live original≡rust EXACTLY where the fold
+  cannot manifest.
+- **`t1-equivalence-rust.test.ts`, the `(b) THE PRIZE` block (lines 167-196), now RED on echo-hello +
+  multi-line:** apply the identical guard — byte-exact `expect(origCap.goldenBytes).toEqual(rustCap.goldenBytes)`
+  when `o === g`; **skip (b) with the ENV-0001 reason** when `r === g && o === g.toUpperCase()` (turning the
+  2 RED into 2 flagged SKIPS) while leg (a) rust≡golden stays hard/green; any other diff still fails.
+- **Why this is NOT a re-weakening:** `toUpperCase` here is used only as a *classifier* to RECOGNIZE the
+  known fault signature and then SKIP — never as the equivalence *assertion* (contrast the rejected use,
+  where it WAS the assertion). The skip is (i) NARROW — fires only when the original is the exact
+  case-folded image of its own golden; (ii) LOUD — a reported skip/warn, never a silent green;
+  (iii) SELF-EXTINGUISHING — the instant the live original returns lowercase, the guard falls through to the
+  hard byte-exact `original ≡ rust` assertion automatically. `toUpperCase()===toUpperCase()` would instead
+  permanently accept case-mangling forever. Full power to catch a genuine port case-defect is retained
+  because `rust ≡ committed golden` stays byte-exact and hard.
+
+**ENV-0001 — root-cause follow-up (NON-BLOCKING; does NOT gate landing the batch work).**
+The batch-framing code and the corrected oracle posture may land now: the port is proven correct against the
+durable goldens, a direct node-pty, and the deterministic crate golden — none of which involve the
+compromised live original, so there is nothing in port/source that depends on the fold's mechanism. Deeper
+root-cause is NOT required before landing, but MUST be tracked before the live `original ≡ rust` cross-check
+is relied on again (it is a valuable belt-and-suspenders leg): (a) re-run after a clean
+`npm run build:server` / fresh environment and re-capture; (b) if it persists, bisect the today-rebuilt
+`dist/server` bundle vs a session/toolchain change and read the live server's pty master bytes directly;
+(c) confirm whether a slave-visible termios flag (OLCUC/IUCLC/XCASE) or an above-line-discipline transform is
+responsible (the builder's note reports all three flags OFF). Until resolved, the quarantine above keeps the
+oracle honest.
+
+**Blast radius (ruled): T1/batch live-original leg ONLY.** The fold is at the terminal PTY output byte
+layer. T2 assistant invariants arrive via provider SDK/SSE/JSON-RPC + provider DB (not the terminal PTY) and
+are structural booleans / a fixed sentinel token we send — a PTY case-fold cannot flip them, so T2 greens
+stand (if any future T2 assertion ever compared literal lowercase text captured from a PTY, revisit — none
+does today). T3 runs against the RUST server and asserts presence/output/layout, not exact terminal case; its
+committed visual baselines stand. All EARLIER green T1/batch results stand — captured before this session's
+regression from a healthy (lowercase) original; the durable proof (rust≡committed golden, re-verified now) is
+independent of the live original's later drift. Only the live-original cross-check is temporarily quarantined,
+and only for lowercase-bearing scenarios (`seq-3`/`fixed-width-fill` still match exactly, proving the wire
+path itself is intact).
+
+### DEV-0004 — updater's live GitHub update-check gets a 5s bounded timeout (original's fetch is unbounded)
+
+- **objective_defect:** *breaks an invariant the code itself asserts* — same bar as DEV-0001's
+  un-timed health probe. The original's `GET /api/version` handler resolves `updateCheck` via
+  `server/updater/version-checker.ts`'s `checkForUpdate`, which calls the bare Node `fetch()`
+  against `https://api.github.com/repos/danshapiro/freshell/releases/latest` with **no timeout,
+  no `AbortController`, no bound of any kind**. A slow or hung GitHub API (or a captive-portal/
+  DNS-blackhole network) therefore blocks that request indefinitely, and — because
+  `/api/version` awaits it inline — hangs the whole `/api/version` response with it. This is the
+  identical bounded-wait defect class DEV-0001 already accepted: an un-timed network fetch on a
+  path the caller expects to complete, breaking any bounded-wait expectation and risking an
+  indefinite hang under real-world network conditions.
+- **original_behavior:** `checkForUpdate` issues one un-timed `fetch()` to the GitHub releases
+  API; a slow/unreachable GitHub blocks the call (and `/api/version`) with no upper bound.
+- **port_behavior:** `crates/freshell-server/src/updater.rs`'s `check_for_update_live` issues the
+  same GitHub call via `reqwest`, with `.timeout(REQUEST_TIMEOUT)` where
+  `REQUEST_TIMEOUT = Duration::from_secs(5)` (`updater.rs:33`). On timeout/any transport error the
+  call degrades to the same `UpdateCheckResult` shape with a populated `error` string (never a
+  panic, never a hang) instead of blocking `/api/version`. A successful result is cached for 10
+  minutes, success-only (`UpdateChecker::check`, `updater.rs:171-193` — an errored check is never
+  cached, so a transient failure is retried on the very next request, matching the original's
+  `createCachedUpdateChecker`, `version-checker.ts:80-99`).
+- **fingerprint:** REST-parity sweep, `version.happy`/`version.cookie-auth` rows — timing-only:
+  the differ tolerates the port completing (bounded, ≤5s) where the original could in principle
+  hang; the `updateCheck` VALUES themselves (`updateAvailable`/`currentVersion`/`latestVersion`/
+  `releaseUrl`/`error`) are still compared byte-for-byte (this is R5's fix, not a value-masking
+  deviation — `updateCheck` is already registered `opaque` in the sweep's normalization list for
+  the live-network-data reason, unrelated to this timeout).
+- **pinning_test:** `crates/freshell-server/src/updater.rs`'s `updater::tests` module — `request_timeout_is_bounded_at_five_seconds`
+  (pins the bound itself, deterministic/network-free) plus
+  `unreachable_host_degrades_to_error_field_not_panic` (asserts the degrade-to-`error`-field shape,
+  never a panic/hang) and `cache_reuses_result_within_ttl_for_same_version` (the success-only
+  cache). All three existed or were extended for this entry; verified present and passing.
+- **adjudicated_by:** antagonist-reviewer session
+  `0000000000000000-dc849de1bd584a39_self-driving-reviewer`, 2026-07-11.
+- **status:** accepted.
+
+### DEV-0005 — WSL-hosted `cmd` shell pane strands the user in `C:\Windows` instead of the requested workspace cwd
+
+- **objective_defect:** *errors* (primary bar — per adjudication condition 1): the original
+  deterministically prints TWO error banners on every WSL-hosted cmd pane launch with a valid `/mnt`
+  workspace cwd, and lands the user in the wrong directory. Secondary corroboration only: *breaks an
+  invariant the code itself asserts* — the reference's cmd branch exists specifically to land the shell
+  in the requested directory (on WSL it passes `cwd: undefined` to node-pty and injects `cd /d <winCwd>`
+  into the `/K` command, `server/terminal-registry.ts:1177-1199`, comment "Use /K with cd command to
+  change to Windows directory"). At runtime BOTH halves of that mechanism fail deterministically on a
+  real WSL host:
+  1. cmd.exe inherits the server's Linux cwd as a `\\wsl.localhost\...` UNC path → *"CMD.EXE was started
+     with the above path as the current directory. UNC paths are not supported. Defaulting to Windows
+     directory."*
+  2. The injected `cd /d "<winCwd>"` is destroyed by WSL-interop argv→Windows-cmdline conversion (every
+     embedded `"` from `quoteCmdArg`, `terminal-registry.ts:1014-1044`, arrives escaped as `\"`), and
+     cmd's builtin `cd` rejects it → *"The filename, directory name, or volume label syntax is
+     incorrect."* The shell is stranded in `C:\Windows`.
+  Evidence: reproduced 3/3 against the freshly-booted pristine original (17871) with a valid, existing
+  DrvFs workspace `/mnt/c/Users/Public/freshell-matrix-ws-*` — `port/oracle/matrix/notes-orig-cmd-fallback.md`
+  (OCR transcript of `recheck-orig-cmd-1-cmd.png` shows both error banners + the `C:\Windows>` prompt).
+  PowerShell is unaffected (its `Set-Location -LiteralPath '<path>'` uses single quotes that survive
+  interop) — matching the matrix (original powershell PASS).
+- **original_behavior:** A `terminal.create {shell:'cmd'}` with a valid `/mnt/<drive>/...` cwd on a
+  WSL-hosted server opens cmd.exe in `C:\Windows` (after printing the two error banners), silently
+  discarding the requested workspace directory.
+- **port_behavior:** `wsl_windows_shell_inherit_cwd` (`crates/freshell-platform/src/spawn.rs:709-739`,
+  in-code flagged "PORT FIX (deliberate, reported divergence)"): the port hands the child PTY a valid
+  Linux mount cwd (`/mnt/<d>/...`) that WSL interop maps to the intended Windows directory — no UNC
+  inheritance, no in-command `cd`. Gated on the mount actually existing (`FileProbe`), so a missing
+  mount falls back to the faithful in-command mechanism. The cmd pane lands in the requested workspace.
+- **fingerprint:** Matrix §7.E, `cmd` pane-kind cell on WSL-hosted servers only: differ tolerates
+  original={cwd falls back to `C:\Windows`} vs port={cwd lands in the requested workspace}. Marker
+  echo and every other cmd-cell assertion (creation, output round-trip, screenshot) must still match.
+  No tolerance for the native-Windows-hosted server (17873): no interop layer there; both systems must
+  land in the workspace.
+- **pinning_test:** `crates/freshell-platform/tests/spawn_tests.rs` —
+  `wsl_cmd_inherits_mount_cwd_when_present` (probe WITH the mount ⇒ spec carries the `/mnt` cwd and
+  bare `/K`), `wsl_cmd_no_cwd_inherits_mnt_c_root_when_present`, and
+  `wsl_cmd_falls_back_to_in_command_cd_when_mount_absent` (probe WITHOUT ⇒ the faithful
+  `['/K','cd /d ...']` golden preserved) — pre-existing since the PORT FIX landed (4e148667 class).
+  Live proof: matrix cmd cells (`sbp9-wsl-chrome-report.json`, `sbp9-win-chrome-report.json` PASS
+  in-workspace) vs 3/3 original fallback re-drives (`recheck-orig-cmd-{1,2,3}-report.json`).
+- **adjudicated_by:** council panel (intent-keeper, cranky-old-sam, crusty-old-engineer, user-advocate,
+  tester-breaker; restless-old-brian unavailable — bundle not installed, gap disclosed), forked session
+  `5b30a1942db44dc0-ccb27c93a63b41eb_self`, 2026-07-11. Verdict: **ACCEPT-WITH-CONDITIONS** — (A) objective
+  defect: YES on the "errors" bar (primary) + code-asserted-intent (secondary); (B) proper DELIBERATE_FIX,
+  not scope creep; (C) fingerprint appropriately narrow; (D) pinning tests directionally sufficient with
+  named gaps. All 5 conditions SATISFIED same-day: (1) objective_defect reordered to lead with the errors
+  bar; (2) fields closed (this entry); (3) is-dir gate — `FileProbe::is_dir` + `wsl_windows_shell_inherit_cwd`
+  gates on it + `wsl_{cmd,powershell}_falls_back_when_mount_exists_as_a_file` tests; (4) TOCTOU guard —
+  `PtyTerminal::spawn` degrades to a cwd-less spawn (logged) when the cwd spawn fails, never a raw error
+  the original couldn't produce; (5) host-gated live integration tests
+  `crates/freshell-terminal/tests/wsl_interop_live.rs` (`#[ignore]`, run green on this host — see commit).
+- **status:** accepted
+
+
+### DEV-0006 — codex terminal panes launch WITHOUT the `--remote <wsUrl> -c features.apps=false` pair (spec cli-argv-fidelity.md rev 2.1 §5 U2)
+- objective_defect: none in the original — this is a PORT-SIDE reduced-scope deviation, pre-committed by the spec itself ("must be tracked as a deviation, not silently shipped", §5 U2).
+- original_behavior: every live `terminal.create {mode:'codex'}` plans a codex app-server launch (`planCodexLaunch`, ws-handler.ts:934-943, 2474-2492) and emits `["--remote", "<ws://127.0.0.1:...>", "-c", "features.apps=false"]` as the first four codex argv tokens (live capture 2026-07-13, `~/freshell-scratch-006/orig-codex.json`: `[codex, --remote, ws://127.0.0.1:40781, -c, features.apps=false, -c, tui.notification_method=bel, ...]`).
+- port_behavior: identical argv EXCEPT those four tokens are absent (`~/freshell-scratch-006/rust-codex.json`) — the codex TUI runs **unmanaged**: no app-server attach, and `features.apps` remains at the CLI default instead of being forced off. The rest of the argv (tui notification pair, inline MCP TOML) is byte-identical to the original.
+- gating_site: `crates/freshell-ws/src/terminal.rs` (`codex_remote_ws_url: Option<String> = None`, comment references this entry). The resolver itself is argv-complete for `--remote` (goldens G-X1/G-X2/G-W2 in `crates/freshell-platform/src/cli_launch_goldens.rs` pass); only the terminal.create wiring to the `freshell-codex` launch plan is missing.
+- pinning_test: `g_x0_codex_shipped_deviation_shape_dev_0006` (`cli_launch_goldens.rs`) pinned the shipped gap-shape byte-for-byte so a refactor could not half-emit the pair unnoticed (council condition 6). [2026-07-30, S5.e: G-X0 RETIRED at the flag-default flip (deleted, commit 473a337e); the live-path pins are now `g_x1_codex_live_fresh` / `g_x2_codex_live_resume` in the same file.]
+- closure: wiring `freshell-codex`'s app-server launch plan into `terminal.create` — `port/machine/specs/coding-cli.md` (sidecar-lifecycle scope) remaining-work; owner: port campaign orchestrator (self-driving queue).
+- user_facing_disclosure: to be carried in the EQUIVALENCE-REPORT known-limitations addendum (task-009): "codex panes in the Rust build run standalone, without freshell's managed app-server integration."
+- adjudicated_by: /council fork, session e1b497f11d874275-50ff1d609ef44de9_self, 2026-07-13 — APPROVE (conditional, all conditions above incorporated). Implementer: restart #12 orchestrator (distinct from adjudicating panel).
+- closure_progress (2026-07-22, DEV-0006 S4, commits d5d6e423 + inc.2): the managed-launch MECHANISM is fully wired — launch planner + app-server sidecar lifecycle + remote proxy (`crates/freshell-codex/src/launch_lifecycle.rs`) into BOTH create paths (WS `terminal.rs`, REST `terminal_tabs.rs`) — but FLAG-GATED, default OFF (`FRESHELL_CODEX_MANAGED_LAUNCH=1`), per the S4 council fence: the proxy path exists to feed durability binding (S5/DEV-0008), so shipping the launch mechanism without S5's consumers would change codex terminal behavior for no user benefit. Flag OFF is byte-identical to the shipped deviation shape (G-X0 still pins the live path [stale as of 2026-07-30: G-X0 retired at the S5.e flip — next entry]); flag ON is proven by the host-gated e2e (`crates/freshell-ws/tests/codex_managed_launch_e2e.rs`: `--remote` 4-tuple argv + sidecar + proxy + live relay). S5 (durability/activity/`terminal.meta.updated`, whole-or-not) + the flag-default flip land together and CLOSE this record; G-X0 is retired for G-X1 at that flip, not before.
+- closure_progress (2026-07-30, DEV-0006 S5, commit 473a337e): S5 landed the consumers and flipped the default ON. The parked RemoteProxyEvent stream now drains through one per-terminal task at CodexTerminalLaunchManager::adopt into the EXISTING single-writer tails: Candidate → codex_identity::adopt_codex_identity (sessionRef + ledger + associated/meta.updated in the pinned order), TurnStarted/TurnCompleted → the freshell-activity codex tracker via a third proxy lane with generalized cross-lane dedupe, fork candidates deliberately ignored in favor of the landed disk fork-watch rebind lane (D-FORK), repair/lifecycle-loss log-only (§6 fence). require_candidate_persistence is ENFORCED in the proxy (initial_capture gate: turn/start + thread/fork held until persist, 45s capture timeout, 5s hold timeout, -32000 rejects — legacy remote-proxy.ts parity; timeout consequence softened from legacy's terminal kill to reject+close+log, D-GATE-SOFT). The rollout locator is suppressed at arm time for managed panes with the D-03 rule recorded (first bind wins; proxy candidate authoritative). Structural prerequisites: spawn helpers unified on codex_sidecar_spawn_spec; singleton kept with a set-once proxy-event sink instead of DI (D-SINK); binding_reason explicitly dropped at adoption (D-REASON). D-C-REVISIT resolved BEFORE the flip: sidecar planning budget (2 concurrent, fail-fast) covering both doors + the REST spawn-gate acquire moved below the plan (2026-07-27-rest-spawn-gate.md §D-C addendum). FRESHELL_CODEX_MANAGED_LAUNCH now defaults ON (only exact "0" disables); G-X0 retired, G-X1/G-X2 promoted to the live-path pins, e2e OFF-control leg inverted + managed resume leg added; the four plain-CLI fake-codex suites pin the flag "0".
+- status: closed (2026-07-30, commit 473a337e — S5 + flag-default flip landed together per the S4 council fence)
+
+### U1-RATIFICATION — injected MCP server command adopts option (a): the reference's own Node repo layout (spec cli-argv-fidelity.md rev 2.1 §5 U1)
+- decision: option (a) — resolve the SAME Node repo layout the reference resolves and inject `node --import <root>/node_modules/tsx/dist/loader.mjs <root>/server/mcp/server.ts` (dev) / `<root>/dist/server/mcp/server.js` (`NODE_ENV=production` + built). Rejected: (b) new Rust MCP server binary (bigger lift, out of task scope), (c) omit injection behind a flag (breaks live fidelity now).
+- known_divergence (kept visible, not "no divergence"): reference walks up from its own module dir (`server/mcp/` __dirname) with fallback `__dirname/../..`; Rust walks up (max 5) from process CWD with fallback to the start dir (`crates/freshell-platform/src/mcp_inject.rs::find_repo_root`). Identical result whenever the server runs from inside the freshell checkout (the deployment under test); divergent only when the Rust server's cwd is outside any freshell repo — then the injected repo paths are bogus (MCP server fails to start inside the CLI; the CLI pane itself still works), same failure class as the reference run from a relocated build. tsx unresolvable raises the reference-exact error (pinned: `real_runtime_tsx_unresolvable_raises_reference_error`).
+- evidence: 2026-07-13 live differential — claude/codex/opencode child argv byte-identical (modulo terminalId/uuid/port) between original 17871 and rust 17872, incl. MCP args (`~/freshell-scratch-006/*-{claude,codex,opencode}.json`, `oc-probe.mjs` lifecycle probe: config merge + $schema race + refcount + cleanup identical).
+- seam: goldens inject `McpRuntime::server_command_args` so this ratification is revisitable (e.g. future Rust MCP server) without invalidating golden coverage.
+- adjudicated_by: /council fork, session e1b497f11d874275-50ff1d609ef44de9_self, 2026-07-13 — APPROVE.
+- status: accepted
+
+### DEV-0007 — native-Windows cmd-branch CLI launch of a quote-heavy payload fails MILDER than the reference (spec cli-argv-fidelity.md rev 2.1 §5 B1)
+- objective_defect: in the ORIGINAL — its default native-Windows CLI path is completely broken: the
+  flattened `quoteCmdArg`-everything + node-pty `argsToCommandLine` line makes cmd.exe fail with
+  `'\"claude\"' is not recognized as an internal or external command` (claude never launches). Proof
+  2026-07-13: reference bytes computed with the verbatim sources (terminal-registry.ts:1014-1048 +
+  node_modules/node-pty/lib/windowsPtyAgent.js:220-273) and REPLAYED live via CreateProcess
+  (`~/freshell-scratch-006/b1-tail-orig-cmd.txt` + `replay.mjs`, exit 1, error above).
+- original_behavior (native Windows, `terminal.create {mode:'claude', shell:'system'}` → cmd branch,
+  tr:949-953/1133-1137): claude never launches; the pane drops to a bare cmd prompt after the
+  "not recognized" error. PS branch (`shell:'powershell'`): claude launches but PowerShell 5.1's
+  child-argument passing strips the embedded quotes — `Error: Settings file not found: {hooks:...`.
+- port_behavior: PS branch — flattened CreateProcess line BYTE-IDENTICAL to the reference
+  (`~/freshell-scratch-006/b1-flatten-ps.txt`, live pane `b1-claude-ps.json`) → identically broken,
+  bug-for-bug EQUIVALENT, no deviation. cmd branch — the previously-ratified **PORT-FIX quoting gate**
+  (`spawn.rs build_cmd_command`, bare-when-plain) produces different bytes
+  (`b1-flatten-cmd.txt` first diff at offset 31): claude LAUNCHES, parses argv, rejects the
+  still-escaped `--settings` value (`Error: Settings file not found: "{\"hooks\":...`) and exits to the
+  cmd prompt. A strictly MILDER failure of an already-broken-in-reference path. In NEITHER system does
+  the settings/hook payload arrive intact on native Windows.
+- scope_limit (council condition): this "reference-equivalent or strictly-milder failure, fully
+  documented" criterion is a CONSEQUENCE of the already-ratified PORT-FIX quoting gate and applies to
+  THIS argv/quoting bug class only. It is NOT a general license for future deviations; "bug-for-bug"
+  remains the operative bar elsewhere.
+- environment_pin: 2026-07-13, SurfaceBookPro9, Windows 10.0.26200.8655, cmd.exe + Windows
+  PowerShell 5.1.26100.8655 (not pwsh 7), claude.exe 2.1.59 (`c:\Users\dan\.local\bin\claude.exe`),
+  node-pty 1.2.0-beta.11, portable-pty 0.8.1. RE-VERIFY if any of: claude's argv/settings parsing
+  changes, the default Windows shell resolution moves to pwsh 7, or portable-pty's ArgvQuote changes.
+- evidence_gap (named, open hardening — not a blocker): "strictly milder" is proven for the shipped
+  claude settings payload only. Adversarial payloads bearing cmd metacharacters (`&`, `|`, `^`, `%`,
+  unbalanced quotes) through the PORT-FIX bare-token path are untested and could fail worse. The
+  orphaned `freshell-mcp/<id>.json` on a failed-in-claude launch is cleaned by the pane exit hook
+  (reference lifecycle parity), not leaked per-retry.
+- upstream: the underlying product breakage (native-Windows CLI panes never receive their bootstrap
+  settings in the reference) is out of the port's mandate; not tracked upstream by this campaign —
+  recorded here so that is explicit rather than ambiguous.
+- user_facing_disclosure (EQUIVALENCE-REPORT known-limitations addendum, task-009): "On native
+  Windows, coding-CLI panes do not receive their bootstrap `--settings`/hook payload — claude starts
+  and prints a settings error (in the original it fails to launch at all via the default shell). This
+  is a known, permanent condition of the current Windows shell-quoting pipeline; no workaround exists."
+  Council standing note for the human: a user-reachable known-issues note (docs/release notes) is
+  recommended at productization; product-surface decision, not taken unilaterally here.
+- pinning: flattened-line truth files `~/freshell-scratch-006/b1-flatten-{cmd,ps}.txt`,
+  live pane captures `b1-claude-{cmd,ps}.json`, replay outputs (orig cmd tail → "not recognized";
+  rust cmd tail → claude settings error). Goldens G-C4 (cli_launch_goldens.rs) continue to pin the
+  pre-flattening argv; the PORT-FIX gate keeps its existing coverage.
+- adjudicated_by: /council fork, session 4e6e24ceb0414802-3dcecf0d6f4848e9_self, 2026-07-13 —
+  option (a) adjudicated with conditions (all folded in above). Implementer: restart #13 orchestrator
+  (distinct from adjudicating panel).
+- status: accepted (B1 discharged: PS branch bug-for-bug equivalent; cmd branch milder-failure
+  documented under the ratified PORT-FIX; native-Windows leg "done" per the council's scoped criterion)
+
+### DEV-0008 — `terminal.meta.updated` push subsystem (TerminalMetadataService) left unported; `terminals.changed` WS-lifecycle wiring ported to exact parity
+- objective_defect: none — PORT-SIDE reduced-scope deviation found by the task-007 robustness battery's
+  live frame capture (`port/oracle/robustness/exit-orig.json`): around terminal create/exit the original
+  emits (a) `terminals.changed {revision}` and (b) `terminal.meta.updated {upsert/remove}`; the rust
+  server emitted neither from the WS paths.
+- resolution split:
+  - `terminals.changed` — PORTED (this commit, exact parity): shared monotonic revision counter across
+    REST `/api/terminals` PATCH/DELETE and WS lifecycle (one sequence, like the original's single
+    `WsHandler.terminalsRevision`); broadcast after `terminal.create` success/failed-delivery
+    (ws-handler.ts:2553/2570) and valid `terminal.kill` (ws:2988); NOT on plain natural exit (original
+    broadcasts on exit only for `recoverableForRestore` terminals — session-repair subsystem, unported;
+    live capture confirms no `terminals.changed` on a plain exit). Code:
+    `crates/freshell-ws/src/terminal.rs::broadcast_terminals_changed` + tests
+    (`terminals_changed_tests`); live re-probe frames match original ordering
+    (`terminal.created` → `terminals.changed`).
+  - `terminal.meta.updated` — DOCUMENTED GAP (council option (a)): rust emits NO
+    `terminal.meta.updated` frames. Producer is `server/terminal-metadata-service.ts` (302 lines:
+    git-enriched per-terminal records via 3 live `git` probes per update, retire-TTL 1h,
+    commit-if-changed dedupe) whose update triggers are entangled with subsystems already documented
+    as unported (coding-CLI session association from codex/opencode controllers + claude session
+    watchers, `server/index.ts:475-532,:727,:869`; rename-cascade; session-association-broadcast) —
+    see DEV-0006. A PARTIAL port (create-upsert/exit-remove only) was REJECTED by council as strictly
+    worse: confidently-divergent records in coding-CLI flows vs a clean, honest absence.
+- client_behavior_verification (council condition 2 — the three tester-breaker scenarios, run/verified
+  before task-007 close):
+  1. Fresh connect, zero meta pushes ever: the SPA's `terminal.inventory` handler treats a missing
+     `terminalMeta` field as `[]` (`src/App.tsx:962`) and `PaneContainer` falls back to an EMPTY map
+     (`src/components/panes/PaneContainer.tsx:220-221`) — badges are simply ABSENT, never
+     stale-but-confident; no crash, no `undefined` render. Live: every rust rendering/interchange leg
+     (t6 vision 6/6 PASS at 878846f5; leg3-rust cross-client screenshots this task) ran with zero
+     `terminal.meta.updated` frames and rendered correctly.
+  2. WS reconnect: on every (re)connect the inventory snapshot RECONCILES the client store — records
+     absent from the incoming `terminalMeta` (and not locally newer) are removed
+     (`src/App.tsx:964-975` + `setTerminalMetaSnapshot`), so stale records cannot survive a reconnect;
+     on the rust server the store is always empty anyway. Live: interchange leg1/leg2 URL-switch legs
+     (full reload + reconnect, tabs restore, marker replay) PASS both directions.
+  3. Long-uptime terminal-ID reuse: rust terminal ids are UUIDv4 (no reuse); no meta record is ever
+     pushed, so no cached record exists to misattach; the snapshot reconciliation (scenario 2) would
+     clear any leftover on the next inventory regardless. Verified by code inspection (same cites).
+  Net: the user-advocate's "stale-but-confident badge" failure mode CANNOT occur on the rust server —
+  metadata badges are absent, not frozen: no creation-time push ever seeds them.
+- sidebar_data_path: directory/titles still refresh via REST — the client schedules
+  `fetchTerminalDirectoryWindow` + session-window refresh on `terminals.changed`
+  (`src/lib/terminal-invalidation-handler.ts:107-120`), which the rust server now emits at
+  create/kill; `/api/terminals` + `/api/session-directory` are ported byte-parity (task-005f/007
+  differentials).
+- user_facing_disclosure (EQUIVALENCE-REPORT known-limitations addendum, task-009 — council condition 1
+  wording, user-visible consequence not mechanism): "On the Rust server, live sidebar terminal metadata
+  badges (git branch/dirty state, token usage) are not populated at all: the push channel that feeds
+  them is not implemented, so those badges stay absent for the life of a terminal — they never show
+  stale data, they show none. Terminal titles and the session directory still load and refresh via REST."
+- client_tweak_option (council condition 4, optional): visually marking the fields non-live would touch
+  `src/` — BLOCKED by the campaign's additive-only purity rule (server/ shared/ src/ diff must stay
+  empty); not taken. Moot in practice: on the rust server the fields render absent, not stale.
+- closure (council condition 3, concrete tracked reference): port `TerminalMetadataService` +
+  `terminal.meta.updated` WHEN the coding-CLI controllers/session-association subsystem is ported —
+  same tracked remaining-work item as DEV-0006's closure (`port/machine/specs/coding-cli.md`
+  sidecar-lifecycle scope; listed in port/HANDOFF.md §9 remaining-work and STATE.yaml TASK-007 block
+  as "terminal-metadata push subsystem (DEV-0008)"); owner: port campaign orchestrator (self-driving
+  queue).
+- adjudicated_by: /council fork, session 55810a6c465e42c7-ae6c385e4065492e_self, 2026-07-14 —
+  option (a) APPROVE with conditions 1-3 mandatory (all discharged above), condition 4 recommended
+  (recorded as blocked-by-purity + moot). Options (b) partial port and (c) full port now: REJECT
+  unanimous. Implementer: restart #16 orchestrator (distinct from adjudicating panel).
+- closure_progress (2026-07-30, DEV-0006 S5, commit 473a337e): CORRECTION + closure. The record's "rust emits NO terminal.meta.updated frames" text (:605-606, restated in the client_behavior_verification scenarios and the user_facing_disclosure) has been stale since 2026-07-16/07-26: the rust server emits terminal.meta.updated at create time (terminal.rs, b9e0c1a3) and at association/rebind time (codex_identity.rs / opencode_association.rs / codex_association.rs), in the pinned associated-then-meta order. The remaining gap is ONLY the git/tokenUsage enrichment (terminal-metadata-service.ts's git probes, retire-TTL, commit-if-changed dedupe), which the adjudicated closure condition (:644-649) does not require. With DEV-0006 S5 landing the coding-CLI session-association subsystem's proxy-fed consumer wiring and the flag flip, the closure condition ("port … terminal.meta.updated WHEN the coding-CLI controllers/session-association subsystem is ported") is met. Updated disclosure: sidebar badges carry provider/session identity from the association push; git branch/dirty and token usage stay absent (enrichment unported, separately adjudicable).
+- closure_update (2026-08-09, naming-persistence-sweep Task 18, commit ed1bd71a6): the
+  `terminal.meta.updated` producer + `TerminalMetadataService` equivalent is now PORTED —
+  `crates/freshell-ws/src/terminal_meta.rs` (`TerminalMetaRegistry`: commit-if-changed with
+  updatedAt-ignoring equality, retire with git-field strip + 1h retired TTL, list/get;
+  `enrich_from_cwd` over the Task 17 `freshell_platform::git_meta` helpers) — and wired into
+  every producer: the `terminal.create` path (seedFromTerminal parity for EVERY terminal,
+  enrichment run async after `terminal.created`), the amplifier/opencode association drains
+  (enrich + commit through the shared registry), PTY exit + `terminal.kill` (retire →
+  `{remove:[terminalId]}`), the connect handshake (`terminal.inventory.terminalMeta` now ships
+  `list()` instead of the hardcoded `[]`), and the auto-title sweep's per-session metadata
+  refresh (Node's `applySessionMetadata` analog; its TRIGGER is a KEPT divergence — see
+  DEV-0020). The user_facing_disclosure sentence above NO LONGER APPLIES: git branch/dirty
+  badges populate live on the Rust server. Pinning coverage:
+  `crates/freshell-ws/src/terminal_meta.rs` inline tests +
+  `crates/freshell-ws/tests/session_identity_frames.rs` (inventory `terminalMeta` row
+  assertions) + the Task 23 Playwright git-badge spec.
+  Surfaced internal-contract divergence (Task 18, recorded 2026-08-09 / Task 24): `TerminalMetaRegistry::retire()` returns `false` for an ALREADY-retired entry (Node re-stamps `retiredAt` and returns `true`) — internal API contract only, wire behavior stays Node-equivalent (exactly one `{remove:[terminalId]}` per terminal lifetime); documented in the method's rustdoc (`terminal_meta.rs:82-93`) + inline test.
+- status: closed (2026-07-30, commit 473a337e — closed with DEV-0006 per :644-649; the git/tokenUsage enrichment noted there as out of scope was subsequently ported by the naming-persistence-sweep — see closure_update 2026-08-09)
+
+### DEV-0009 — idle auto-kill reap clock ignores self-generated repaint noise (original never reaps an animated detached TUI)
+
+- objective_defect: *resource leak* — `server/terminal-registry.ts:1705-1708` (the `onData`
+  handler) bumps `lastActivityAt` on **every** PTY output frame, and `enforceIdleKills`
+  (`terminal-registry.ts:1416-1435`) keys idleness on that stamp. Any detached terminal whose program merely repaints (codex's braille
+  spinner + ticking `(Ns • esc to interrupt)` counter, claude's ticking `✻ Crunched for Ns` line,
+  any status-bar clock) refreshes the stamp continuously, so `settings.safety.autoKillIdleMinutes`
+  can never reap it: the PTY, its child process tree, and its replay buffer are retained
+  indefinitely — precisely the leak the setting exists to prevent. Observed in production
+  2026-07-25: 10 detached CLIs alive 10-22h against a 3h threshold (the client-side half of that
+  incident was PR #534; this entry is the server-side half).
+- original_behavior: idleness = `now - lastActivityAt`, where `lastActivityAt` is refreshed by
+  every PTY output frame regardless of content; a detached animated TUI is exempt from the idle
+  sweep forever.
+- port_behavior: the port keeps `lastActivityAt`'s wire semantics identical (still bumped on
+  every output frame and every input write — terminal-core.md §1.3 holds for `inventory`, the
+  directory projection, and sorting) but gives `enforce_idle_kills` its own reap clock,
+  `last_meaningful_activity_at` (`crates/freshell-terminal/src/registry.rs`), refreshed by input
+  writes, by transition-to-detached (a freshly detached or socket-orphaned terminal gets one full
+  threshold of grace — its clock may have gone stale while a watcher was attached, since attached
+  terminals are reaper-exempt), and by output frames carrying genuinely new content per the
+  stateful per-terminal `NoiseScanner` (`crates/freshell-terminal/src/idle_noise.rs`): a frame
+  whose escape-stripped text — minus whitespace, ASCII digits, Braille spinner glyphs
+  (U+2800-U+28FF), and a small spinner-glyph set (`✻`-family incl. `✶`, `|/-\`, bullets
+  `·`/`•`/`◦`, geometric spinners) — is empty or fingerprint-identical to one of the 32 most
+  recent distinct frames counts as repaint noise and does not refresh the reap clock (ring sized
+  for codex's shimmer animation, which cycles ~13-16 letter-subset fingerprints; measured on
+  codex 0.145.0). Detection fails open (anything not provably a repeat counts as activity);
+  attached terminals stay exempt and `autoKillIdleMinutes <= 0` stays disabled, both unchanged.
+  Known accepted limitation (deliberate, and a genuine regression vs legacy): the original
+  would NEVER reap a detached workload whose only output novelty is numeric (curl/dd-style
+  single-transfer meters, bare numeric step logs); the port WILL reap it after the threshold
+  despite it being genuine work — at fingerprint level such output is indistinguishable from
+  the ticking counters this deviation exists to defeat. Bar-style and prose-emitting workloads
+  are unaffected; unit rollovers (kB→MB→GB) reset the clock; the threshold is user-tunable and
+  `<= 0` disables the sweep entirely. Product-owner approval: explicitly accepted by the user
+  (AD-1) on 2026-07-27, reaffirming the 2026-07-26 plan-phase decision
+  (`docs/plans/2026-07-26-idle-repaint-noise.md`).
+- fingerprint: behavior/timing-only — no wire message, field, or schema change; the only
+  observable divergence is that the port's idle sweep reaps a detached repaint-only terminal after
+  the threshold where the original never would (surfaces as a `terminal.killed by=idle` /
+  `terminal.exit` for such a terminal, and its absence from subsequent inventories).
+- pinning_test: `crates/freshell-terminal/src/registry.rs` tests
+  `enforce_idle_kills_reaps_detached_terminal_with_only_repaint_noise`,
+  `enforce_idle_kills_spares_detached_terminal_streaming_genuine_output`,
+  `detach_grants_full_idle_threshold_of_grace`, and
+  `disconnect_grants_full_idle_threshold_of_grace`, plus the `NoiseScanner`
+  unit suite in `crates/freshell-terminal/src/idle_noise.rs` (split-escape statefulness, ring
+  membership, digits-only ticks, codex shimmer letter-subset cycle, first-paint-counts semantics).
+- adjudicated_by: antagonist-reviewer session
+  `0000000000000000-577b1039e2984df1_foundation-zen-architect`, 2026-07-27 — **ACCEPT** with
+  three conditions (fix stale line refs to `:1705-1708`/`:1416-1435`; record the AD-1
+  product-owner approval in the entry body; state the numeric-only limitation as a legacy
+  regression explicitly), all incorporated above. Key finding: "a lifetime-bounding safety
+  control that cannot fire for the product's primary workload class, confirmed by a production
+  incident, is an objective defect — not scope creep." Reviewer independently re-verified the
+  legacy defect mechanism, the port's fail-open/exemption/grace semantics (including the
+  socket-close-must-not-reset-unrelated-terminals hole, pinned at `registry.rs:3646`), and ran
+  the pinning suites (157 passed, 0 failed). Implementer: the-usual recipe run
+  b7a1a8f0a0104fb3-20260726-232357 (distinct from adjudicating reviewer).
+- status: accepted.
+
+### DEV-0010 — Resume validation at the spawn doors (2026-07-29)
+
+**Deviation:** The Node reference passes cached resume session ids straight to
+the coding CLI (`server/terminal-registry.ts` `resolveCodingCliCommand`;
+`normalizeResumeForSpawn` is the identity function — no on-disk existence
+check exists in Node). The Rust server now validates the id against the
+provider's on-disk session store before constructing resume argv, at all three
+spawn doors (WS `terminal.create`, headless auto-resume respawn, freshagent
+REST create). On POSITIVE absence (store readable, session definitively
+absent) it spawns fresh in the same cwd/mode, surfaces an operator notice
+naming the stale id, and retires the pane-ledger binding
+(`RetiredReason::SessionMissing`). Unknown/unreadable stores fail OPEN
+(resume attempted, byte-for-byte Node behavior). Providers validated:
+claude — for SAME-BOOT deletions only (a zero-turn carve-out keeps
+Absent + never-observed-on-disk resuming, and the disk-observation signal
+is a per-boot in-memory set, so a transcript deleted while the server was
+DOWN is indistinguishable from never-conversed and fails OPEN post-restart;
+deliberate, fail-open) — codex, opencode, amplifier. gemini/kimi/third-party
+are never blocked. Known accepted consequence for amplifier (AD-5 in the
+plan): freshell's designed never-used-stub GC deletes a never-typed pane's
+session stub at terminal exit and the spawn doors re-stub the SAME id via
+`ensure_session` on the next resume — after a restart such a pane now spawns
+fresh under a minted id WITH a notice instead of silently re-stubbing the
+same id. Decided and accepted: on disk the GC'd stub is indistinguishable
+from the incident's stale id, and for a never-typed pane the outcome is an
+equivalent empty session either way (reconcile's amplifier Absent carve-out,
+which prevents PARKING such panes in the dead-sessions dialog, is untouched).
+Additive protocol field: optional `notice` on `terminal.created`.
+
+**Reconciliation note (2026-07-30, rebased onto 39010cb57):** codex managed
+sidecar app-server + remote proxy. For codex restore-class creates the gate runs OFF-permit
+inside `prepare_launch`, BEFORE `plan_codex_managed_launch` — gate ⇒ plan (off-permit) ⇒ permit ⇒ spawn — so a
+definitively-absent codex id never consumes a sidecar planning slot. All other modes (WS
+create, headless respawn, REST) keep the on-permit gate in `handle_create` (post-ladder,
+post-D7); the gate outcome is carried via `PreparedLaunch.resume_gate` so notice emission
+and D8 stale-ref lease release stay single-sited. For the fresh spawn it falls back to,
+all modes plan managed launch normally. Pinned by
+`managed_default_stale_codex_id_is_gated_before_planning` in
+`freshell-ws/tests/resume_validation_gate.rs`. The REST door additionally
+threads `claude_fresh_prealloc` through `RestResumeOutcome` so a gate-minted
+fresh claude id receives the #584 PIN 2 pre-spawn identity binding.
+
+**Why:** Production incident 2026-07-29 — after a server restart, freshell
+resumed stored amplifier session id 8dab420a-f76b-407c-bcbe-dfb2a971c2e1 which
+existed nowhere under ~/.amplifier/projects/*/sessions/; the amplifier CLI
+silently created a new empty session under that id and the user saw a broken
+restore with no explanation.
+
+**Pinning tests:** `freshell-platform` `resume_gate` unit tests;
+`freshell-ws/tests/resume_validation_gate.rs` (incl. the live-session/D7
+ordering and legacy-carrier liveness cases — registry AND sidecar arms);
+`freshell-ws/tests/auto_resume_respawn.rs`
+(`respawn_with_absent_session_spawns_fresh_and_retires_binding`, incl. the
+fresh-id bookkeeping assertions);
+`freshell-freshagent` `rest_resume_*` unit tests (incl. minted-v4
+plausibility, healed pane_content stamping, and the live-session
+precondition cases — registry arm with D7-REST-reject preservation AND
+the sidecar-liveness arm);
+`freshell-server` `existence.rs` amplifier/codex by-id fallback,
+cold-index, and sub-root permission tests;
+`freshell-protocol/tests/roundtrip.rs` `notice` wire test.
+
+- objective_defect: *corrupts data / contradicts documented restore behavior* — resuming a
+  session id that no longer exists on disk makes the coding CLI silently mint a NEW empty
+  session under that id (`server/terminal-registry.ts` `resolveCodingCliCommand` passes the
+  cached id to the CLI unchecked; `normalizeResumeForSpawn` is the identity function), so
+  the user's "restored" pane is a broken, empty impostor with no explanation (production
+  incident 2026-07-29, detailed under **Why** above).
+- original_behavior / port_behavior / pinning_test: see **Deviation** and **Pinning tests**
+  above.
+- fingerprint: spawn-door behavior — on positive on-disk absence the port constructs fresh
+  (non-resume) CLI argv where the original constructs resume argv, retires the pane-ledger
+  binding, and emits one additive optional wire field (`notice` on `terminal.created`,
+  absent whenever no stale id was detected — backward-compatible on read).
+- adjudicated_by: pending antagonist review (entry filed by the implementer per the
+  resume-validation plan, Task 9).
+- status: proposed.
+
+
+### DEV-0020 — terminal-metadata git enrichment runs on a throttled per-unique-cwd poll (Node: indexer-event-driven, per-terminal, uncached)
+<!-- Renumbered from the sweep branch's DEV-0009 at merge: main's DEV-0009 is the idle reap-clock entry. -->
+
+- objective_defect: none — KEPT port-side TRIGGER divergence (naming-persistence-sweep Task 18,
+  commit ed1bd71a6), the one redesigned piece of the DEV-0008 closure above. Node runs its
+  terminal-metadata pass ONLY on indexer update events (`server/index.ts:873` onUpdate; debounce
+  2 s, `session-indexer.ts:436`) — an idle Node spawns ZERO git processes — and its pass is
+  per-terminal and uncached (`server/coding-cli/utils.ts:93-116`, with only repo roots cached
+  `:24-26`). The Rust port has no indexer event bus (the session index is poll-based,
+  `freshell_sessions::directory_index`), so per-tick trigger equivalence was FALSIFIED at
+  planning time (validator-A7): a naive per-tick, per-terminal port would spawn unthrottled git
+  processes forever on an idle server.
+- original_behavior: indexer `onUpdate` (2 s debounce) → per matched terminal,
+  `applySessionMetadata` → `enrichFromCwd` runs three PLAIN git probes (`symbolic-ref`,
+  `rev-parse` fallback, `status --porcelain`) with no optional-locks suppression and no
+  branch/dirty caching; zero git activity between indexer events.
+- port_behavior: the refresh rides the auto-title sweep tick
+  (`crates/freshell-server/src/auto_title_sweep.rs`, `GitMetaCache` + `refresh_terminal_meta`),
+  gated per UNIQUE resolved cwd (NOT per terminal): git runs for a cwd only when (a) that cwd's
+  terminal-set signature changed since its last run, or (b) the last run is >=
+  `GIT_ENRICH_MIN_INTERVAL_MS` (30 s) old — throttled refresh so dirty-status drift still
+  surfaces. EVERY spawned git suppresses optional locks (`GIT_OPTIONAL_LOCKS=0` env on every
+  `freshell_platform::git_meta` invocation, equivalent to `--no-optional-locks`): a 0.5 Hz poll
+  without it would continually rewrite `.git/index`.
+- fingerprint: trigger schedule + git invocation shape only — the port spawns throttled
+  `GIT_OPTIONAL_LOCKS=0` git probes on the sweep cadence where Node spawns plain-git probes only
+  on indexer updates; the `terminal.meta.updated` wire VALUES are unaffected (same record
+  fields, same commit-if-changed change gate, so an unchanged repo produces zero frames on both
+  backends).
+- cost_and_residual: measured local cost 0.01 s per `git --no-optional-locks status --porcelain`
+  on this repo (validator-A7). Residual: /mnt/c DrvFs cwds are 10-100x slower; the >= 30 s
+  throttle bounds the worst case to delayed badges (never a git storm).
+- pinning_test: Task 18 —
+  `auto_title_sweep::tests::sweep_refreshes_terminal_meta_change_gated_and_broadcasts_once`
+  (change-gated commit, single upsert batch per pass, unchanged pass fully suppressed) plus the
+  `crates/freshell-ws/src/terminal_meta.rs` inline tests (enrichment field derivation); Task 23's
+  Playwright git-badge spec pins the user-visible badge behavior end-to-end.
+- adjudicated_by: validator-A7 (antagonist), planning-stage adjudication for the
+  naming-persistence-sweep — it falsified per-tick trigger equivalence and produced the 0.01 s
+  measurement and the /mnt/c DrvFs residual; the throttled per-unique-cwd + optional-locks
+  design implemented here is that adjudication's remedy (implementer distinct from adjudicator;
+  NOT self-approved). Task 24 references this entry.
+- status: accepted (KEPT divergence)
+
+## E2E-discovered intentional divergences (EDEV-xx)
+
+**Scope — READ THIS FIRST.** This section is DELIBERATELY SEPARATE from the DEV-NNNN
+ledger above and does NOT participate in its contract. The DEV-NNNN ledger is the
+mechanical oracle harness's fingerprint whitelist: each entry is adjudicated by the
+antagonist reviewer, requires an *objective defect* in the original, and grants the
+differ a specific tolerance. The EDEV-xx entries below are a DIFFERENT artifact:
+intentional old-vs-new divergences SURFACED BY THE PLAYWRIGHT E2E BROWSER MATRIX
+(`test/e2e-browser/specs/*`, which runs each spec against BOTH a `legacy-chromium`
+and a `rust-chromium` target and asserts the per-kind-correct outcome). They are
+recorded here for human/operator traceability. They are NOT oracle fingerprints,
+they grant the T0-T3 differ NO tolerance, and they carry their own EDEV-NN numbering
+so they can never be confused with a DEV-NNNN harness whitelist id. Each entry states:
+what differs, why the divergence is intentional (which side is better + who decided),
+the evidence (spec::test + commit), and one plain-English user-impact sentence.
+
+Every EDEV entry here is a case where the E2E matrix asserts the DIFFERENT outcome
+per server kind on purpose — the legacy leg is retained as a CONTROL that empirically
+proves the pre-existing gap, and the rust leg proves the improvement.
+
+### EDEV-01 — WS Origin policy is ENFORCED (hostile / `null` / malformed Origin rejected before `ready`)
+- what_differs: The Rust `/ws` upgrade closes the socket with WS close code **4011
+  "Origin not allowed"** — *before* the `ready` handshake or any session state
+  (`ready`/`settings.updated`/`terminal.inventory`) is sent — whenever the `Origin`
+  header is present and neither same-origin nor allow-listed (a hostile DNS-rebinding
+  origin, the literal `null` of a sandboxed iframe/`file://`, or a malformed non-URL).
+  Legacy's Origin check is **advisory-only**: it logs a warning and NEVER closes, so a
+  hostile origin bearing a valid token still reaches `ready`.
+- why_intentional: Rust is the better side — a deliberate hardening. The Rust production
+  bind is `0.0.0.0` (LAN-reachable), where advisory-only leaves a classic DNS-rebinding
+  path open. Decided under the SAFE-03 checklist item; documented in the enforcing
+  module's own doc comment (`crates/freshell-ws/src/origin.rs:1-31`).
+- allowlist_mechanism (for operators permitting a proxy/tunnel hostname): an Origin is
+  ALLOWED when (a) there is **no `Origin` header at all** — curl/CLI/MCP tooling and some
+  VPN/mobile browsers omit it (`origin.rs:88-91,109-111`); (b) it **matches the request's
+  own `Host`** as `http://<host>` or `https://<host>` (same-origin, independent of the
+  allow-list — `origin.rs:118-122`); or (c) it is an **exact string match** in the
+  resolved allow-list. The allow-list defaults to localhost + 127.0.0.1 on ports
+  5173/3001/3002 (`origin.rs:36-48`). The `ALLOWED_ORIGINS` env var (comma-separated)
+  **REPLACES** the defaults entirely (`origin.rs:59-66`); `EXTRA_ALLOWED_ORIGINS` is
+  always **appended** on top of whichever branch was taken (`origin.rs:55-73`). The
+  literal `null` is ALWAYS rejected even if an operator lists it (`origin.rs:115-117`).
+  So: to permit a reverse-proxy/tunnel hostname, set `ALLOWED_ORIGINS` to the full
+  trusted set, or add just that host via `EXTRA_ALLOWED_ORIGINS`.
+- evidence: `test/e2e-browser/specs/safe03-origin-matrix.spec.ts` — hostile (`:139`),
+  `null` (`:154`), malformed (`:166`), each asserting rust `{closeCode:4011,
+  closeReason:'Origin not allowed'}` vs legacy `ready`; plus the allowed cases
+  (no-Origin `:123`, same-origin `:128`, allow-listed remote `:134`). Crate-level
+  real-socket proof: `crates/freshell-ws/tests/origin_policy.rs`. Commit `f18554a2`.
+- user_impact: On the Rust server, a web page served from an unrecognized host cannot
+  open a freshell WebSocket connection (ordinary browsing is unaffected — only pages
+  that embed or connect to freshell); operators allow a new host via `ALLOWED_ORIGINS`.
+
+### EDEV-02 — Terminal scrollback SEARCH is scoped to the bounded retained window
+- what_differs: Rust's `GET /api/terminals/{id}/search` searches the SAME byte-capped
+  structure that backs reattach-replay (`entry.snapshot`, built from the bounded
+  `s.replay` in `crates/freshell-server/src/terminals.rs`), so search results honor the
+  configured scrollback cap: a line evicted from the retained window returns zero
+  matches. Legacy's search reads a SEPARATE, **entirely unbounded** `this.lines` array
+  in `server/terminal-view/mirror.ts` (`appendLines` only ever grows) that never
+  reflects the scrollback cap — so legacy finds arbitrarily old text and grows memory
+  without bound.
+- why_intentional: Rust is the better side — correct AND bounded. The port deliberately
+  unifies the two legacy stores onto the one bounded replay ring, discovered during the
+  TERM-13 boundary spec (DISCOVERY 2). Decided under the TERM-13 checklist item.
+- evidence: `test/e2e-browser/specs/term13-scrollback-boundary.spec.ts` — SMALL-cap
+  eviction test asserts rust `matches:[]` vs legacy `matches.length>0` for an evicted
+  needle (`:271-277`); LARGE-cap test asserts the retained needle is found byte-perfect
+  and Unicode-clean (`:313-320`); DISCOVERY 2 note (`:56-72`) records the legacy
+  unbounded-`this.lines` finding empirically. Commit `fc1fc3fa`.
+- user_impact: On the Rust server, terminal search only finds text still within the
+  configured scrollback window; legacy could surface arbitrarily old text (at the cost
+  of unbounded server memory growth).
+
+### EDEV-03 — Settings-save WRITE FAILURES are surfaced (500 + error envelope), not silently swallowed
+- what_differs: On the Rust server, when `SettingsStore::persist()` fails to write
+  (e.g. a read-only config dir), `PATCH /api/settings` returns **HTTP 500 with a
+  populated `{error: string}` envelope** and does NOT commit the change to the live
+  in-memory tree (it stays at the last successfully-persisted value). Legacy's
+  `settings-router.ts#handleSettingsPatch` has NO `try/catch` around
+  `configStore.patchSettings`, so a real write failure there is an unhandled promise
+  rejection in Express 4 — no clean, reproducible caller-visible response at all.
+- why_intentional: Rust is the better side. `SettingsStore::persist()` was given a
+  `Result<(), io::Error>` return and `patch()` maps the failure to the same 500 error
+  envelope every other fs-backed router already uses. Decided under the CFG-03 checklist
+  follow-up (GAP2).
+- evidence: `test/e2e-browser/specs/cfg03-backup-restore.spec.ts` — the GAP2 test
+  (`:383-442`) makes `.freshell` read-only, asserts the PATCH returns `500` with a
+  non-empty `body.error`, that the live tree is unchanged (`autoKillIdleMinutes` still
+  `3`, not the failed `99`), and that the primary on disk is byte-identical; the legacy
+  leg is `test.skip`-ped with a source-cited explanation that legacy has no clean error
+  path (`:384-391`). Commit `8c78e48e`.
+- user_impact: On the Rust server a failed settings save shows an error instead of
+  silently pretending to have saved.
+
+### EDEV-04 — Corrupt config AUTO-RESTORES from backup, preserves a forensic copy, and NOTIFIES the browser
+- what_differs: On boot with a corrupt/unreadable primary `config.json` and a valid
+  `config.backup.json`, the Rust server **auto-restores the primary from the backup**
+  (preserving every last-good value) before anything else, and — when both primary and
+  backup are corrupt — preserves timestamped **forensic copies** (`config.json.corrupt-*`
+  / `config.backup.json.corrupt-*`) instead of destroying them. It also emits a
+  `config.fallback` frame (with the truthful `reason`, e.g. `PARSE_ERROR`, and
+  `backupExists: true`) in EVERY `/ws` handshake, including late connections, so the
+  browser can show a fallback notice. Legacy treats ANY read failure as "no config",
+  unconditionally writes bare defaults, and (via `saveInternal`'s own unconditional
+  `copyFile`) OVERWRITES the backup with those defaults too — destroying the very backup
+  its own console message (`server/config-store.ts:235`, "restore backup with: mv
+  ~/.freshell/config.backup.json ~/.freshell/config.json") tells the user to recover
+  from. The last-good value is lost from both files.
+- why_intentional: Rust is the better side — a data-preserving safety improvement the
+  CFG-03 acceptance text explicitly permits ("Automatic backup restoration is a
+  deliberate safety improvement only if separately documented and tested"; this ledger
+  entry + the spec ARE that documentation/test). Decided under CFG-03 (backup +
+  conservative auto-restore) and its GAP1 follow-up (the `config.fallback` notice).
+- evidence: `test/e2e-browser/specs/cfg03-backup-restore.spec.ts` — corrupt-primary +
+  valid-backup test asserts rust restores the sentinel value into both files and emits
+  the `config.fallback` frame (reason `PARSE_ERROR`, `backupExists:true`) on a first AND
+  a later second connection (`:279-319`), vs legacy losing the sentinel from both files
+  (`:320-328`); both-corrupt test asserts the forensic `.corrupt-*` copies exist
+  (`:357-381`). Commits `41b04143` (backup + auto-restore) and `8c78e48e`
+  (`config.fallback` emission).
+- user_impact: On the Rust server, corrupted settings self-heal from the last-good
+  backup with a visible in-browser notice, instead of silently resetting to defaults.
+
+### EDEV-05 — Claude interrupt missing-session error text is a STATIC string (cosmetic)
+- what_differs: When a `freshAgent.interrupt` targets an unknown claude session, the
+  Rust `FreshClaudeState::handle_interrupt` returns the static `SESSION_NOT_FOUND`
+  message `"claude session not found"` (`crates/freshell-freshagent/src/claude.rs:122`),
+  whereas legacy's adapter throws the session-id-embedded `Claude session ${sessionId}
+  is not available` (`server/fresh-agent/adapters/claude/adapter.ts:163-167`). Both are
+  fire-and-forget on success (no confirmation frame); only the missing-session error
+  text differs.
+- why_intentional: Neither side is "better" — this is a cosmetic wording difference. The
+  Rust static message follows the same `SESSION_NOT_FOUND` convention its sibling
+  codex/opencode `handle_interrupt` arms already use; standardized when the claude
+  kill/interrupt dispatch arms were wired in. Decided under commit `57a82817`.
+- evidence: commit `57a82817` (claude interrupt error path + unit coverage of the
+  unknown-session case); legacy text at `server/fresh-agent/adapters/claude/adapter.ts:166`.
+  (No e2e KNOWN-DIVERGENCE marker — surfaced from the commit, not the browser matrix.)
+- user_impact: On a rare interrupt of an already-gone claude session, the error text no
+  longer names the session id; no functional difference.
+
+### EDEV-06 — Whitespace-only auth token is REJECTED at startup (hardening)
+- what_differs: The Rust server rejects a whitespace-only `AUTH_TOKEN` (e.g. 20 spaces)
+  at startup via `token.trim().is_empty()` (`crates/freshell-server/src/main.rs:846-851`,
+  documented in `validate_auth_token`'s own doc comment) — the server refuses to boot.
+  Legacy's `!token` check is JS-falsy-only, so a 20-space string (truthy, ≥16 chars, not
+  in `DEFAULT_BAD_TOKENS`) passes every startup check and the server boots normally with
+  that unusable-in-practice secret.
+- why_intentional: Rust is the better side — a deliberate hardening (a whitespace string
+  is never an effective secret). Note the rest of the token contract is exact parity:
+  `main.rs::validate_auth_token` and `server/auth.ts` share the same messages/order and
+  `DEFAULT_BAD_TOKENS` set (confirmed by direct source read), so this whitespace case is
+  the SOLE token-validation divergence.
+- evidence: `test/e2e-browser/specs/safe01-auth-matrix.spec.ts` — the whitespace-only
+  token test asserts rust `started:false` vs legacy `started:true` (`:141-152`);
+  crate-level: `validate_auth_token`'s `rejects_whitespace_only_token` unit test
+  (`main.rs:1485`). Commit for the SAFE-01 matrix spec: `f18554a2`.
+- user_impact: On the Rust server, configuring an all-whitespace auth token fails fast at
+  startup instead of booting with a secret that can't realistically be typed/used.
+
+### EDEV-07 — REST tab create SYNTHESIZES canonical `sessionRef` from a legacy `resumeSessionId` (state-sync hardening)
+- what_differs: `POST /api/tabs` (and `POST /api/panes/:id/split`, which shares
+  `spawn_terminal_pane`) with `{mode: <session provider>, resumeSessionId}` and no
+  `sessionRef` now mints `sessionRef {provider: mode, sessionId: resumeSessionId}` into
+  the pane content and the broadcast `ui.command{tab.create}` payload
+  (`crates/freshell-freshagent/src/terminal_tabs.rs`, `spawn_terminal_pane`'s
+  paneContent build). Legacy (`server/agent-api/router.ts:762-771`) keeps the two keys
+  mutually exclusive and forwards the bare `resumeSessionId` untouched — the port
+  previously froze that behavior verbatim. Session providers: `amplifier`/`opencode`/
+  `claude`/`gemini`/`kimi`; NOT `codex` (a raw codex resume stays rejected with the
+  legacy-exact `INVALID_RAW_CODEX_RESUME_MESSAGE`). Synthesis is gated on a plausible id
+  shape: `claude` requires a canonical session UUID
+  (`freshell_sessions::text::is_canonical_claude_session_id`, the same validator the
+  indexer and the frozen client's `CLAUDE_SESSION_ID_RE` enforce); the other providers
+  (no published id-shape contract) require non-empty/no-whitespace. An implausible id
+  falls back to the legacy resumeSessionId-only shape.
+- why_intentional: Rust is the better side — the legacy shape is the root cause of the
+  2026-07-19 "sidebar grey for REST tabs" incident
+  (`docs/plans/2026-07-19-state-sync-cartography.md` Part 1): the frozen client's
+  sidebar open-state matcher promotes a terminal pane's bare `resumeSessionId` only for
+  `mode === 'claude'` (`src/lib/session-utils.ts:135-139`), tab dedupe keys on the same
+  extraction (duplicate tabs on sidebar click), and persist-save strips
+  `resumeSessionId` outright (`src/store/persistMiddleware.ts:245-264`) so the pane's
+  only durable key never reaches disk (no restore after server restart + refresh).
+  Minting the canonical key server-side closes all three with ZERO client changes — the
+  cartography's fix direction (a), the authoritative-home fix.
+- evidence: RED-first unit coverage in `crates/freshell-freshagent/src/terminal_tabs.rs`
+  (`create_amplifier_tab_with_legacy_resume_synthesizes_session_ref`,
+  `create_claude_tab_with_canonical_resume_id_synthesizes_session_ref`,
+  `create_claude_tab_with_non_canonical_resume_id_does_not_synthesize`,
+  `create_amplifier_tab_with_whitespace_resume_id_does_not_synthesize`, plus the
+  pre-existing codex raw-resume rejection pin
+  `create_codex_tab_rejects_raw_resume_session_id_without_session_ref`). Legacy shape:
+  `server/agent-api/router.ts:762-771`; client blind spot: `src/lib/session-utils.ts:135-139`.
+- user_impact: A remotely-created resume tab (REST/MCP `new-tab` with a session id) for
+  amplifier/opencode/gemini/kimi now shows as OPEN in the sidebar, dedupes on sidebar
+  click instead of opening a duplicate, and survives a server restart + browser refresh
+  with its session identity intact.
+
+### EDEV-08 — REST pane create MINTS a stable `createRequestId` into the broadcast pane content (pane-identity stabilization)
+- what_differs: `POST /api/tabs` (terminal path) and `POST /api/panes/:id/split` (which
+  shares `spawn_terminal_pane`) now accept-or-mint a `createRequestId`
+  (`Uuid::new_v4().simple()`, 32 lowercase hex; a caller-supplied key — the snapshot-restore
+  path via `pane_to_create_body` — is honored verbatim) and emit it in the broadcast pane
+  content: `ui.command{tab.create}` `payload.paneContent.createRequestId` and
+  `ui.command{pane.split}` `payload.newContent.createRequestId`
+  (`crates/freshell-freshagent/src/terminal_tabs.rs`, `spawn_terminal_pane`), with the same
+  key stamped atomically into the terminal registry (`TerminalRegistry::create`'s existing
+  `create_request_id` parameter). Legacy emits NO `createRequestId` in either payload
+  (`server/agent-api/router.ts:762-789` tab.create terminal paneContent, `:1360-1380`
+  pane.split newContent) — the frozen client then mints its own substitute nanoid on receipt
+  (`src/store/panesSlice.ts:78-79`). Parity nuance, `ui.command{pane.attach}`: `POST
+  /api/panes/:id/respawn` delegates to the same shared pipeline (`pane_ops.rs`), so its
+  `pane.attach` `content` now carries the key too — there legacy ALREADY mints one
+  (`router.ts:1602` respawn, `:1646` terminal-attach, `createRequestId: nanoid()`), so
+  pane.attach moves TOWARD parity (both sides keyed; value format differs, uuid-simple vs
+  nanoid — both opaque ids the oracle normalizer masks,
+  `port/oracle/harness/normalize.ts:77` `createRequestId: ID('RID')`). The fresh-agent
+  tab.create path already carried the key on BOTH sides (`router.ts:558/:578`; the rust
+  fresh-agent create) — unchanged. Wire-contract safe: the frozen `ui.command` payload is
+  free-form (`port/contract/ws-server-messages.schema.json:2856-2874`, `"payload": true`);
+  absence of the field stays legal on read everywhere (backward compat).
+- why_intentional: Rust is the better side — the legacy keyless broadcast is the root cause
+  of pane-identity correlation loss (restart-resilience campaign P1.6 /
+  reconciliation-handshake design §5.5 precondition 2): a REST-created pane never receives a
+  server-known identity key, the client's substitute nanoid is re-minted on hydrate, so
+  panes cannot be re-identified across reload/restore and server state keyed on
+  `create_request_id` (terminal registry) can never match a client pane. Minting
+  server-side — and honoring the captured key on snapshot restore — makes the key stable
+  end-to-end with ZERO legacy-server changes and no client schema change.
+- evidence: RED-first unit coverage in `crates/freshell-freshagent/src/terminal_tabs.rs`
+  (`rest_create_terminal_tab_mints_and_stamps_create_request_id`,
+  `rest_create_honors_caller_supplied_create_request_id`) and the extended split assertion
+  in `crates/freshell-freshagent/src/pane_ops.rs`
+  (`split_terminal_pane_spawns_real_pty_and_broadcasts_pane_split`) plus the extended
+  respawn rotation test (`respawn_pane_replaces_terminal_in_place_and_broadcasts_pane_attach`,
+  also `pane_ops.rs`); e2e pin:
+  `test/e2e-browser/specs/createrequestid-stabilization-rust.spec.ts` (the 32-hex
+  server-mint discriminator + reload-preserves-key). Legacy shape:
+  `server/agent-api/router.ts:762-789` / `:1360-1380` (no key), `:1602` / `:1646`
+  (pane.attach, keyed).
+- user_impact: A REST-created terminal pane keeps ONE stable identity key from creation
+  through reload/restore — the precondition for reconciliation-phase dedupe/adoption —
+  instead of a fresh client-minted key per hydrate; snapshot-restored panes are re-created
+  under their captured key.
+
+### EDEV-09 — client title-convergence fixes (sidebar/history/terminal-menu/Overview renames now mirror into pane titles; exited-terminal renames persist)
+- what_differs: `src/store/titleSync.ts` gains `applySessionRenameCascade` and replaces the
+  exited-terminal bail (titleSync.ts:35) with a `sessionRef` fallback PATCH; `src/store/panesSlice.ts`
+  gains `updatePaneTitleBySessionRef`; `ContextMenuProvider.renameSession`/`renameTerminal` and
+  `HistoryView.renameSession` dispatch pane mirrors with `setByUser: true`;
+  `src/components/OverviewView.tsx` TerminalCard inline rename is re-routed through the shared
+  rename helper so `paneTitles` updates too. Applies identically to BOTH backends (shared client).
+- why_intentional: explicit user directive in the naming-persistence-sweep task: "for the same
+  underlying session/terminal, the sidebar item title and the pane title must never disagree";
+  the pre-fix client dropped `cascadedTerminalId` (ContextMenuProvider.tsx:483-487), never
+  mirrored session renames into SDK panes, silently dropped pane renames on exited coding-CLI
+  terminals (titleSync.ts:35 / TerminalView.tsx:3841), and left Overview renames invisible to
+  paneTitles while the sweep is structurally blind post-PATCH — defects on the original too
+  (desync paths D3/D4/D7 audit: .the-usual-logs report client-title-sync.md; D8 + Overview:
+  validator-A5).
+- evidence: test/e2e-browser/specs/title-sync-convergence.spec.ts (both projects, incl. the
+  Overview rename journey) + test/unit/client/store/paneSessionTitleSync.test.ts; commit 7db308811.
+- user_impact: renaming a session from the sidebar/history/terminal menus or the Overview page
+  now updates the open pane header immediately on both servers, and renaming a pane whose
+  coding-CLI terminal already exited still persists; previously the pane kept the stale name
+  until a sidebar click (or the rename was silently lost).
+
+> Update (b5fb): the pane→server alignment this entry introduced is REMOVED by the rename scope
+> contract (docs/development/rename-scope-contract.md): pane/tab renames no longer PATCH anything
+> server-side and the D8 exited-terminal sessionRef fallback is gone. The session→pane mirror
+> (`applySessionRenameCascade`) remains legitimate.
+
+### EDEV-10 — REMOVED (b5fb)
+
+> **Removed by the rename scope contract (b5fb):** the whole pane-rename persistence cascade was
+> deleted on both servers (pane renames are layout-local per
+> docs/development/rename-scope-contract.md), so the divergence this entry recorded no longer
+> exists. The historical entry text is retained below for traceability.
+
+> Historical title: EDEV-10 — Pane-rename cascade finalizes `titleSource:'user'` on the session override (Node writes a plain `{titleOverride}` the sweep can steal)
+- what_differs: `PATCH /api/panes/:id`'s syncable-terminal cascade persists the
+  session override as `{titleOverride, titleSource:'user'}`
+  (`crates/freshell-server/src/main.rs::SettingsRenamePersistence::patch_session_override_title`).
+  Node's `persistSyncableTerminalRename` writes a plain `{titleOverride}` with
+  NO `titleSource` (`server/agent-api/router.ts:679-681`), leaving the
+  title-source ladder rung unfinalized.
+- why_intentional: Rust is the better side. A pane rename is a USER rename.
+  When the rename lands BEFORE the auto-title sweep finalizes the session
+  (dir/absent rung), the unfinalized row makes the next sweep pass compute the
+  first-message patch and permanently steal the rename — override, registry
+  title, and a stale `terminal.title.updated` push; every later pass then sees
+  registry == override and never heals (Node's per-session fresh override read
+  does NOT close this window: a fresh read of an unfinalized row clobbers just
+  the same, `server/auto-title.ts` first-message-wins). The `user` rung matches
+  what BOTH servers already write on the terminals-route rename cascade
+  (`crates/freshell-server/src/terminals.rs:1000-1004`; Node
+  `rename-cascade.ts:26` default `titleSource='user'`) — Node's panes route is
+  internally inconsistent with its own terminals route. Surfaced by the final
+  full-suite gate: title-sync-convergence Test 3 under parallel load.
+- evidence: RED-first regression
+  `crates/freshell-server/src/auto_title_sweep.rs::tests::pane_rename_cascade_before_finalization_survives_next_sweep_pass`
+  (RED: sweep rewrote the override to
+  `{"titleOverride":"convergence gamma automation rename journey","titleSource":"first-message"}`;
+  GREEN with the `'user'` write). Ladder interaction: a later sweep
+  `{first-message}` patch is rejected against the `user` rung
+  (`settings_store.rs::can_upgrade_title`), and an in-flight pass that
+  snapshotted overrides before the rename has its stale override write
+  ladder-rejected at the store, so any stale registry push self-corrects on
+  the next tick.
+- user_impact: renaming a coding-CLI pane via the automation surface (REST/MCP)
+  right after opening a session no longer loses the new name to the background
+  auto-title sweep; the sidebar, registry, and session directory keep the
+  user's title.
+
+
+### EDEV-11 — REMOVED (b5fb)
+
+> **Removed by the rename scope contract (b5fb):** the `sessionRef` superset read is gone because
+> the pane-rename persistence cascade itself is gone on both servers (pane renames are
+> layout-local per docs/development/rename-scope-contract.md); the divergence this entry recorded
+> no longer exists. The historical entry text is retained below for traceability.
+
+> Historical title: EDEV-11 — Pane-rename cascade reads `paneContent.sessionRef` as an EXPLICIT session-resolution superset (Node never reads it)
+<!-- Renumbered from the sweep branch's EDEV-08 at merge: main's EDEV-08 is the REST createRequestId-mint entry. -->
+- what_differs: `PATCH /api/panes/:id`'s syncable-terminal rename cascade
+  (`crates/freshell-freshagent/src/rename_persistence.rs`,
+  `persist_syncable_terminal_rename`) resolves the session-override target as
+  (1) the terminal registry's session binding — the post-association metadata
+  a locator writes back server-side via `set_meta`, mirroring Node's
+  terminal-metadata-first preference (`server/agent-api/router.ts:658-676`) —
+  then (2) `paneContent.resumeSessionId` (Node's fallback, `:676`), then
+  (3) **`paneContent.sessionRef` — a source Node NEVER consults**
+  (`router.ts:655`/`:676` read only `meta.sessionId`/`resumeSessionId`). The
+  superset read is LAST, so it can only ADD a cascade where Node's resolution
+  found nothing — it can never change the target Node would have picked.
+- why_intentional: Rust is the better side. The SPA reconcile CLEARS
+  `resumeSessionId` and writes the canonical identity into `sessionRef`
+  instead (`src/store/panesSlice.ts:1705-1708`, 200 ms debounced) — so for a
+  long-lived SPA-reconciled pane whose terminal metadata was never populated,
+  Node's own resolution silently no-ops and the rename never reaches the
+  session override. Reading the canonical `sessionRef` closes that hole.
+  (A10.1: while the Rust server lacks a client-independent association path,
+  registry-first + sessionRef covers both directions the identity can
+  arrive from; the seam lands NOW so the gap does not silently reopen when
+  association parity lands.)
+- evidence: RED-first unit coverage in
+  `crates/freshell-freshagent/src/rename_cascade_tests.rs`
+  (`rename_pane_cascades_to_syncable_terminal_via_injected_persistence` —
+  sessionRef-only pane cascades to `claude:sess-ref-1`;
+  `rename_pane_cascades_via_registry_session_binding_without_pane_content_session_fields`
+  — registry-first resolution, validator-A10;
+  `rename_pane_shell_pane_never_cascades` — non-syncable modes untouched).
+  Node reference: `persistSyncableTerminalRename`, `router.ts:649-693`.
+- user_impact: Renaming a coding-CLI pane whose session identity lives only in
+  the client-written `sessionRef` now persists the new title onto the session
+  directory entry too (survives restart/reindex), instead of silently updating
+  only the terminal override.
+
+### EDEV-12 — opencode auto-titles (mainline, post-port)
+- what_differs: `parse/opencode.rs` now extracts a bounded `first_user_message`
+  for placeholder-titled sessions and `directory_index.rs` classifies
+  non-placeholder opencode titles as `provider-generated`.
+- why_intentional: Node reference behavior (always `None`) was a verified
+  functional gap: opencode sessions could never be AI-titled and native
+  opencode names were permanently shadowed by the dir placeholder.
+- evidence: `crates/freshell-sessions/tests/opencode_first_message.rs`, the
+  `directory_index.rs` title-source mapping tests, and the sweep-ladder tests
+  in `crates/freshell-server/src/auto_title_sweep.rs` (commits ecb9a4dec,
+  679dabd01, 4661cc4f4, 31498a808). Measured cost on the production 5.4 GB
+  opencode.db is documented at `FIRST_USER_MESSAGE_SQL` in `parse/opencode.rs`.
+- user_impact: opencode sessions with a first user message now receive AI
+  auto-titles (the dir placeholder advances instead of holding), and sessions
+  natively named inside opencode surface that name as provider-generated
+  (short-circuiting the AI stage) instead of showing the placeholder forever.
+
+
+### DEV-0011 — Transactional rebind with bind-new-before-persist and SO_REUSEPORT
+
+- **objective_defect:** *breaks invariant / persistence before proof* — `server/network-manager.ts:417` persists before bind completion, contradicts NET-02's "bind then prove"; escalated to CATASTROPHIC by `:477-483` ("server has no active listener" on rebind rollback failure).
+- **original_behavior:** On `configure` to a new host, `NetworkManager.setActivePort` persists config changes BEFORE proving the listener binds successfully; if bind fails, config is already written and the next boot is silently broken.
+- **port_behavior:** Use SO_REUSEPORT to bind the new listener FIRST (proving it works on the requested host), then persist config, then gracefully drain the old listener. Rollback on persist failure drops the socket (infallible). Escape hatch: `FRESHELL_REBIND_NO_REUSEPORT=1`.
+- **fingerprint:** net_bind transactional test + harness Phase 3/4 (bind proves before state change).
+- **pinning_test:** `crates/freshell-server/src/net_bind.rs::serve_on_proves_bind_before_swapping_and_serves_traffic` + `foreign_squatter_blocks_our_bind` + harness Phase 3/4.
+- **status:** proposed
+
+### DEV-0012 — Settled-status response to configure endpoint
+
+- **objective_defect:** *contract-legal deliberate choice* — `src/store/networkSlice.ts:123-130` documents that the client reducer accepts both settled truth (current state post-mutation) and desired-state preview (`rebindScheduled:true`); the port chooses to return settled truth (listener already active post-transactional bind), whereas the original returns a preview. Both are contract-legal client behavior; the port's choice to report reality instead of anticipation is an intentional improvement.
+- **original_behavior:** `POST /api/network/configure` returns `rebindScheduled:true` as a preview/plan, not the actual state after the mutation.
+- **port_behavior:** `POST /api/network/configure` returns `{..., rebindScheduled:false}` (the listener is already active; no further rebind scheduled) and other settled fields matching the transactional reality.
+- **fingerprint:** configure response shape (rebindScheduled field value).
+- **pinning_test:** `crates/freshell-server/src/network.rs::configure_to_all_interfaces_persists_and_reports_settled_host`.
+- **status:** proposed
+
+### DEV-0013 — No mass 4009 on rebind (in-flight connections drain across the listener swap)
+
+- **objective_defect:** *UX improvement / intentional divergence* — the rebind swap retires only the accept loop, never accepted connections, so existing WS/HTTP connections drain gracefully instead of receiving abrupt closure.
+- **original_behavior:** On rebind, old listener is torn down immediately, causing connected clients to receive 4009 (going away) en masse.
+- **port_behavior:** The old accept loop is RETIRED at the swap (`Notify::notify_one` permit + awaiting its JoinHandle — a deterministic "old socket closed" barrier); in-flight connections are unaffected because each accepted connection runs in its own detached spawned task, which keeps draining after the swap while new requests route to the new listener. (SO_REUSEPORT overlap exists only for the bind-proof; drain comes from the detached per-connection tasks, not a kept accept loop.)
+- **fingerprint:** net_bind drain pin (live connection held open across a `serve_on` swap completes; new listener serves concurrently).
+- **pinning_test:** `crates/freshell-server/src/net_bind.rs::inflight_connection_survives_rebind_and_drains_to_completion` (holds an in-flight request open across the swap, proves the new listener serves during the drain, then completes the old request — fails if the swap force-closes in-flight connections).
+- **status:** proposed
+
+### DEV-0014 — NET-08-A/B/C hardening (Ipv4Addr typing, constant-time compare, Slice 0)
+
+- **objective_defect:** *security hardening* — missing `Ipv4Addr` type enforcement and timing-safe comparisons on host validation (Slice 0, Task 2.3).
+- **original_behavior:** TS host string comparisons are loose and timing-sensitive.
+- **port_behavior:** Rust uses `Ipv4Addr` type for host binding and `timing_safe_compare` (or equivalent) for validation, providing compile-time type safety and resistance to timing attacks.
+- **fingerprint:** net_bind host-enum type enforcement (Slice 0, Task 2.3).
+- **pinning_test:** crate-level type tests + NET-08 negative matrix (harness Phase 6).
+- **status:** proposed
+
+### DEV-0015 — Action-bound token consumption, instance-scoped managed-ports file, separate action enums
+
+- **objective_defect:** *security + data integrity* — Fixes D1 (token not bound to action), D15 (managed-ports not instance-scoped / `FRESHELL_HOME` ignored), D16 (managed-ports writes non-atomic), D19 (repair/disable modeled as one type, unreachable `terminal` state).
+- **original_behavior:** Tokens consumed without action binding; WSL managed-ports file ignores `FRESHELL_HOME` and is not atomic; disable/repair actions share one enum type.
+- **port_behavior:** (a) Every action handler verifies the token's action matches the endpoint; (b) WSL managed-ports file is `FRESHELL_HOME`-scoped and uses atomic write (rename); (c) Disable and repair actions have separate enums (net_mutation.rs).
+- **fingerprint:** token_action_binding + managed_ports atomicity + net_mutation enum (Slice 0 + 2).
+- **pinning_test:** `crates/freshell-platform/src/elevated.rs` action-bound token tests + WSL managed-ports atomic-write tests + net_mutation enum type tests.
+- **status:** proposed
+
+### DEV-0016 — WSL2 listener rebind is real (disable truly rebinds to loopback)
+
+- **objective_defect:** *contradicts NET-06 truthfulness* — the TS forces `hostChanged=false` on WSL2 (`network-manager.ts:412-413`), claiming no rebind happened; but disable MUST rebind to loopback on all platforms for safety (NET-06, Task 2.4).
+- **original_behavior:** On WSL2 `disable`, the listener stays on 0.0.0.0 (Windows still exposed via portproxy), and `hostChanged=false` is returned.
+- **port_behavior:** On WSL2 `disable`, bind truthfully rebinds to 127.0.0.1, `hostChanged=true` is reported, and the port is no longer LAN-reachable (portproxy is not re-exposed). Windows portproxy is NOT a substitute for truthful rebind.
+- **fingerprint:** harness Phase 3/4 tier-b transitions (disable on wsl2 rebinds to loopback).
+- **pinning_test:** `crates/freshell-server/src/network.rs::disable_from_exposed_linux_rebinds_to_loopback_and_persists` + harness Phase 3/4 tier-b WSL2 disable path.
+- **status:** proposed
+
+### DEV-0017 — Kept-as-contract: wsl2 remoteAccessEnabled = rawPortOpen === true
+
+- **objective_defect:** *contract compliance (not a bug to fix)* — wsl2 `remoteAccessEnabled = rawPortOpen === true` (`server/network-manager.ts:349-350`) is depended on by `src/lib/share-utils.ts:17-34` and is part of the frozen contract. This is reviewed and deliberately KEPT, not changed.
+- **original_behavior:** `remoteAccessEnabled` on WSL2 is computed as the boolean value of `rawPortOpen`.
+- **port_behavior:** Ported faithfully in Slice 1 (Task 2.2); no change to this contract.
+- **fingerprint:** WSL2 remoteAccessEnabled computation (no divergence, kept as reference).
+- **pinning_test:** N/A — this is a kept contract, not a fix. Slice 1 parity tests verify it.
+- **status:** proposed
+
+### DEV-0018 — Persisted configured host outranks WSL wildcard default
+
+- **objective_defect:** *contradicts NET-02/NET-06 truthfulness* — `server/get-network-host.ts:42` returns `0.0.0.0` for WSL BEFORE consulting persisted config; a disable that persisted loopback is silently re-exposed on next boot (validated live in reports/V2.md).
+- **original_behavior:** On WSL, the bind host is always `0.0.0.0` (wildcard default), ignoring the persisted `configured:true` host.
+- **port_behavior:** Host precedence is: (1) `FRESHELL_BIND_HOST` env override, (2) persisted config when `configured:true`, (3) WSL default `0.0.0.0`, (4) `HOST` env var, (5) `127.0.0.1` fallback. Unconfigured WSL keeps the wildcard default.
+- **fingerprint:** host-precedence logic (WSL default used only when no persisted config).
+- **pinning_test:** `crates/freshell-platform/src/network.rs::wsl_with_configured_host_outranks_wsl_default` + `wsl_unconfigured_keeps_wildcard_default` + harness Phase 5.
+- **status:** proposed
+
+### DEV-0019 — Fail-safe persist-failure handling on mutation endpoints
+
+- **objective_defect:** *data integrity / silent divergence* — `server/network-manager.ts:501-503` swallows revert-persist errors after rebind rollback (listener and config silently diverge; client never told); disable path has no revert at all.
+- **original_behavior:** On persist failure after a successful bind swap, the listener is rolled back but the error is swallowed; on disable persist failure, the listener is already changed and no rollback happens.
+- **port_behavior:** `configure` rolls the LISTENER back when persist fails after successful bind (reality matches unchanged config; if rollback bind itself fails, bind stays truthful and a CATASTROPHIC error is logged). `disable-remote-access` NEVER re-exposes on error path — it keeps the loopback listener, sets bind truthfully, and surfaces the error to the client.
+- **fingerprint:** persist-failure error handling paths (listener rollback on configure, no re-expose on disable).
+- **pinning_test:** `crates/freshell-server/src/network.rs::configure_rolls_back_the_listener_when_persist_fails` + `disable_keeps_loopback_and_reports_error_when_persist_fails`.
+- **status:** proposed
+
+<!--
+Template:
+
+### DEV-0001 — <short title>
+- objective_defect: <bar> — <evidence file:line>
+- original_behavior: <...>
+- port_behavior: <...>
+- fingerprint: T<0-3> / <matcher>
+- pinning_test: <path>
+- adjudicated_by: <session id>
+- status: proposed
+-->
+
+## Related non-behavioral fix (test infrastructure, already landed)
+
+Not a behavioral deviation, recorded here for traceability only: the
+`test:real:coding-cli-contracts` launcher set the wrong env var and was a silent
+no-op; fixed on this branch with a regression test. This changed test tooling,
+not freshell's runtime behavior, so it needs no oracle whitelist.

@@ -1,0 +1,123 @@
+import { defineConfig, loadEnv } from 'vite'
+import type { HttpProxy } from 'vite'
+import react from '@vitejs/plugin-react'
+import path from 'path'
+import { fileURLToPath } from 'url'
+import { execFileSync } from 'node:child_process'
+import { getNetworkHost } from '../../server/get-network-host.js'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const projectRoot = path.resolve(__dirname, '../..')
+
+/**
+ * The client's build identity: the git commit the bundle was built from,
+ * matching the server-side stamps (`crates/freshell-ws/build.rs` /
+ * `server/build-id.ts` + `scripts/bake-server-build-id.mjs`). `"unknown"`
+ * fallback — the client's compare rule ignores `"unknown"` on both sides.
+ */
+function computeClientBuildId(): string {
+  try {
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: projectRoot,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .toString()
+      .trim()
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
+/**
+ * Transport-level proxy failures that mean "the backend is down or restarting":
+ * refused (not yet listening), reset/pipe (killed mid-request), timeout/host
+ * unreachable. Answer 503 so the client classifies them as a transient outage
+ * (isTransientRequestFailure) instead of surfacing a 500 "server bug".
+ */
+const TRANSIENT_PROXY_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EPIPE',
+  'ETIMEDOUT',
+  'EHOSTUNREACH',
+])
+
+/** Suppress transport-level proxy errors while the backend is down/restarting. */
+function silenceStartupErrors(proxy: HttpProxy.Server) {
+  proxy.on('error', (err, _req, res) => {
+    const code = 'code' in err ? String(err.code) : ''
+    if (TRANSIENT_PROXY_ERROR_CODES.has(code) && 'writeHead' in res) {
+      if (!res.headersSent) {
+        res.writeHead(503)
+        res.end()
+      } else {
+        // Headers (and possibly part of the body) already went out: ending
+        // cleanly would make a truncated payload look like a successful
+        // response. Destroy the connection so the client sees a transport
+        // failure (NetworkError -> classified transient) instead.
+        res.destroy()
+      }
+    }
+  })
+}
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, projectRoot, '')
+  const backendPort = process.env.PORT || env.PORT || '3001'
+  const backendHost = process.env.VITE_BACKEND_HOST || process.env.BACKEND_HOST || env.VITE_BACKEND_HOST || env.BACKEND_HOST || '127.0.0.1'
+  const backendUrl = `http://${backendHost}:${backendPort}`
+  const vitePort = parseInt(process.env.VITE_PORT || env.VITE_PORT || '5173', 10)
+  const allowedHosts = env.VITE_ALLOWED_HOSTS
+    ? env.VITE_ALLOWED_HOSTS.split(',').map((h) => h.trim()).filter(Boolean)
+    : undefined // Vite's default behavior (localhost + host value)
+
+  return {
+    root: projectRoot,
+    plugins: [react()],
+    define: {
+      __PERF_LOGGING__: JSON.stringify(env.PERF_LOGGING || ''),
+      __FRESHELL_BUILD_ID__: JSON.stringify(computeClientBuildId()),
+    },
+    resolve: {
+      alias: {
+        '@': path.resolve(projectRoot, './src'),
+        '@test': path.resolve(projectRoot, './test'),
+        '@shared': path.resolve(projectRoot, './shared'),
+      },
+    },
+    build: {
+      outDir: 'dist/client',
+      sourcemap: mode === 'development',
+      chunkSizeWarningLimit: 1400,
+    },
+    server: {
+      host: getNetworkHost(),
+      allowedHosts,
+      port: vitePort,
+      watch: {
+        ignored: ['**/.worktrees/**', '**/.claude/worktrees/**', '**/examples/demo-projects/**'],
+      },
+      proxy: {
+        '/api': {
+          target: backendUrl,
+          xfwd: true,
+          configure: silenceStartupErrors,
+        },
+        '/local-file': {
+          target: backendUrl,
+          xfwd: true,
+          configure: silenceStartupErrors,
+        },
+        '/ws': {
+          target: backendUrl,
+          ws: true,
+          changeOrigin: true,
+          xfwd: true,
+          configure: silenceStartupErrors,
+        },
+      },
+    },
+  }
+})

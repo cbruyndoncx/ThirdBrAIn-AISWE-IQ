@@ -1,0 +1,378 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, cleanup } from '@testing-library/react'
+import { configureStore } from '@reduxjs/toolkit'
+import { Provider } from 'react-redux'
+import TabContent from '@/components/TabContent'
+import tabsReducer from '@/store/tabsSlice'
+import panesReducer from '@/store/panesSlice'
+import settingsReducer, { defaultSettings } from '@/store/settingsSlice'
+
+// Hoist mock functions so vi.mock can reference them
+const { mockPaneLayout } = vi.hoisted(() => ({
+  mockPaneLayout: vi.fn(() => <div data-testid="pane-layout" />),
+}))
+
+// Mock PaneLayout to capture props
+vi.mock('@/components/panes/PaneLayout', () => ({
+  default: mockPaneLayout,
+}))
+
+interface TabConfig {
+  id: string
+  mode: string
+  codingCliProvider?: string
+  resumeSessionId?: string
+  sessionRef?: {
+    provider: string
+    sessionId: string
+  }
+  sessionMetadataByKey?: Record<string, unknown>
+}
+
+interface StoreOptions {
+  defaultNewPane?: 'ask' | 'shell' | 'browser' | 'editor'
+}
+
+function createStore(tabs: TabConfig[], options: StoreOptions = {}) {
+  const settings = {
+    ...defaultSettings,
+    panes: {
+      ...defaultSettings.panes,
+      defaultNewPane: options.defaultNewPane || 'ask',
+    },
+  }
+  return configureStore({
+    reducer: {
+      tabs: tabsReducer,
+      panes: panesReducer,
+      settings: settingsReducer,
+    },
+    preloadedState: {
+      tabs: {
+        tabs: tabs.map((t) => ({
+          id: t.id,
+          mode: t.mode as any,
+          status: 'running' as const,
+          title: 'Test',
+          codingCliProvider: t.codingCliProvider as any,
+          codingCliSessionId: (t as any).codingCliSessionId,
+          resumeSessionId: t.resumeSessionId,
+          sessionRef: t.sessionRef,
+          sessionMetadataByKey: t.sessionMetadataByKey,
+          createRequestId: 'req-1',
+        })),
+        activeTabId: tabs[0]?.id,
+      },
+      panes: {
+        layouts: {},
+        activePane: {},
+      },
+      settings: {
+        settings,
+        loaded: true,
+      },
+    },
+  })
+}
+
+describe('TabContent', () => {
+  beforeEach(() => {
+    mockPaneLayout.mockClear()
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  describe('default content resolution', () => {
+    it('shows picker when defaultNewPane is ask', () => {
+      const store = createStore([{ id: 'tab-1', mode: 'shell' }], { defaultNewPane: 'ask' })
+
+      render(
+        <Provider store={store}>
+          <TabContent tabId="tab-1" />
+        </Provider>
+      )
+
+      expect(mockPaneLayout).toHaveBeenCalledWith(
+        expect.objectContaining({
+          defaultContent: expect.objectContaining({
+            kind: 'picker',
+          }),
+        }),
+        expect.anything()
+      )
+    })
+
+    it('passes terminal content when defaultNewPane is shell', () => {
+      const store = createStore([{ id: 'tab-1', mode: 'shell' }], { defaultNewPane: 'shell' })
+
+      render(
+        <Provider store={store}>
+          <TabContent tabId="tab-1" />
+        </Provider>
+      )
+
+      expect(mockPaneLayout).toHaveBeenCalledWith(
+        expect.objectContaining({
+          defaultContent: expect.objectContaining({
+            kind: 'terminal',
+            mode: 'shell',
+          }),
+        }),
+        expect.anything()
+      )
+    })
+  })
+
+  describe('coding CLI sessions', () => {
+    it('ignores leftover codingCliSessionId when rendering tab content', () => {
+      const store = createStore([
+        { id: 'legacy-leftover', mode: 'shell', codingCliSessionId: 'legacy-session' } as any,
+      ])
+
+      const { queryByTestId } = render(
+        <Provider store={store}>
+          <TabContent tabId="legacy-leftover" />
+        </Provider>
+      )
+
+      expect(mockPaneLayout).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tabId: 'legacy-leftover',
+          defaultContent: expect.objectContaining({
+            kind: 'picker',
+          }),
+        }),
+        expect.anything(),
+      )
+      expect(queryByTestId('session-view')).not.toBeInTheDocument()
+    })
+
+    it('restores fresh-agent default content for no-layout tabs using persisted session metadata', () => {
+      const store = createStore([
+        {
+          id: 'tab-1',
+          mode: 'claude',
+          sessionRef: {
+            provider: 'claude',
+            sessionId: '550e8400-e29b-41d4-a716-446655440000',
+          },
+          sessionMetadataByKey: {
+            'claude:550e8400-e29b-41d4-a716-446655440000': {
+              sessionType: 'freshclaude',
+            },
+          },
+        },
+      ])
+
+      render(
+        <Provider store={store}>
+          <TabContent tabId="tab-1" />
+        </Provider>
+      )
+
+      expect(mockPaneLayout).toHaveBeenCalledWith(
+        expect.objectContaining({
+          defaultContent: expect.objectContaining({
+            kind: 'fresh-agent',
+            sessionType: 'freshclaude',
+            provider: 'claude',
+            resumeSessionId: '550e8400-e29b-41d4-a716-446655440000',
+            sessionRef: {
+              provider: 'claude',
+              sessionId: '550e8400-e29b-41d4-a716-446655440000',
+            },
+          }),
+        }),
+        expect.anything(),
+      )
+    })
+
+    it('restores fresh-agent default content for shell-mode no-layout tabs using persisted codingCliProvider metadata', () => {
+      const store = createStore([
+        {
+          id: 'tab-1',
+          mode: 'shell',
+          codingCliProvider: 'claude',
+          sessionRef: {
+            provider: 'claude',
+            sessionId: '550e8400-e29b-41d4-a716-446655440001',
+          },
+          sessionMetadataByKey: {
+            'claude:550e8400-e29b-41d4-a716-446655440001': {
+              sessionType: 'freshclaude',
+            },
+          },
+        },
+      ])
+
+      render(
+        <Provider store={store}>
+          <TabContent tabId="tab-1" />
+        </Provider>
+      )
+
+      expect(mockPaneLayout).toHaveBeenCalledWith(
+        expect.objectContaining({
+          defaultContent: expect.objectContaining({
+            kind: 'fresh-agent',
+            sessionType: 'freshclaude',
+            provider: 'claude',
+            resumeSessionId: '550e8400-e29b-41d4-a716-446655440001',
+            sessionRef: {
+              provider: 'claude',
+              sessionId: '550e8400-e29b-41d4-a716-446655440001',
+            },
+          }),
+        }),
+        expect.anything(),
+      )
+    })
+
+    it('does not reconstruct terminal sessionRef from a raw tab resumeSessionId fallback', () => {
+      const store = createStore([
+        {
+          id: 'tab-1',
+          mode: 'codex',
+          resumeSessionId: 'named-or-legacy-resume',
+        },
+      ])
+
+      render(
+        <Provider store={store}>
+          <TabContent tabId="tab-1" />
+        </Provider>,
+      )
+
+      expect(mockPaneLayout).toHaveBeenCalledWith(
+        expect.objectContaining({
+          defaultContent: expect.objectContaining({
+            kind: 'terminal',
+            mode: 'codex',
+            sessionRef: undefined,
+          }),
+        }),
+        expect.anything(),
+      )
+    })
+
+    it('renders an explicit Codex sessionRef through PaneLayout resume content', () => {
+      const store = createStore([{
+        id: 'codex-resume',
+        mode: 'codex',
+        codingCliProvider: 'codex',
+        sessionRef: { provider: 'codex', sessionId: 'thread-durable-1' },
+      }])
+
+      render(
+        <Provider store={store}>
+          <TabContent tabId="codex-resume" />
+        </Provider>
+      )
+
+      expect(mockPaneLayout).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tabId: 'codex-resume',
+          defaultContent: expect.objectContaining({
+            kind: 'terminal',
+            mode: 'codex',
+            sessionRef: { provider: 'codex', sessionId: 'thread-durable-1' },
+          }),
+        }),
+        expect.anything(),
+      )
+    })
+  })
+
+  describe('hidden prop propagation', () => {
+    it('passes hidden=true to PaneLayout when hidden prop is true', () => {
+      const store = createStore([{ id: 'tab-1', mode: 'shell' }])
+
+      render(
+        <Provider store={store}>
+          <TabContent tabId="tab-1" hidden={true} />
+        </Provider>
+      )
+
+      expect(mockPaneLayout).toHaveBeenCalledWith(
+        expect.objectContaining({ hidden: true }),
+        expect.anything()
+      )
+    })
+
+    it('passes hidden=false to PaneLayout when hidden prop is false', () => {
+      const store = createStore([{ id: 'tab-1', mode: 'shell' }])
+
+      render(
+        <Provider store={store}>
+          <TabContent tabId="tab-1" hidden={false} />
+        </Provider>
+      )
+
+      expect(mockPaneLayout).toHaveBeenCalledWith(
+        expect.objectContaining({ hidden: false }),
+        expect.anything()
+      )
+    })
+
+    it('passes hidden=undefined to PaneLayout when hidden prop is not provided', () => {
+      const store = createStore([{ id: 'tab-1', mode: 'shell' }])
+
+      render(
+        <Provider store={store}>
+          <TabContent tabId="tab-1" />
+        </Provider>
+      )
+
+      expect(mockPaneLayout).toHaveBeenCalledWith(
+        expect.objectContaining({ hidden: undefined }),
+        expect.anything()
+      )
+    })
+  })
+
+  describe('visibility CSS classes', () => {
+    it('applies tab-hidden class when hidden=true', () => {
+      const store = createStore([{ id: 'tab-1', mode: 'shell' }])
+
+      const { container } = render(
+        <Provider store={store}>
+          <TabContent tabId="tab-1" hidden={true} />
+        </Provider>
+      )
+
+      const wrapper = container.firstChild as HTMLElement
+      expect(wrapper.className).toContain('tab-hidden')
+      // Ensure we're not using Tailwind's 'hidden' class (display:none) - check class list
+      expect(wrapper.classList.contains('hidden')).toBe(false)
+    })
+
+    it('applies tab-visible class when hidden=false', () => {
+      const store = createStore([{ id: 'tab-1', mode: 'shell' }])
+
+      const { container } = render(
+        <Provider store={store}>
+          <TabContent tabId="tab-1" hidden={false} />
+        </Provider>
+      )
+
+      const wrapper = container.firstChild as HTMLElement
+      expect(wrapper.className).toContain('tab-visible')
+      expect(wrapper.className).not.toContain('tab-hidden')
+    })
+
+    it('applies tab-visible class when hidden is undefined', () => {
+      const store = createStore([{ id: 'tab-1', mode: 'shell' }])
+
+      const { container } = render(
+        <Provider store={store}>
+          <TabContent tabId="tab-1" />
+        </Provider>
+      )
+
+      const wrapper = container.firstChild as HTMLElement
+      expect(wrapper.className).toContain('tab-visible')
+    })
+  })
+})

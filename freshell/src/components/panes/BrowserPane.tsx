@@ -1,0 +1,664 @@
+import { useState, useRef, useCallback, useEffect } from 'react'
+import { ArrowLeft, ArrowRight, RotateCcw, X, Wrench, Loader2 } from 'lucide-react'
+import { useAppDispatch, useAppSelector } from '@/store/hooks'
+import { consumePaneRefreshRequest, updatePaneContent } from '@/store/panesSlice'
+import { clearPaneRuntimeActivity, setPaneRuntimeActivity } from '@/store/paneRuntimeActivitySlice'
+import { cn } from '@/lib/utils'
+import { copyText } from '@/lib/clipboard'
+import { isLoopbackHostname } from '@/lib/url-rewrite'
+import { api } from '@/lib/api'
+import { registerBrowserActions } from '@/lib/pane-action-registry'
+import { ContextIds } from '@/components/context-menu/context-menu-constants'
+import { paneRefreshTargetMatchesContent } from '@/lib/pane-utils'
+import { usePaneFocusAdoption } from '@/hooks/usePaneFocusAdoption'
+import { useIframeFocusLock } from '@/hooks/useIframeFocusLock'
+
+interface BrowserPaneProps {
+  paneId: string
+  tabId: string
+  browserInstanceId: string
+  url: string
+  devToolsOpen: boolean
+  focusEligible?: boolean
+  /** Focus-nudge epoch: an explicit same-target select bumps this so the
+   *  owns-focus effect re-runs even without an eligibility transition. */
+  focusEpoch?: number
+}
+
+const MAX_HISTORY_SIZE = 50
+
+type BrowserNavigationState = {
+  history: string[]
+  index: number
+}
+
+function appendHistoryEntry(
+  history: string[],
+  historyIndex: number,
+  nextUrl: string,
+): BrowserNavigationState {
+  let nextHistory = [...history.slice(0, historyIndex + 1), nextUrl]
+  let nextIndex = nextHistory.length - 1
+
+  if (nextHistory.length > MAX_HISTORY_SIZE) {
+    const excess = nextHistory.length - MAX_HISTORY_SIZE
+    nextHistory = nextHistory.slice(excess)
+    nextIndex = nextIndex - excess
+  }
+
+  return { history: nextHistory, index: nextIndex }
+}
+
+function syncNavigationToUrl(
+  history: string[],
+  historyIndex: number,
+  nextUrl: string,
+): BrowserNavigationState {
+  if (!nextUrl) {
+    return { history: [], index: -1 }
+  }
+
+  const activeUrl = history[historyIndex] || ''
+  if (activeUrl === nextUrl) {
+    return { history, index: historyIndex }
+  }
+
+  const existingIndex = history.lastIndexOf(nextUrl)
+  if (existingIndex >= 0) {
+    return { history, index: existingIndex }
+  }
+
+  return appendHistoryEntry(history, historyIndex, nextUrl)
+}
+
+// Convert file:// URLs to the /local-file API endpoint for iframe loading
+function toIframeSrc(url: string): string {
+  if (url.startsWith('file://')) {
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol !== 'file:') return url
+
+      let filePath = decodeURIComponent(parsed.pathname)
+      const hasWindowsDrivePrefix = /^\/[a-zA-Z]:\//.test(filePath)
+      if (hasWindowsDrivePrefix) {
+        // file:///C:/path -> C:/path (Windows local drive path)
+        filePath = filePath.slice(1)
+      }
+
+      // file://server/share/path -> //server/share/path (UNC path)
+      if (parsed.hostname && parsed.hostname !== 'localhost') {
+        filePath = `//${parsed.hostname}${filePath}`
+      }
+
+      return `/local-file?path=${encodeURIComponent(filePath)}`
+    } catch {
+      // Fall back to legacy conversion when URL parsing fails.
+      const filePath = url.replace(/^file:\/\/\/?/, '')
+      return `/local-file?path=${encodeURIComponent(filePath)}`
+    }
+  }
+  return url
+}
+
+/**
+ * Build an HTTP proxy URL for localhost http: URLs. The proxy is same-origin
+ * with Freshell, which means:
+ * - Screenshots can access iframe content (no cross-origin restriction)
+ * - WSL2/Docker networking issues are bypassed (known-reachable port)
+ *
+ * Works for both local and remote browsers since `/api/proxy/http/:port/`
+ * is always same-origin with the Freshell page.
+ *
+ * https: localhost URLs are NOT proxied — the HTTP proxy can't do TLS
+ * passthrough, so those fall through to TCP port forwarding for remote
+ * browsers or direct access for local browsers.
+ */
+function buildHttpProxyUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol === 'http:' && isLoopbackHostname(parsed.hostname)) {
+      const targetPort = parsed.port ? parseInt(parsed.port, 10) : 80
+
+      // Don't proxy requests to Freshell's own port — it's already reachable
+      const freshellPort =
+        parseInt(window.location.port, 10) ||
+        (window.location.protocol === 'https:' ? 443 : 80)
+      if (targetPort === freshellPort) return null
+
+      const path = parsed.pathname + parsed.search + parsed.hash
+      return `/api/proxy/http/${targetPort}${path}`
+    }
+  } catch {
+    // Not a valid URL
+  }
+  return null
+}
+
+/**
+ * Determine whether a URL needs TCP port forwarding (remote browser + localhost).
+ * This is the fallback for URLs that buildHttpProxyUrl cannot handle:
+ * - https: localhost URLs (HTTP proxy can't do TLS passthrough)
+ * - http: localhost URLs on the same port as Freshell (proxy skips those)
+ */
+function needsPortForward(url: string): { parsed: URL; targetPort: number } | null {
+  if (isLoopbackHostname(window.location.hostname)) return null
+
+  try {
+    const parsed = new URL(url)
+    if (
+      (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      isLoopbackHostname(parsed.hostname)
+    ) {
+      const targetPort = parsed.port
+        ? parseInt(parsed.port, 10)
+        : parsed.protocol === 'https:'
+          ? 443
+          : 80
+      return { parsed, targetPort }
+    }
+  } catch {
+    // Not a valid URL
+  }
+  return null
+}
+
+/**
+ * Build the forwarded iframe URL: replace hostname and port with the host's
+ * address and the forwarded port, preserving the original protocol/path/query/hash.
+ * The TCP proxy is a raw pipe — it passes bytes verbatim, so the original
+ * protocol must be preserved: https: URLs need the browser to perform TLS
+ * with the local service through the proxy, http: URLs stay plaintext.
+ */
+function buildForwardedUrl(
+  parsed: URL,
+  forwardedPort: number,
+): string {
+  const forwarded = new URL(parsed.href)
+  forwarded.hostname = window.location.hostname
+  forwarded.port = String(forwardedPort)
+  return forwarded.toString()
+}
+
+export default function BrowserPane({
+  paneId,
+  tabId,
+  browserInstanceId,
+  url,
+  devToolsOpen,
+  focusEligible = true,
+  focusEpoch = 0,
+}: BrowserPaneProps) {
+  const dispatch = useAppDispatch()
+  const refreshRequest = useAppSelector((state) => state.panes.refreshRequestsByPane?.[tabId]?.[paneId] ?? null)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  // Callback-ref STATE mirror: the iframe-focus-lock effect keys on the
+  // element, so it re-runs exactly when the node (re)mounts — unlike a ref
+  // read, element identity participates in effect deps.
+  const [rootEl, setRootEl] = useState<HTMLDivElement | null>(null)
+  const setRootNode = useCallback((el: HTMLDivElement | null) => {
+    rootRef.current = el
+    setRootEl(el)
+  }, [])
+  const [inputUrl, setInputUrl] = useState(url)
+  const [isLoading, setIsLoading] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [navigation, setNavigation] = useState<BrowserNavigationState>(() => ({
+    history: url ? [url] : [],
+    index: url ? 0 : -1,
+  }))
+
+  const history = navigation.history
+  const historyIndex = navigation.index
+
+  // Port forwarding state
+  const [resolvedSrc, setResolvedSrc] = useState<string | null>(null)
+  const [isForwarding, setIsForwarding] = useState(false)
+  const [forwardError, setForwardError] = useState<string | null>(null)
+  const [forwardRetryKey, setForwardRetryKey] = useState(0)
+
+  const currentUrl = history[historyIndex] || ''
+
+  useEffect(() => {
+    if (!currentUrl) {
+      dispatch(clearPaneRuntimeActivity({ paneId }))
+      return
+    }
+
+    if (forwardError || loadError) {
+      dispatch(setPaneRuntimeActivity({ paneId, source: 'browser', phase: 'error' }))
+      return
+    }
+
+    if (isForwarding) {
+      dispatch(setPaneRuntimeActivity({ paneId, source: 'browser', phase: 'forwarding' }))
+      return
+    }
+
+    if (isLoading) {
+      dispatch(setPaneRuntimeActivity({ paneId, source: 'browser', phase: 'loading' }))
+      return
+    }
+
+    dispatch(setPaneRuntimeActivity({ paneId, source: 'browser', phase: 'idle' }))
+  }, [currentUrl, dispatch, forwardError, isForwarding, isLoading, loadError, paneId])
+
+  useEffect(() => () => {
+    dispatch(clearPaneRuntimeActivity({ paneId }))
+  }, [dispatch, paneId])
+
+  useEffect(() => {
+    const previousUrl = currentUrl
+    const { history: syncedHistory, index: syncedIndex } = syncNavigationToUrl(history, historyIndex, url)
+
+    if (syncedHistory !== history || syncedIndex !== historyIndex) {
+      setNavigation({ history: syncedHistory, index: syncedIndex })
+    }
+
+    setInputUrl(url)
+
+    if (!url) {
+      setLoadError(null)
+      setIsLoading(false)
+      return
+    }
+
+    if (url !== previousUrl) {
+      setLoadError(null)
+      setIsLoading(true)
+    }
+  }, [url])
+
+  // Resolve the iframe src: proxy localhost URLs through Freshell, else direct
+  useEffect(() => {
+    if (!currentUrl) {
+      setResolvedSrc(null)
+      setForwardError(null)
+      setIsForwarding(false)
+      return
+    }
+
+    // For localhost URLs, route through Freshell's HTTP proxy.
+    // This handles WSL2/Docker where the browser can't reach localhost
+    // ports directly, and also simplifies remote access.
+    const proxyUrl = buildHttpProxyUrl(currentUrl)
+    if (proxyUrl) {
+      setResolvedSrc(proxyUrl)
+      setForwardError(null)
+      setIsForwarding(false)
+      return
+    }
+
+    const forward = needsPortForward(currentUrl)
+    if (!forward) {
+      // No forwarding needed - use the URL directly (with file:// conversion)
+      setResolvedSrc(toIframeSrc(currentUrl))
+      setForwardError(null)
+      setIsForwarding(false)
+      return
+    }
+
+    // Request a port forward from the server
+    let cancelled = false
+    let forwardedTargetPort: number | null = null
+    setIsForwarding(true)
+    setForwardError(null)
+    setResolvedSrc(null)
+    setIsLoading(false)
+
+    api
+      .post<{ forwardedPort: number }>('/api/proxy/forward', {
+        port: forward.targetPort,
+      })
+      .then((result) => {
+        if (cancelled) return
+        forwardedTargetPort = forward.targetPort
+        setResolvedSrc(buildForwardedUrl(forward.parsed, result.forwardedPort))
+      })
+      .catch((err) => {
+        if (cancelled) return
+        const msg = err instanceof Error ? err.message : String(err)
+        setForwardError(`Failed to connect to localhost:${forward.targetPort} — ${msg}`)
+      })
+      .finally(() => {
+        if (!cancelled) setIsForwarding(false)
+      })
+
+    return () => {
+      cancelled = true
+      if (forwardedTargetPort !== null) {
+        api.delete(`/api/proxy/forward/${forwardedTargetPort}`).catch(() => {})
+      }
+    }
+  }, [currentUrl, forwardRetryKey])
+
+  const navigate = useCallback((newUrl: string) => {
+    if (!newUrl.trim()) return
+
+    // Add protocol if missing (preserve file:// URLs)
+    let fullUrl = newUrl
+    if (!fullUrl.match(/^(https?|file):\/\//)) {
+      fullUrl = 'https://' + fullUrl
+    }
+
+    setInputUrl(fullUrl)
+    setIsLoading(true)
+    setLoadError(null)
+
+    const { history: nextHistory, index: nextIndex } = appendHistoryEntry(history, historyIndex, fullUrl)
+    setNavigation({ history: nextHistory, index: nextIndex })
+
+    // Persist to Redux
+    dispatch(updatePaneContent({
+      tabId,
+      paneId,
+      content: { kind: 'browser', url: fullUrl, devToolsOpen },
+    }))
+  }, [dispatch, tabId, paneId, devToolsOpen, history, historyIndex])
+
+  const goBack = useCallback(() => {
+    if (historyIndex > 0) {
+      const newIndex = historyIndex - 1
+      setNavigation({ history, index: newIndex })
+      setInputUrl(history[newIndex])
+      setLoadError(null)
+      dispatch(updatePaneContent({
+        tabId,
+        paneId,
+        content: { kind: 'browser', url: history[newIndex], devToolsOpen },
+      }))
+    }
+  }, [dispatch, tabId, paneId, devToolsOpen, history, historyIndex])
+
+  const goForward = useCallback(() => {
+    if (historyIndex < history.length - 1) {
+      const newIndex = historyIndex + 1
+      setNavigation({ history, index: newIndex })
+      setInputUrl(history[newIndex])
+      setLoadError(null)
+      dispatch(updatePaneContent({
+        tabId,
+        paneId,
+        content: { kind: 'browser', url: history[newIndex], devToolsOpen },
+      }))
+    }
+  }, [dispatch, tabId, paneId, devToolsOpen, history, historyIndex])
+
+  const recoverCurrentPage = useCallback(() => {
+    if (!currentUrl) return
+
+    setLoadError(null)
+    setForwardError(null)
+    setIsLoading(true)
+
+    if (needsPortForward(currentUrl)) {
+      setResolvedSrc(null)
+      setForwardRetryKey((key) => key + 1)
+      return
+    }
+
+    setResolvedSrc(toIframeSrc(currentUrl))
+  }, [currentUrl])
+
+  const refresh = useCallback(() => {
+    if (!currentUrl) return
+
+    const iframe = iframeRef.current
+    if (!iframe) {
+      recoverCurrentPage()
+      return
+    }
+
+    // Prefer reloading the current document (handles in-iframe navigations when allowed).
+    try {
+      iframe.contentWindow?.location.reload()
+      setLoadError(null)
+      setForwardError(null)
+      setIsLoading(true)
+      return
+    } catch {
+      // cross-origin or unavailable; fall back to resetting src
+    }
+
+    const src = iframe.src || resolvedSrc || toIframeSrc(currentUrl)
+    iframe.src = src
+    setLoadError(null)
+    setForwardError(null)
+    setIsLoading(true)
+  }, [currentUrl, recoverCurrentPage, resolvedSrc])
+
+  const stop = useCallback(() => {
+    if (iframeRef.current) {
+      iframeRef.current.src = 'about:blank'
+      setIsLoading(false)
+    }
+  }, [])
+
+  const toggleDevTools = useCallback(() => {
+    dispatch(updatePaneContent({
+      tabId,
+      paneId,
+      content: { kind: 'browser', url, devToolsOpen: !devToolsOpen },
+    }))
+  }, [dispatch, tabId, paneId, url, devToolsOpen])
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      navigate(inputUrl)
+    }
+  }
+
+  // Track the current url in a ref so flip-time focus sees the latest page
+  // WITHOUT making this effect navigation-reactive (navigation must never yank
+  // focus — existing UX).
+  const urlRef = useRef(url)
+  urlRef.current = url
+
+  // Owns-focus ⇒ DOM focus belongs to this pane: an empty pane goes to the URL
+  // input (user just created it), a loaded pane goes to the pane root so
+  // keystrokes belong here (explicit select of a loaded browser pane, remount
+  // after a leaf→split, mount while eligible). Background/ineligible panes
+  // never focus anything. Eligible MOUNTS are additionally gated by focus
+  // ownership: an agent-driven leaf→split remount must not yank focus back
+  // from application chrome; eligibility flips (explicit select) bypass.
+  const mayFocusNow = usePaneFocusAdoption(paneId, focusEligible, focusEpoch)
+  useEffect(() => {
+    if (!focusEligible) return
+    if (!mayFocusNow()) return
+    if (urlRef.current) rootRef.current?.focus()
+    else inputRef.current?.focus()
+  }, [focusEligible, mayFocusNow])
+  // The nested-document lock follows actual focus-permission, not just Redux
+  // eligibility: an ownership-denied REMOUNT of an active pane (MCP split of
+  // a browser pane while the user works in app chrome) renders an UNLOCKED
+  // iframe whose page scripts/autofocus could hoist it to activeElement, and
+  // the app-wide guard only rebuffs LOCKED frames. The adoption read must NOT
+  // happen during render (render precedes the outgoing subtree's cleanup that
+  // records ownership); the hook computes the lock post-commit and lifts it
+  // on a pointerdown inside the pane (user wake intent).
+  const iframeFocusLocked = useIframeFocusLock(rootEl, focusEligible, mayFocusNow)
+
+  useEffect(() => {
+    if (!refreshRequest) return
+
+    const matchesRequest = paneRefreshTargetMatchesContent(refreshRequest.target, {
+      kind: 'browser',
+      browserInstanceId,
+      url,
+      devToolsOpen,
+    })
+    if (!matchesRequest) return
+
+    refresh()
+    dispatch(consumePaneRefreshRequest({ tabId, paneId, requestId: refreshRequest.requestId }))
+  }, [browserInstanceId, devToolsOpen, dispatch, paneId, refresh, refreshRequest, tabId, url])
+
+  useEffect(() => {
+    return registerBrowserActions(paneId, {
+      back: goBack,
+      forward: goForward,
+      reload: refresh,
+      stop,
+      copyUrl: async () => {
+        if (currentUrl) await copyText(currentUrl)
+      },
+      openExternal: () => {
+        // Open the resolved URL (with port forwarding) so it works for remote users.
+        // This stays inside the Freshell session so authenticated /api/proxy and
+        // /local-file paths keep the auth cookie.
+        if (resolvedSrc) {
+          window.open(resolvedSrc, '_blank', 'noopener,noreferrer')
+        } else if (currentUrl) {
+          window.open(currentUrl, '_blank', 'noopener,noreferrer')
+        }
+      },
+      toggleDevTools,
+    })
+  }, [paneId, goBack, goForward, refresh, stop, toggleDevTools, currentUrl, resolvedSrc])
+
+  return (
+    <div
+      ref={setRootNode}
+      tabIndex={-1}
+      className="flex flex-col h-full w-full bg-background"
+      data-context={ContextIds.Browser}
+      data-pane-id={paneId}
+      data-tab-id={tabId}
+    >
+      {/* Toolbar */}
+      <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border bg-card">
+        <button
+          onClick={goBack}
+          disabled={historyIndex <= 0}
+          className="p-1.5 rounded hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed"
+          title="Back"
+        >
+          <ArrowLeft className="h-4 w-4" />
+        </button>
+
+        <button
+          onClick={goForward}
+          disabled={historyIndex >= history.length - 1}
+          className="p-1.5 rounded hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed"
+          title="Forward"
+        >
+          <ArrowRight className="h-4 w-4" />
+        </button>
+
+        <button
+          onClick={isLoading ? stop : refresh}
+          className="p-1.5 rounded hover:bg-muted"
+          title={isLoading ? 'Stop' : 'Refresh'}
+        >
+          {isLoading ? <X className="h-4 w-4" /> : <RotateCcw className="h-4 w-4" />}
+        </button>
+
+        <input
+          ref={inputRef}
+          type="text"
+          value={inputUrl}
+          onChange={(e) => setInputUrl(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Enter URL..."
+          className="flex-1 h-8 px-3 text-sm bg-muted/50 border-0 rounded-md placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-border"
+        />
+
+        <button
+          onClick={toggleDevTools}
+          className={cn(
+            'p-1.5 rounded hover:bg-muted',
+            devToolsOpen && 'bg-muted'
+          )}
+          title="Developer Tools"
+        >
+          <Wrench className="h-4 w-4" />
+        </button>
+      </div>
+
+      {/* Content area */}
+      <div className="flex-1 flex min-h-0">
+        {/* iframe */}
+        <div className={cn('flex-1 min-w-0', devToolsOpen && 'border-r border-border')}>
+          {forwardError ? (
+            <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-3 p-4">
+              <div className="text-destructive font-medium">Failed to connect</div>
+              <div className="text-sm text-center max-w-md">{forwardError}</div>
+              <button
+                onClick={() => {
+                  setForwardError(null)
+                  setResolvedSrc(null)
+                  setForwardRetryKey((k) => k + 1)
+                }}
+                className="mt-2 px-4 py-2 rounded bg-muted hover:bg-muted/80 text-sm"
+              >
+                Try Again
+              </button>
+            </div>
+          ) : loadError ? (
+            <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-3 p-4">
+              <div className="text-destructive font-medium">Failed to load page</div>
+              <div className="text-sm text-center max-w-md">{loadError}</div>
+              <button
+                onClick={() => {
+                  setLoadError(null)
+                  refresh()
+                }}
+                className="mt-2 px-4 py-2 rounded bg-muted hover:bg-muted/80 text-sm"
+              >
+                Try Again
+              </button>
+            </div>
+          ) : isForwarding ? (
+            <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-3 p-4">
+              <Loader2 className="h-6 w-6 animate-spin" />
+              <div className="text-sm">Connecting to {currentUrl}...</div>
+            </div>
+          ) : resolvedSrc ? (
+            <iframe
+              ref={iframeRef}
+              src={resolvedSrc}
+              className="w-full h-full border-0 bg-white"
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+              // Focus neutrality: while this pane does NOT own focus, the
+              // nested document is inert — a same-origin page loading in the
+              // background cannot be focused from the outside. inert does NOT
+              // stop a script INSIDE the nested document from hoisting the
+              // iframe into document.activeElement (verified empirically in
+              // Chromium), so the pane also carries data-focus-locked, which
+              // the app-wide focus-steal guard rebuffs. Removing inert on
+              // eligibility flip does not reload the iframe (attribute only,
+              // src untouched).
+              {...(iframeFocusLocked ? ({ inert: '', 'data-focus-locked': 'true' } as Record<string, string>) : {})}
+              onLoad={() => setIsLoading(false)}
+              onError={() => {
+                setIsLoading(false)
+                setLoadError(`Unable to load "${currentUrl}". The page may not exist, or the server may be blocking embedded access.`)
+              }}
+              title="Browser content"
+            />
+          ) : !currentUrl ? (
+            <div className="flex items-center justify-center h-full text-muted-foreground">
+              Enter a URL to browse
+            </div>
+          ) : null}
+        </div>
+
+        {/* Dev tools panel */}
+        {devToolsOpen && (
+          <div className="w-[40%] min-w-[200px] bg-card flex flex-col">
+            <div className="px-3 py-2 border-b border-border text-sm font-medium">
+              Developer Tools
+            </div>
+            <div className="flex-1 p-3 text-sm text-muted-foreground overflow-auto">
+              <p className="mb-2">Limited dev tools for embedded browsers.</p>
+              <p className="text-xs">
+                Due to browser security restrictions, full dev tools access requires the page to be same-origin or opened in a separate window.
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}

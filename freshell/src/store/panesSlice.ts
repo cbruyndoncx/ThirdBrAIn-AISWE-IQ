@@ -1,0 +1,2806 @@
+import { createSlice, PayloadAction } from '@reduxjs/toolkit'
+import { nanoid } from 'nanoid'
+import {
+  normalizeFreshAgentEffortOverride,
+  normalizeFreshAgentModelEffortLevels,
+  normalizeFreshAgentModelSelection,
+  normalizeFreshAgentPendingLocalEcho,
+  type DeadSessionEntry,
+  type CrashTrace,
+  type FreshAgentPaneContent,
+  type LivePaneContentInput,
+  type PanesState,
+  type PaneContent,
+  type PaneContentInput,
+  type PaneNode,
+  type PaneRefreshRequest,
+  type ReconcileWarmingState,
+  type SessionLocator,
+  type TerminalPaneContent,
+} from './paneTypes'
+import { derivePaneTitle } from '@/lib/derivePaneTitle'
+import { matchesDerivedPaneTitle } from '@/lib/pane-title'
+import { isValidClaudeSessionId } from '@/lib/claude-session-id'
+import { buildPaneRefreshTarget, paneRefreshTargetMatchesContent } from '@/lib/pane-utils'
+import { loadPersistedPanes, loadPersistedTabs } from './persistMiddleware.js'
+import { hasPaneTreeShape, isWellFormedPaneTree } from './paneTreeValidation.js'
+import { createLogger } from '@/lib/client-logger'
+import { shouldPreserveLocalCanonicalResumeSessionId } from './persistControl'
+import { sanitizeRestoreError, sanitizeCrashTrace, sanitizeSessionRef, type RestoreError } from '@shared/session-contract'
+import { sanitizeCodexDurabilityRef } from '@shared/codex-durability'
+import { migrateLegacyFreshAgentContent, migrateLegacyFreshAgentDurableState, preservedDurableFreshAgentIdentity } from '@shared/fresh-agent'
+import { normalizeFreshAgentStyleOverride } from '@shared/settings'
+
+
+const log = createLogger('PanesSlice')
+
+type HydratePanesMeta = {
+  localLayoutPersistedAt?: number
+  remoteLayoutPersistedAt?: number
+}
+
+type FreshAgentSessionMaterializedPayload = {
+  previousSessionId: string
+  sessionId: string
+  sessionType: FreshAgentPaneContent['sessionType']
+  provider: FreshAgentPaneContent['provider']
+  sessionRef?: SessionLocator
+}
+
+function buildPreservedSessionRef(
+  localContent: Extract<PaneContent, { kind: 'terminal' | 'fresh-agent' }>,
+  _preservedResumeSessionId?: string,
+) {
+  return sanitizeSessionRef(localContent.sessionRef)
+}
+
+/**
+ * Normalize pane content to the full persisted/runtime shape.
+ */
+function normalizePaneContent(
+  rawInput: PaneContentInput | PaneContent | Record<string, unknown>,
+  previous?: PaneContent,
+  options?: { inheritCreateRequestId?: boolean },
+): PaneContent {
+  const input = migrateLegacyFreshAgentContent(rawInput as Record<string, unknown>) as LivePaneContentInput | PaneContent
+  if (input.kind === 'terminal') {
+    const mode = typeof input.mode === 'string' ? input.mode : 'shell'
+    const previousCreateRequestId =
+      options?.inheritCreateRequestId && previous?.kind === 'terminal'
+        ? previous.createRequestId
+        : undefined
+    const inputResumeSessionId = typeof input.resumeSessionId === 'string'
+      ? input.resumeSessionId
+      : undefined
+    const resumeSessionId = inputResumeSessionId
+    const sessionRef = sanitizeSessionRef(input.sessionRef)
+    const codexDurability = sanitizeCodexDurabilityRef(input.codexDurability)
+    const restoreError = sanitizeRestoreError((input as { restoreError?: unknown }).restoreError)
+    const crashTrace = sanitizeCrashTrace((input as { crashTrace?: unknown }).crashTrace)
+    return {
+      kind: 'terminal',
+      terminalId: typeof input.terminalId === 'string' ? input.terminalId : undefined,
+      createRequestId: typeof input.createRequestId === 'string' && input.createRequestId
+        ? input.createRequestId
+        : previousCreateRequestId || nanoid(),
+      status: typeof input.status === 'string' ? input.status : 'creating',
+      mode,
+      shell: typeof input.shell === 'string' ? input.shell : 'system',
+      resumeSessionId,
+      ...(sessionRef ? { sessionRef } : {}),
+      ...(codexDurability ? { codexDurability } : {}),
+      serverInstanceId: typeof input.serverInstanceId === 'string' ? input.serverInstanceId : undefined,
+      streamId: typeof input.streamId === 'string' && input.streamId.length > 0 ? input.streamId : undefined,
+      ...(restoreError ? { restoreError } : {}),
+      initialCwd: typeof input.initialCwd === 'string' ? input.initialCwd : undefined,
+      reconcileNotice: typeof input.reconcileNotice === 'string' ? input.reconcileNotice : undefined,
+      // The close-gate failure surface (delta-r7-r3, F2): rides the
+      // whitelist like reconcileNotice — a later content merge must not
+      // silently drop the unconfirmed-close reason.
+      closeError: typeof (input as { closeError?: unknown }).closeError === 'string'
+        ? (input as { closeError?: string }).closeError
+        : undefined,
+      pendingReconcile: input.pendingReconcile === 'respawn' || input.pendingReconcile === 'fresh'
+        ? input.pendingReconcile
+        : undefined,
+      reconcileEpoch: typeof input.reconcileEpoch === 'number' ? input.reconcileEpoch : undefined,
+      // znhn item 1: the persistent crash trace must survive the hydrate
+      // normalize (this function is a whitelist — without this line the
+      // "survives reload" property silently dies here even though the
+      // persistMiddleware strip and persistedState load both keep it).
+      ...(crashTrace ? { crashTrace } : {}),
+    }
+  }
+  if (input.kind === 'browser') {
+    const previousBrowserInstanceId =
+      previous?.kind === 'browser' ? previous.browserInstanceId : undefined
+    return {
+      kind: 'browser',
+      browserInstanceId:
+        typeof input.browserInstanceId === 'string' && input.browserInstanceId
+          ? input.browserInstanceId
+          : previousBrowserInstanceId || nanoid(),
+      url: typeof input.url === 'string' ? input.url : '',
+      devToolsOpen: typeof input.devToolsOpen === 'boolean' ? input.devToolsOpen : false,
+    }
+  }
+  if (input.kind === 'fresh-agent') {
+    const rawFreshAgent = input as Record<string, unknown>
+    const previousCreateRequestId =
+      options?.inheritCreateRequestId && previous?.kind === 'fresh-agent'
+        ? previous.createRequestId
+        : undefined
+    const existingRestoreError = sanitizeRestoreError(rawFreshAgent.restoreError)
+    const style = normalizeFreshAgentStyleOverride((input as { style?: unknown }).style)
+    const pendingLocalEcho = normalizeFreshAgentPendingLocalEcho(rawFreshAgent.pendingLocalEcho)
+    const modelEffortLevels = normalizeFreshAgentModelEffortLevels(rawFreshAgent.modelEffortLevels)
+    const rawModelLabel = rawFreshAgent.modelLabel
+    const modelLabel =
+      rawModelLabel && typeof rawModelLabel === 'object'
+      && typeof (rawModelLabel as { modelId?: unknown }).modelId === 'string'
+      && (rawModelLabel as { modelId: string }).modelId.length > 0
+      && typeof (rawModelLabel as { label?: unknown }).label === 'string'
+      && (rawModelLabel as { label: string }).label.length > 0
+        ? { modelId: (rawModelLabel as { modelId: string }).modelId, label: (rawModelLabel as { label: string }).label }
+        : undefined
+    const status = input.status || (pendingLocalEcho ? 'running' : 'creating')
+    if (existingRestoreError) {
+      // Identity staleness pre-check (kata item 1, restoreError fold shape):
+      // a restoreError payload provably stale in IDENTITY — placeholder
+      // locator, sessionId, or resumeSessionId for the same
+      // provider+createRequestId whose previous state holds a DURABLE
+      // identity — is stale wholesale: the restoreError is dropped and the
+      // fold falls through to the normal path, where the durable-identity
+      // guard restores sessionRef/sessionId/resumeSessionId. A restoreError
+      // on a DURABLE incoming identity (a genuinely broken durable pane) and
+      // a deliberate reset (a different createRequestId) are NOT stale and
+      // keep applying below.
+      const staleFoldPreservedIdentity = preservedDurableFreshAgentIdentity(
+        previous?.kind === 'fresh-agent' ? previous : undefined,
+        {
+          provider: input.provider,
+          // The early-return's createRequestId resolution, minus the nanoid
+          // fallback: no explicit/inherited id means no continuity to key on.
+          createRequestId: typeof input.createRequestId === 'string' && input.createRequestId
+            ? input.createRequestId
+            : previousCreateRequestId,
+          sessionRef: sanitizeSessionRef(input.sessionRef),
+          sessionId: typeof input.sessionId === 'string' ? input.sessionId : undefined,
+          resumeSessionId: typeof input.resumeSessionId === 'string' ? input.resumeSessionId : undefined,
+        },
+      )
+      if (!staleFoldPreservedIdentity) {
+        return {
+          kind: 'fresh-agent',
+          sessionType: input.sessionType,
+          provider: input.provider,
+          sessionId: input.sessionId,
+          createRequestId: typeof input.createRequestId === 'string' && input.createRequestId
+            ? input.createRequestId
+            : previousCreateRequestId || nanoid(),
+          status,
+          ...(existingRestoreError.reason === 'invalid_legacy_restore_target'
+            ? {}
+            : { resumeSessionId: input.resumeSessionId }),
+          serverInstanceId: typeof input.serverInstanceId === 'string' ? input.serverInstanceId : undefined,
+          restoreError: existingRestoreError,
+          initialCwd: input.initialCwd,
+          createError: input.createError,
+          modelSelection: normalizeFreshAgentModelSelection(
+            (input as { modelSelection?: unknown }).modelSelection,
+            (input as { model?: unknown }).model,
+          ),
+          model: input.model,
+          ...(modelLabel ? { modelLabel } : {}),
+          permissionMode: input.permissionMode,
+          sandbox: input.sandbox,
+          effort: normalizeFreshAgentEffortOverride(input.effort),
+          ...(modelEffortLevels ? { modelEffortLevels } : {}),
+          plugins: input.plugins,
+          ...(style ? { style } : {}),
+          settingsDismissed: input.settingsDismissed,
+          showThinking: typeof input.showThinking === 'boolean' ? input.showThinking : undefined,
+          showTools: typeof input.showTools === 'boolean' ? input.showTools : undefined,
+          showTimecodes: typeof input.showTimecodes === 'boolean' ? input.showTimecodes : undefined,
+          ...(pendingLocalEcho ? { pendingLocalEcho } : {}),
+          ...(typeof input.reconcileNotice === 'string' ? { reconcileNotice: input.reconcileNotice } : {}),
+          ...(input.pendingReconcile === 'respawn' || input.pendingReconcile === 'fresh'
+            ? { pendingReconcile: input.pendingReconcile }
+            : {}),
+          ...(typeof input.reconcileEpoch === 'number' ? { reconcileEpoch: input.reconcileEpoch } : {}),
+        }
+      }
+    }
+
+    const durableState = migrateLegacyFreshAgentDurableState({
+      provider: input.provider,
+      sessionRef: input.sessionRef,
+      resumeSessionId: typeof input.resumeSessionId === 'string'
+        ? input.resumeSessionId
+        : (typeof rawFreshAgent.timelineSessionId === 'string'
+            ? rawFreshAgent.timelineSessionId
+            : (typeof rawFreshAgent.cliSessionId === 'string' ? rawFreshAgent.cliSessionId : undefined)),
+      rejectNonCanonicalClaudeSessionRef: true,
+    })
+    const sessionRef = durableState.sessionRef
+    const createRequestId = typeof input.createRequestId === 'string' && input.createRequestId
+      ? input.createRequestId
+      : previousCreateRequestId || nanoid()
+    // Identity guard (kata item 1): a pane that already materialized a durable
+    // provider session identity keeps it when this fold carries a re-derived
+    // placeholder for the same provider+createRequestId. New generations (a
+    // different createRequestId) are deliberately not clamped.
+    const preservedIdentity = preservedDurableFreshAgentIdentity(
+      previous?.kind === 'fresh-agent' ? previous : undefined,
+      {
+        provider: input.provider,
+        createRequestId,
+        sessionRef,
+        sessionId: typeof input.sessionId === 'string' ? input.sessionId : undefined,
+        // The restoreError-migration surviving scalar: a stale restoreError
+        // fold that fell through the pre-check above classifies from here
+        // when no locator survived.
+        resumeSessionId: typeof input.resumeSessionId === 'string' ? input.resumeSessionId : undefined,
+      },
+    )
+    if (preservedIdentity) {
+      log.warn('Clamped a re-derived placeholder fresh-agent sessionRef over the pane’s durable identity', {
+        source: 'normalizePaneContent',
+        provider: input.provider,
+        createRequestId,
+        preservedSessionId: preservedIdentity.sessionRef?.sessionId,
+        placeholderSessionId: sessionRef?.sessionId,
+      })
+    }
+    return {
+      kind: 'fresh-agent',
+      sessionType: input.sessionType,
+      provider: input.provider,
+      sessionId: input.sessionId,
+      createRequestId,
+      status,
+      ...(typeof input.resumeSessionId === 'string' ? { resumeSessionId: input.resumeSessionId } : {}),
+      ...(sessionRef ? { sessionRef } : {}),
+      ...preservedIdentity,
+      serverInstanceId: typeof input.serverInstanceId === 'string' ? input.serverInstanceId : undefined,
+      ...('restoreError' in durableState && durableState.restoreError ? { restoreError: durableState.restoreError } : {}),
+      initialCwd: input.initialCwd,
+      createError: input.createError,
+      modelSelection: normalizeFreshAgentModelSelection(
+        (input as { modelSelection?: unknown }).modelSelection,
+        (input as { model?: unknown }).model,
+      ),
+      model: input.model,
+      ...(modelLabel ? { modelLabel } : {}),
+      permissionMode: input.permissionMode,
+      sandbox: input.sandbox,
+      effort: normalizeFreshAgentEffortOverride(input.effort),
+      ...(modelEffortLevels ? { modelEffortLevels } : {}),
+      plugins: input.plugins,
+      ...(style ? { style } : {}),
+      settingsDismissed: input.settingsDismissed,
+      showThinking: typeof input.showThinking === 'boolean' ? input.showThinking : undefined,
+      showTools: typeof input.showTools === 'boolean' ? input.showTools : undefined,
+      showTimecodes: typeof input.showTimecodes === 'boolean' ? input.showTimecodes : undefined,
+      ...(pendingLocalEcho ? { pendingLocalEcho } : {}),
+      ...(typeof input.reconcileNotice === 'string' ? { reconcileNotice: input.reconcileNotice } : {}),
+      ...(input.pendingReconcile === 'respawn' || input.pendingReconcile === 'fresh'
+        ? { pendingReconcile: input.pendingReconcile }
+        : {}),
+      ...(typeof input.reconcileEpoch === 'number' ? { reconcileEpoch: input.reconcileEpoch } : {}),
+    }
+  }
+  if (input.kind === 'extension') {
+    return input  // Extension content passes through unchanged
+  }
+  if (input.kind === 'host-stats') {
+    // Stateless pane kind: the bare kind is the whole persisted/runtime shape.
+    return { kind: 'host-stats' }
+  }
+  // Editor/picker content passes through unchanged
+  return input
+}
+
+function shouldPreferLocalAgentPaneDuringHydration(
+  localContent: PaneContent,
+  incomingContent: PaneContent,
+  meta: HydratePanesMeta | undefined,
+): boolean {
+  const localIsAgentPane = localContent.kind === 'fresh-agent'
+  const incomingIsAgentPane = incomingContent.kind === 'fresh-agent'
+  if (!localIsAgentPane || !incomingIsAgentPane || localContent.kind !== incomingContent.kind) {
+    return false
+  }
+
+  const localLayoutPersistedAt = meta?.localLayoutPersistedAt
+  const remoteLayoutPersistedAt = meta?.remoteLayoutPersistedAt
+  if (
+    typeof localLayoutPersistedAt !== 'number'
+    || typeof remoteLayoutPersistedAt !== 'number'
+    || remoteLayoutPersistedAt >= localLayoutPersistedAt
+  ) {
+    return false
+  }
+
+  return isValidClaudeSessionId(localContent.resumeSessionId)
+}
+
+/**
+ * Remove pane layouts/activePane/paneTitles for tabs that no longer exist.
+ * Reads the tab list from localStorage (already loaded by tabsSlice at this point).
+ */
+function cleanOrphanedLayouts(state: PanesState): PanesState {
+  try {
+    const persistedTabs = loadPersistedTabs()
+    if (!persistedTabs) return state
+    const tabs = persistedTabs?.tabs?.tabs
+    if (!Array.isArray(tabs)) return state
+
+    const tabIds = new Set(tabs.map((t: any) => t?.id).filter(Boolean))
+    const layoutTabIds = Object.keys(state.layouts)
+    const orphaned = layoutTabIds.filter(id => !tabIds.has(id))
+
+    if (orphaned.length === 0) return state
+
+    log.debug('Cleaning orphaned pane layouts:', orphaned)
+
+    const nextLayouts = { ...state.layouts }
+    const nextActivePane = { ...state.activePane }
+    const nextPaneTitles = { ...state.paneTitles }
+    const nextPaneTitleSetByUser = { ...state.paneTitleSetByUser }
+    const nextRefreshRequestsByPane = { ...state.refreshRequestsByPane }
+    const nextRestoreFallbackAttemptsByPane = { ...state.restoreFallbackAttemptsByPane }
+
+    for (const tabId of orphaned) {
+      delete nextLayouts[tabId]
+      delete nextActivePane[tabId]
+      delete nextPaneTitles[tabId]
+      delete nextPaneTitleSetByUser[tabId]
+      delete nextRefreshRequestsByPane[tabId]
+      delete nextRestoreFallbackAttemptsByPane[tabId]
+    }
+
+    return {
+      ...state,
+      layouts: nextLayouts,
+      activePane: nextActivePane,
+      paneTitles: nextPaneTitles,
+      paneTitleSetByUser: nextPaneTitleSetByUser,
+      refreshRequestsByPane: nextRefreshRequestsByPane,
+      restoreFallbackAttemptsByPane: nextRestoreFallbackAttemptsByPane,
+    }
+  } catch {
+    return state
+  }
+}
+
+// Load persisted panes state directly at module initialization time
+// This ensures the initial state includes persisted data BEFORE the store is created.
+// Delegates to loadPersistedPanes() so that both Redux initial state and
+// terminal-restore.ts see identically migrated data.
+function loadInitialPanesState(): PanesState {
+  const defaultState: PanesState = {
+    layouts: {},
+    activePane: {},
+    paneTitles: {},
+    paneTitleSetByUser: {},
+    renameRequestTabId: null,
+    renameRequestPaneId: null,
+    zoomedPane: {},
+    refreshRequestsByPane: {},
+    restoreFallbackAttemptsByPane: {},
+    deadSessionAdjudication: [],
+    reconcileWarming: null,
+    reconcilePendingPanes: {},
+    closingTabs: {},
+    closingPanes: {},
+  }
+
+  try {
+    const loaded = loadPersistedPanes()
+    if (!loaded) return defaultState
+
+    log.debug('Loaded initial state from localStorage:', Object.keys(loaded.layouts || {}))
+    let state: PanesState = {
+      layouts: loaded.layouts || {},
+      activePane: loaded.activePane || {},
+      paneTitles: loaded.paneTitles || {},
+      paneTitleSetByUser: loaded.paneTitleSetByUser || {},
+      renameRequestTabId: null,
+      renameRequestPaneId: null,
+      zoomedPane: {},
+      refreshRequestsByPane: {},
+      restoreFallbackAttemptsByPane: {},
+      deadSessionAdjudication: [],
+      reconcileWarming: null,
+      reconcilePendingPanes: {},
+      // The close guard is strictly in-flight state: a reload has no pending
+      // close (the thunk's await died with the page).
+      closingTabs: {},
+      closingPanes: {},
+    }
+    state = cleanOrphanedLayouts(state)
+    return state
+  } catch (err) {
+    log.error('Failed to load from localStorage:', err)
+    return defaultState
+  }
+}
+
+const initialState: PanesState = loadInitialPanesState()
+
+/**
+ * Recursively walk a pane tree to find the leaf pane ID whose terminal
+ * content has the given terminalId. Returns undefined if no match.
+ */
+function findPaneIdByTerminalId(node: PaneNode, terminalId: string): string | undefined {
+  if (node.type === 'leaf') {
+    if (node.content.kind === 'terminal' && node.content.terminalId === terminalId) {
+      return node.id
+    }
+    return undefined
+  }
+  return findPaneIdByTerminalId(node.children[0], terminalId)
+    ?? findPaneIdByTerminalId(node.children[1], terminalId)
+}
+
+/**
+ * Recursively walk a pane tree to find the leaf pane ID bound to the given
+ * provider:sessionId — a fresh-agent pane owning that session, or a terminal
+ * pane whose sessionRef points at it. Returns undefined if no match.
+ */
+function findPaneIdBySessionRef(node: PaneNode, provider: string, sessionId: string): string | undefined {
+  if (node.type === 'leaf') {
+    const content = node.content
+    if (content.kind === 'fresh-agent' && content.provider === provider && content.sessionId === sessionId) {
+      return node.id
+    }
+    if (content.kind === 'terminal' && content.sessionRef?.provider === provider && content.sessionRef?.sessionId === sessionId) {
+      return node.id
+    }
+    return undefined
+  }
+  return findPaneIdBySessionRef(node.children[0], provider, sessionId)
+    ?? findPaneIdBySessionRef(node.children[1], provider, sessionId)
+}
+
+// Helper to find and replace a node (leaf or split) in the tree
+function findAndReplace(
+  node: PaneNode,
+  targetId: string,
+  replacement: PaneNode
+): PaneNode | null {
+  // Check if this node is the target
+  if (node.id === targetId) return replacement
+
+  // If it's a leaf and not the target, no match in this branch
+  if (node.type === 'leaf') return null
+
+  // It's a split - check children recursively
+  const leftResult = findAndReplace(node.children[0], targetId, replacement)
+  if (leftResult) {
+    return {
+      ...node,
+      children: [leftResult, node.children[1]],
+    }
+  }
+
+  const rightResult = findAndReplace(node.children[1], targetId, replacement)
+  if (rightResult) {
+    return {
+      ...node,
+      children: [node.children[0], rightResult],
+    }
+  }
+
+  return null
+}
+
+// Helper to collect all leaf nodes in order (left-to-right, top-to-bottom)
+function collectLeaves(node: PaneNode): Extract<PaneNode, { type: 'leaf' }>[] {
+  if (node.type === 'leaf') return [node]
+  return [...collectLeaves(node.children[0]), ...collectLeaves(node.children[1])]
+}
+
+// Helper to find a leaf node by id in the tree
+function findLeaf(node: PaneNode, id: string): Extract<PaneNode, { type: 'leaf' }> | null {
+  if (node.type === 'leaf') return node.id === id ? node : null
+  return findLeaf(node.children[0], id) || findLeaf(node.children[1], id)
+}
+
+function normalizePaneTree(node: PaneNode, previous?: PaneNode): PaneNode | null {
+  const previousValid = previous && isWellFormedPaneTree(previous) ? previous : null
+  if (!hasPaneTreeShape(node)) {
+    return previousValid
+  }
+  if (node.type === 'leaf') {
+    const previousLeaf = previousValid ? findLeaf(previousValid, node.id) : null
+    const normalizedLeaf: Extract<PaneNode, { type: 'leaf' }> = {
+      ...node,
+      // Hydrate-scoped: normalizePaneTree is reachable ONLY from hydratePanes,
+      // so this is the one place a key-less incoming pane may inherit the
+      // previous (local) same-kind pane's createRequestId instead of minting.
+      // updatePaneContent et al. pass no options and keep minting — the
+      // resume/repair rotation contract (tabsSlice.ts repairExistingTabLayout,
+      // ContextMenuProvider reopen-in-pane) depends on that.
+      content: normalizePaneContent(node.content, previousLeaf?.content, { inheritCreateRequestId: true }),
+    }
+    if (isWellFormedPaneTree(normalizedLeaf)) {
+      return normalizedLeaf
+    }
+    return previousLeaf && isWellFormedPaneTree(previousLeaf) ? previousLeaf : null
+  }
+  const normalizedLeft = normalizePaneTree(node.children[0] as PaneNode, previousValid ?? undefined)
+  const normalizedRight = normalizePaneTree(node.children[1] as PaneNode, previousValid ?? undefined)
+  if (!normalizedLeft || !normalizedRight) {
+    return previousValid
+  }
+  return {
+    ...node,
+    children: [normalizedLeft, normalizedRight],
+  }
+}
+
+function collectLeafPaneIds(node: PaneNode): string[] {
+  if (node.type === 'leaf') {
+    return [node.id]
+  }
+  return [
+    ...collectLeafPaneIds(node.children[0]),
+    ...collectLeafPaneIds(node.children[1]),
+  ]
+}
+
+function filterPaneMetadataByLayout<T>(
+  metadata: Record<string, Record<string, T>> | undefined,
+  tabId: string,
+  paneIds: Set<string>,
+): Record<string, T> | undefined {
+  const tabMetadata = metadata?.[tabId]
+  if (!tabMetadata) return undefined
+  const filtered = Object.fromEntries(
+    Object.entries(tabMetadata).filter(([paneId]) => paneIds.has(paneId)),
+  )
+  return Object.keys(filtered).length > 0 ? filtered : undefined
+}
+
+function pickHydratedActivePane(
+  paneIds: string[],
+  incomingActivePaneId: string | undefined,
+  localActivePaneId: string | undefined,
+): string | undefined {
+  const paneIdSet = new Set(paneIds)
+  if (incomingActivePaneId && paneIdSet.has(incomingActivePaneId)) {
+    return incomingActivePaneId
+  }
+  if (localActivePaneId && paneIdSet.has(localActivePaneId)) {
+    return localActivePaneId
+  }
+  return paneIds[paneIds.length - 1]
+}
+
+function mergeHydratedPaneMetadata(
+  state: PanesState,
+  incoming: PanesState,
+  layouts: Record<string, PaneNode>,
+  incomingLayoutTabIds: Set<string>,
+): Pick<PanesState, 'activePane' | 'paneTitles' | 'paneTitleSetByUser'> {
+  const activePane: Record<string, string> = {}
+  const paneTitles: Record<string, Record<string, string>> = {}
+  const paneTitleSetByUser: Record<string, Record<string, boolean>> = {}
+
+  for (const [tabId, layout] of Object.entries(layouts)) {
+    const paneIds = collectLeafPaneIds(layout)
+    const paneIdSet = new Set(paneIds)
+    const localLayoutPreserved = !incomingLayoutTabIds.has(tabId)
+    const preferredTitleSource = localLayoutPreserved
+      ? state.paneTitles
+      : incoming.paneTitles
+    const preferredTitleSetByUserSource = localLayoutPreserved
+      ? state.paneTitleSetByUser
+      : incoming.paneTitleSetByUser
+
+    const nextActivePane = pickHydratedActivePane(
+      paneIds,
+      localLayoutPreserved ? undefined : incoming.activePane?.[tabId],
+      state.activePane?.[tabId],
+    )
+    if (nextActivePane) {
+      activePane[tabId] = nextActivePane
+    }
+
+    const nextPaneTitles = filterPaneMetadataByLayout(preferredTitleSource, tabId, paneIdSet)
+    const fallbackTitles = !localLayoutPreserved
+      ? filterPaneMetadataByLayout(state.paneTitles, tabId, paneIdSet)
+      : undefined
+    const localUserSetTitleFlags = !localLayoutPreserved
+      ? filterPaneMetadataByLayout(state.paneTitleSetByUser, tabId, paneIdSet)
+      : undefined
+    if (nextPaneTitles) {
+      if (fallbackTitles && localUserSetTitleFlags) {
+        const merged = { ...nextPaneTitles }
+        for (const [paneId, title] of Object.entries(fallbackTitles)) {
+          if (localUserSetTitleFlags[paneId]) {
+            merged[paneId] = title
+          }
+        }
+        paneTitles[tabId] = merged
+      } else {
+        paneTitles[tabId] = nextPaneTitles
+      }
+    } else if (fallbackTitles) {
+      paneTitles[tabId] = fallbackTitles
+    }
+
+    const nextPaneTitleSetByUser = filterPaneMetadataByLayout(
+      preferredTitleSetByUserSource,
+      tabId,
+      paneIdSet,
+    )
+    const fallbackTitleSetByUser = !localLayoutPreserved
+      ? filterPaneMetadataByLayout(state.paneTitleSetByUser, tabId, paneIdSet)
+      : undefined
+    if (nextPaneTitleSetByUser || fallbackTitleSetByUser) {
+      paneTitleSetByUser[tabId] = {
+        ...(nextPaneTitleSetByUser || {}),
+        ...(fallbackTitleSetByUser || {}),
+      }
+    }
+  }
+
+  return { activePane, paneTitles, paneTitleSetByUser }
+}
+
+function clearPaneRefreshRequest(state: PanesState, tabId: string, paneId: string) {
+  const tabRequests = state.refreshRequestsByPane?.[tabId]
+  if (!tabRequests?.[paneId]) return
+
+  delete tabRequests[paneId]
+  if (Object.keys(tabRequests).length === 0) {
+    delete state.refreshRequestsByPane?.[tabId]
+  }
+}
+
+/** Resolve the view-level pre-verdict wait for a pane: every fold-target
+ *  reducer (attach/reset for both kinds, and setPaneRestoreError) calls this
+ *  so the pane's deferred mount-create is released once its verdict folds. */
+function clearReconcilePendingForPane(state: PanesState, tabId: string, paneId: string): void {
+  if (state.reconcilePendingPanes) delete state.reconcilePendingPanes[`${tabId}:${paneId}`]
+}
+
+function clearRestoreFallbackAttemptForPane(state: PanesState, tabId: string, paneId: string) {
+  const tabAttempts = state.restoreFallbackAttemptsByPane?.[tabId]
+  if (!tabAttempts?.[paneId]) return
+
+  delete tabAttempts[paneId]
+  if (Object.keys(tabAttempts).length === 0) {
+    delete state.restoreFallbackAttemptsByPane?.[tabId]
+  }
+}
+
+function clearTerminalContentForRecreate(
+  state: PanesState,
+  node: Extract<PaneNode, { type: 'leaf' }>,
+  tabId: string,
+): void {
+  if (node.content?.kind !== 'terminal' || !node.content.terminalId) return
+  const staleTerminalId = node.content.terminalId
+  const nextRequestId = nanoid()
+  node.content.terminalId = undefined
+  node.content.serverInstanceId = undefined
+  node.content.streamId = undefined
+  node.content.status = 'creating'
+  node.content.createRequestId = nextRequestId
+  if (!sanitizeSessionRef(node.content.sessionRef)) {
+    if (!state.restoreFallbackAttemptsByPane) state.restoreFallbackAttemptsByPane = {}
+    if (!state.restoreFallbackAttemptsByPane[tabId]) state.restoreFallbackAttemptsByPane[tabId] = {}
+    state.restoreFallbackAttemptsByPane[tabId][node.id] = {
+      staleTerminalId,
+      requestId: nextRequestId,
+      reason: 'dead_live_handle_without_session_ref',
+    }
+  } else {
+    clearRestoreFallbackAttemptForPane(state, tabId, node.id)
+  }
+}
+
+// Reconcile notice copy — exact strings reused by later tasks/tests.
+export const RECONCILE_NOTICE_CORRECTED = 'Session identity corrected by server — this pane now points at its live session.'
+export const RECONCILE_NOTICE_DUPLICATE = 'A duplicate terminal for this session was detected and ignored.'
+// PIN 3 (§4.2 "fresh by race, not by intent"): the server restarted while
+// this pane's session identity was still being established — loud, distinct,
+// and phrased to match the restart-contract wall's breadcrumb probe.
+export const RECONCILE_NOTICE_FRESH_BY_RACE =
+  "This pane couldn't be resumed — the server restarted before its session identity was captured. Started a fresh session."
+export function reconcileFreshNotice(reason: string): string {
+  if (reason === 'fresh_by_race') return RECONCILE_NOTICE_FRESH_BY_RACE
+  return `Started fresh (${reason}).`
+}
+
+/**
+ * Locate a terminal pane's content by (tabId, paneId) for reconcile folds.
+ * Same pane walk as clearTerminalContentForRecreate's callers (via findLeaf),
+ * but the folds below never mint a createRequestId — council rule 2.
+ */
+function findReconcileTerminalContent(
+  state: PanesState,
+  tabId: string,
+  paneId: string,
+): TerminalPaneContent | undefined {
+  const root = state.layouts[tabId]
+  if (!root) return undefined
+  const leaf = findLeaf(root, paneId)
+  if (!leaf || leaf.content.kind !== 'terminal') return undefined
+  return leaf.content
+}
+
+/**
+ * Shared live-handle fold (applyReconcileAttach / applyReattachToLiveTerminal):
+ * point an already-mounted pane at a live terminal and bump the volatile
+ * epoch — the lifecycle effect's ONLY re-fire signal on an unchanged
+ * createRequestId (TerminalView excludes terminalId/status from its deps by
+ * design; without the bump the fold stays invisible and the pane gray).
+ * Callers own lookup and any extra identity/bookkeeping writes.
+ */
+function foldLiveTerminalAttach(content: TerminalPaneContent, terminalId: string): void {
+  content.terminalId = terminalId
+  content.streamId = undefined
+  content.status = 'running'
+  content.restoreError = undefined
+  content.reconcileEpoch = (content.reconcileEpoch ?? 0) + 1
+}
+
+/** Fresh-agent + terminal finder for reconcile fold reducers. */
+function findReconcilePaneContent(
+  state: PanesState,
+  tabId: string,
+  paneId: string,
+): TerminalPaneContent | FreshAgentPaneContent | undefined {
+  const root = state.layouts[tabId]
+  if (!root) return undefined
+  const leaf = findLeaf(root, paneId)
+  const content = leaf?.content
+  if (content?.kind === 'terminal' || content?.kind === 'fresh-agent') return content
+  return undefined
+}
+
+function freshAgentPaneMatchesMaterializedSession(
+  content: FreshAgentPaneContent,
+  materialized: FreshAgentSessionMaterializedPayload,
+): boolean {
+  if (content.sessionType !== materialized.sessionType || content.provider !== materialized.provider) {
+    return false
+  }
+
+  return [
+    content.sessionId,
+    content.resumeSessionId,
+    content.sessionRef?.sessionId,
+  ].some((sessionId) => sessionId === materialized.previousSessionId || sessionId === materialized.sessionId)
+}
+
+function buildMaterializedFreshAgentContent(
+  content: FreshAgentPaneContent,
+  materialized: FreshAgentSessionMaterializedPayload,
+): FreshAgentPaneContent {
+  const sessionRef = sanitizeSessionRef(materialized.sessionRef) ?? {
+    provider: materialized.provider,
+    sessionId: materialized.sessionId,
+  }
+  return normalizePaneContent({
+    ...content,
+    sessionId: materialized.sessionId,
+    resumeSessionId: materialized.sessionId,
+    sessionRef,
+    restoreError: undefined,
+  }, content) as FreshAgentPaneContent
+}
+
+function sessionRefsEqual(left?: { provider?: string; sessionId?: string }, right?: { provider?: string; sessionId?: string }): boolean {
+  return left?.provider === right?.provider && left?.sessionId === right?.sessionId
+}
+
+function codexDurabilityMatchesCanonicalSession(
+  codexDurability: TerminalPaneContent['codexDurability'],
+  sessionRef: { provider?: string; sessionId?: string } | undefined,
+): boolean {
+  return Boolean(
+    sessionRef?.provider === 'codex'
+    && codexDurability?.state === 'durable'
+    && codexDurability.durableThreadId === sessionRef.sessionId,
+  )
+}
+
+function pickCanonicalCodexDurability(
+  localContent: TerminalPaneContent,
+  incomingContent: TerminalPaneContent,
+  sessionRef: { provider?: string; sessionId?: string } | undefined,
+): TerminalPaneContent['codexDurability'] | undefined {
+  if (codexDurabilityMatchesCanonicalSession(localContent.codexDurability, sessionRef)) {
+    return localContent.codexDurability
+  }
+  return codexDurabilityMatchesCanonicalSession(incomingContent.codexDurability, sessionRef)
+    ? incomingContent.codexDurability
+    : undefined
+}
+
+function preserveLocalCanonicalTerminalIdentity(
+  localContent: TerminalPaneContent,
+  incomingContent: TerminalPaneContent,
+): TerminalPaneContent {
+  const localSessionRef = sanitizeSessionRef(localContent.sessionRef)
+  if (!localSessionRef) return incomingContent
+  return {
+    ...incomingContent,
+    createRequestId: localContent.createRequestId,
+    status: localContent.status,
+    sessionRef: localSessionRef,
+    resumeSessionId: undefined,
+    terminalId: localContent.terminalId,
+    serverInstanceId: localContent.serverInstanceId,
+    streamId: localContent.streamId,
+    codexDurability: pickCanonicalCodexDurability(localContent, incomingContent, localSessionRef),
+  }
+}
+
+function reconcileRefreshRequestsForTab(state: PanesState, tabId: string) {
+  const tabRequests = state.refreshRequestsByPane?.[tabId]
+  if (!tabRequests) return
+
+  const layout = state.layouts[tabId]
+  if (!layout) {
+    delete state.refreshRequestsByPane?.[tabId]
+    return
+  }
+
+  const nextRequests: Record<string, PaneRefreshRequest> = {}
+  for (const [paneId, request] of Object.entries(tabRequests)) {
+    const content = findLeaf(layout, paneId)?.content
+    if (paneRefreshTargetMatchesContent(request.target, content)) {
+      nextRequests[paneId] = request
+    }
+  }
+
+  if (Object.keys(nextRequests).length === 0) {
+    delete state.refreshRequestsByPane?.[tabId]
+    return
+  }
+
+  if (!state.refreshRequestsByPane) {
+    state.refreshRequestsByPane = {}
+  }
+  state.refreshRequestsByPane[tabId] = nextRequests
+}
+
+/**
+ * Merge incoming (remote) pane tree with local state, preserving local
+ * terminal assignments that are more advanced. A local terminal pane
+ * with a terminalId beats an incoming pane without one (same createRequestId).
+ */
+function mergeTerminalState(
+  incoming: PaneNode,
+  local: PaneNode,
+  meta?: HydratePanesMeta,
+): PaneNode | null {
+  const incomingValid = hasPaneTreeShape(incoming)
+  const localValid = hasPaneTreeShape(local)
+  if (!incomingValid) return localValid ? local : null
+  if (!localValid) return incoming
+
+  // If both leaves, apply smart merge for terminal and fresh-agent content
+  if (incoming.type === 'leaf' && local.type === 'leaf') {
+    if (incoming.content?.kind === 'terminal' && local.content?.kind === 'terminal') {
+      const localSessionRef = sanitizeSessionRef(local.content.sessionRef)
+      if (incoming.content.createRequestId === local.content.createRequestId) {
+        // Same createRequestId: prefer local if it has terminalId and
+        // incoming is still creating (not exited). Exit state must propagate.
+        if (
+          local.content.terminalId && !incoming.content.terminalId &&
+          incoming.content.status !== 'exited'
+        ) {
+          return { ...incoming, content: local.content }
+        }
+        // Guard resumeSessionId: if the local pane has a session and incoming
+        // differs, preserve the local session. resumeSessionId is pane identity
+        // (which Claude session this pane represents) and must not be silently
+        // swapped by cross-tab sync from another browser tab's terminal.
+        if (
+          local.content.resumeSessionId &&
+          incoming.content.resumeSessionId !== local.content.resumeSessionId
+        ) {
+          return {
+            ...incoming,
+            content: {
+              ...incoming.content,
+              resumeSessionId: local.content.resumeSessionId,
+              sessionRef: buildPreservedSessionRef(local.content, local.content.resumeSessionId),
+            },
+          }
+        }
+      } else if (local.content.status === 'creating') {
+        // Different createRequestId and local is reconnecting: local just
+        // regenerated its ID (e.g. after INVALID_TERMINAL_ID). Stale remote
+        // state must not overwrite the active reconnection.
+        return local
+      }
+
+      if (localSessionRef) {
+        return {
+          ...incoming,
+          content: preserveLocalCanonicalTerminalIdentity(local.content, incoming.content),
+        }
+      }
+    }
+
+    // Agent panes: prefer local sessionId and status when the local state
+    // is more advanced. The persist debounce means incoming (from localStorage)
+    // can be stale — e.g. status 'starting' when local has already reached 'connected'.
+    if (
+      incoming.content?.kind === 'fresh-agent'
+      && incoming.content?.kind === local.content?.kind
+    ) {
+      if (shouldPreferLocalAgentPaneDuringHydration(local.content, incoming.content, meta)) {
+        return local
+      }
+      if (incoming.content.createRequestId === local.content.createRequestId) {
+        // Identity guard (kata item 1): a materialized durable fresh-agent
+        // session identity must never regress to a re-derived placeholder
+        // (freshopencode-<createRequestId> et al.) from a stale
+        // persisted/tabs.sync payload. Keyed on provider+createRequestId
+        // continuity; deliberate resets (new createRequestId) pass through.
+        const preservedIdentity = preservedDurableFreshAgentIdentity(local.content, incoming.content)
+        if (preservedIdentity) {
+          log.warn('Clamped a re-derived placeholder fresh-agent sessionRef over the pane’s durable identity', {
+            source: 'mergeTerminalState',
+            provider: incoming.content.provider,
+            createRequestId: incoming.content.createRequestId,
+            preservedSessionId: preservedIdentity.sessionRef?.sessionId,
+            placeholderSessionId: sanitizeSessionRef(incoming.content.sessionRef)?.sessionId,
+          })
+        }
+        // The identity clamp restores the durable identity tuple but must not
+        // early-return past the sibling arms: `status` is the one field that
+        // can still arrive regressed in the same stale payload, so the
+        // early-status protection below composes on top of the restored
+        // identity. `incomingContent` is `incoming.content` verbatim when no
+        // clamp fired, so every other path behaves byte-identically. A fold
+        // provably stale in identity is stale wholesale: a piggybacking
+        // restoreError is dropped with the placeholder identity (a
+        // restoreError on a DURABLE incoming identity never fires the clamp,
+        // so legitimate restore flows are untouched).
+        let incomingContent = incoming.content
+        if (preservedIdentity) {
+          const { restoreError: _staleRestoreError, ...rest } = incoming.content
+          incomingContent = { ...rest, ...preservedIdentity }
+        }
+        if (
+          shouldPreserveLocalCanonicalResumeSessionId(
+            local.content.resumeSessionId,
+            incomingContent.resumeSessionId,
+          )
+        ) {
+          return {
+            ...incoming,
+            content: {
+              ...incomingContent,
+              resumeSessionId: local.content.resumeSessionId,
+              sessionRef: buildPreservedSessionRef(local.content, local.content.resumeSessionId),
+            },
+          }
+        }
+        // Preserve local sessionId if incoming doesn't have it yet
+        if (local.content.sessionId && !incomingContent.sessionId) {
+          return { ...incoming, content: local.content }
+        }
+        // Don't regress back to early states (creating/starting) once past them.
+        // Normal cycles like running→idle are fine and must not be blocked.
+        if (local.content.sessionId && incomingContent.sessionId === local.content.sessionId) {
+          const EARLY_STATES = new Set(['creating', 'starting'])
+          const localStatus = local.content.status ?? ''
+          const incomingStatus = incomingContent.status ?? ''
+          if (!EARLY_STATES.has(localStatus) && EARLY_STATES.has(incomingStatus)) {
+            return { ...incoming, content: { ...incomingContent, status: local.content.status } }
+          }
+        }
+        if (preservedIdentity) {
+          return { ...incoming, content: incomingContent }
+        }
+      }
+    }
+
+    // Guard cross-kind overwrites: if local and incoming have different content
+    // kinds, preserve local to prevent pane corruption during cross-tab sync
+    if (incoming.content?.kind !== local.content?.kind) {
+      return local
+    }
+
+    return incoming
+  }
+
+  // If both splits with same structure, recurse (guard children array shape)
+  if (
+    incoming.type === 'split' && local.type === 'split' &&
+    Array.isArray(incoming.children) && incoming.children.length === 2 &&
+    Array.isArray(local.children) && local.children.length === 2
+  ) {
+    const mergedLeft = mergeTerminalState(incoming.children[0], local.children[0], meta)
+    const mergedRight = mergeTerminalState(incoming.children[1], local.children[1], meta)
+    if (!mergedLeft || !mergedRight) {
+      return local
+    }
+    return {
+      ...incoming,
+      children: [mergedLeft, mergedRight],
+    }
+  }
+
+  // Structure changed (leaf↔split) or malformed children
+  // Cross-tab sync can deliver stale structure changes. Use both timestamps
+  // and content heuristics to decide which side to keep.
+  if (local.type !== incoming.type) {
+    const localAt = meta?.localLayoutPersistedAt
+    const remoteAt = meta?.remoteLayoutPersistedAt
+    const timestampsAvailable = typeof localAt === 'number' && typeof remoteAt === 'number'
+    const localIsNewer = timestampsAvailable && remoteAt < localAt
+    const remoteIsNewer = timestampsAvailable && remoteAt >= localAt
+
+    if (local.type === 'split' && incoming.type === 'leaf') {
+      if (localIsNewer) return local
+      if (remoteIsNewer) return incoming
+    }
+
+    if (local.type === 'leaf' && incoming.type === 'split') {
+      if (localIsNewer) return local
+      if (remoteIsNewer) return incoming
+    }
+  }
+
+  return incoming
+}
+
+/**
+ * Strip stale runtime IDs from pane content so restored panes get fresh ones.
+ */
+function stripStaleIds(content: PaneContent): PaneContentInput {
+  if (content.kind === 'terminal') {
+    const { terminalId: _terminalId, createRequestId: _createRequestId, status: _status, ...rest } = content
+    return rest
+  }
+  if (content.kind === 'browser') {
+    const { browserInstanceId: _browserInstanceId, ...rest } = content
+    return rest
+  }
+  if (content.kind === 'fresh-agent') {
+    const {
+      sessionId: _sessionId,
+      createRequestId: _createRequestId,
+      status: _status,
+      serverInstanceId: _serverInstanceId,
+      createError: _createError,
+      reconcileEpoch: _reconcileEpoch,
+      pendingReconcile: _pendingReconcile,
+      reconcileNotice: _reconcileNotice,
+      ...rest
+    } = content
+    return rest
+  }
+  return content
+}
+
+/**
+ * Walk a PaneNode tree, normalizing each leaf's content with fresh IDs.
+ */
+function normalizeRestoredTree(node: PaneNode): PaneNode {
+  if (node.type === 'leaf') {
+    return {
+      type: 'leaf',
+      id: node.id,
+      content: normalizePaneContent(stripStaleIds(node.content)),
+    }
+  }
+  return {
+    type: 'split',
+    id: node.id,
+    direction: node.direction,
+    sizes: node.sizes,
+    children: [
+      normalizeRestoredTree(node.children[0]),
+      normalizeRestoredTree(node.children[1]),
+    ],
+  }
+}
+
+function findFirstLeafId(node: PaneNode): string {
+  if (node.type === 'leaf') return node.id
+  return findFirstLeafId(node.children[0])
+}
+
+/**
+ * Focused-episode-7 round 4 (Finding F3) — the pending-close freeze. While a
+ * tab's close is in flight (the `closeTab` thunk is awaiting the close
+ * batch's acknowledgement), the tab's pane identity set is FROZEN: it must
+ * match exactly the pane set the acknowledged batch covered. The reducers
+ * that would GAIN a pane on the closing tab (splitPane / addPane /
+ * initLayout / restoreLayout / resetLayout) refuse (logged, no state change)
+ * — pre-fix, the removal applied to the CURRENT layout post-ack, so a pane
+ * split into the still-visible tab during the bounded wait was removed with
+ * the tab while its close evidence was never journaled, and recovery could
+ * later re-offer it.
+ *
+ * Focused-episode-7 round 5 (Finding F2) — THE ONE SHARED PENDING-CLOSE
+ * GUARD, and THE ONE RULE: an identity-CHANGING fold of a pane whose close
+ * is outstanding (its own `closingPanes` mark, or its whole tab's
+ * `closingTabs` mark) is REFUSED — blocked, never deferred-or-retargeted.
+ * Round 4 froze only whole-tab closes; a single-pane or replace close set no
+ * mark at all, and three server-driven identity-rekeying reducers never
+ * consulted the guard at all. The hazard: the gate snapshots the pane's
+ * createRequestId and awaits the acknowledgement; a mid-wait rekey means the
+ * ack covers the OLD identity while the post-ack removal drops the
+ * REPLACEMENT identity — journaled only by the middleware's unacknowledged
+ * belt, so a disconnect/reload before it lands leaves a recoverable ghost
+ * row for a pane the user closed.
+ *
+ * The audit (every reducer classified):
+ * - IDENTITY-CHANGING (guarded by `refuseRekeyWhileClosing` /
+ *   `isPaneClosePending`): `replacePane` (re-keys to a picker),
+ *   `updatePaneContent` (only folds whose pane-identity key CHANGES — the
+ *   picker-select mint and the wholesale re-key), `mergePaneContent` (same
+ *   rule), `restartFreshAgentCreate` (mints a fresh createRequestId),
+ *   `clearDeadTerminals` and `clearTerminalLiveHandles` (re-mint the
+ *   identity via `clearTerminalContentForRecreate`; skipped PER LEAF so a
+ *   pending pane never blocks its un-pending siblings),
+ *   `repairCodexIdentityMismatch` (re-keys the pane wholesale),
+ *   `swapPanes` (delta-round-8 Finding F1 — exchanges BOTH panes' complete
+ *   contents, identities included; refused when EITHER swapped pane's close
+ *   is outstanding, or the whole tab's).
+ * - GAINING (tab-scope guard only — `refuseMutationWhileClosing`):
+ *   `splitPane`/`addPane`/`initLayout`/`restoreLayout`/`resetLayout`. A gain
+ *   into a tab with only pane-scoped closes pending is SAFE (the post-ack
+ *   removal targets exactly the closing pane; the new pane was never closed
+ *   and never removed), so single-pane closes answer pane scope only.
+ * - HYDRATE: `hydratePanes` keeps a tab's LOCAL layout verbatim while ANY
+ *   close (tab- or pane-scoped) is outstanding in it — a remote shape must
+ *   never re-key (or re-seed away) a frozen identity.
+ * - IDENTITY-PRESERVING (never gated): the `terminal.created` terminalId
+ *   fold and reconcile verdicts (`applyReconcileAttach` /
+ *   `applyReattachToLiveTerminal` / `resetPaneForReconcileCreate` /
+ *   `resetFreshAgentPaneForReconcileCreate` / `applyFreshAgentReconcileAttach`
+ *   — CRID-preserving by council rule 2), `materializeFreshAgentSession` and
+ *   `reconcileTerminalSessionRefByTerminalId` (session folds that never
+ *   touch the createRequestId the close lanes key by), titles/notices/
+ *   attention/geometry reducers. They must keep landing so a close that
+ *   FAILS leaves an uninjured tab.
+ * - REMOVING (never gated): `closePane`/`removeLayout` — removals only
+ *   shrink the frozen set, and every removed identity is already inside the
+ *   acknowledged batch.
+ */
+function isTabClosePending(state: PanesState, tabId: string): boolean {
+  return state.closingTabs?.[tabId] === true
+}
+
+/** The ONE shared pending-close guard: this pane's own close, or its tab's, is awaiting acknowledgement. */
+export function isPaneClosePending(state: PanesState, tabId: string, paneId: string): boolean {
+  return isTabClosePending(state, tabId) || state.closingPanes?.[`${tabId}:${paneId}`] === true
+}
+
+/** True while ANY close (tab-wide, or any pane's single close) is outstanding in this tab — the hydrate rule. */
+export function hasAnyClosePending(state: PanesState, tabId: string): boolean {
+  if (isTabClosePending(state, tabId)) return true
+  const prefix = `${tabId}:`
+  for (const key of Object.keys(state.closingPanes ?? {})) {
+    if (key.startsWith(prefix)) return true
+  }
+  return false
+}
+
+/** Shared refusal for the pane-GAINING reducers. Returns true when refused. */
+function refuseMutationWhileClosing(state: PanesState, tabId: string, op: string): boolean {
+  if (!isTabClosePending(state, tabId)) return false
+  log.warn('refusing a pane mutation while the tab close is in flight', { op, tabId })
+  return true
+}
+
+/** Shared refusal for the identity-CHANGING reducers (the round-5 rule). Returns true when refused. */
+function refuseRekeyWhileClosing(state: PanesState, tabId: string, paneId: string, op: string): boolean {
+  if (!isPaneClosePending(state, tabId, paneId)) return false
+  log.warn('refusing an identity-changing pane fold while the close is in flight', { op, tabId, paneId })
+  return true
+}
+
+/**
+ * The pane identity a content carries, when it carries one: the
+ * createRequestId of the session panes (terminal/fresh-agent — the close
+ * lanes' key). Non-session panes (browser/editor/picker/host-stats/extension)
+ * carry none.
+ */
+function contentPaneIdentityKey(content: PaneContent | undefined): string | undefined {
+  if (!content) return undefined
+  if (content.kind === 'terminal' || content.kind === 'fresh-agent') {
+    return typeof content.createRequestId === 'string' && content.createRequestId
+      ? content.createRequestId
+      : undefined
+  }
+  return undefined
+}
+
+export const panesSlice = createSlice({
+  name: 'panes',
+  initialState,
+  reducers: {
+    initLayout: (
+      state,
+      action: PayloadAction<{ tabId: string; content: PaneContentInput; paneId?: string }>
+    ) => {
+      const { tabId, content, paneId: providedPaneId } = action.payload
+      if (refuseMutationWhileClosing(state, tabId, 'initLayout')) return
+      // Don't overwrite existing layout
+      if (state.layouts[tabId]) return
+
+      const paneId = providedPaneId ?? nanoid()
+      const normalized = normalizePaneContent(content)
+      state.layouts[tabId] = {
+        type: 'leaf',
+        id: paneId,
+        content: normalized,
+      }
+      state.activePane[tabId] = paneId
+      state.paneTitles[tabId] = { [paneId]: derivePaneTitle(normalized) }
+      reconcileRefreshRequestsForTab(state, tabId)
+      delete state.restoreFallbackAttemptsByPane?.[tabId]
+    },
+
+    restoreLayout: (
+      state,
+      action: PayloadAction<{ tabId: string; layout: PaneNode; paneTitles: Record<string, string>; paneTitleSetByUser?: Record<string, boolean> }>
+    ) => {
+      const { tabId, layout, paneTitles, paneTitleSetByUser } = action.payload
+      if (refuseMutationWhileClosing(state, tabId, 'restoreLayout')) return
+      if (state.layouts[tabId]) return
+
+      const normalizedLayout = normalizeRestoredTree(layout)
+      state.layouts[tabId] = normalizedLayout
+      state.activePane[tabId] = findFirstLeafId(normalizedLayout)
+      state.paneTitles[tabId] = paneTitles
+      if (paneTitleSetByUser && Object.keys(paneTitleSetByUser).length > 0) {
+        state.paneTitleSetByUser[tabId] = paneTitleSetByUser
+      }
+      reconcileRefreshRequestsForTab(state, tabId)
+      delete state.restoreFallbackAttemptsByPane?.[tabId]
+    },
+
+    resetLayout: (
+      state,
+      action: PayloadAction<{ tabId: string; content: PaneContentInput }>
+    ) => {
+      const { tabId, content } = action.payload
+      if (refuseMutationWhileClosing(state, tabId, 'resetLayout')) return
+      const paneId = nanoid()
+      const normalized = normalizePaneContent(content)
+      state.layouts[tabId] = {
+        type: 'leaf',
+        id: paneId,
+        content: normalized,
+      }
+      state.activePane[tabId] = paneId
+      state.paneTitles[tabId] = { [paneId]: derivePaneTitle(normalized) }
+      reconcileRefreshRequestsForTab(state, tabId)
+      delete state.restoreFallbackAttemptsByPane?.[tabId]
+    },
+
+    splitPane: (
+      state,
+      action: PayloadAction<{
+        tabId: string
+        paneId: string
+        direction: 'horizontal' | 'vertical'
+        newContent: PaneContentInput
+        newPaneId?: string
+        /** ui.command pane.split passes false — agent-driven splits never steal focus-in-tab. */
+        activate?: boolean
+      }>
+    ) => {
+      const { tabId, paneId, direction, newContent, newPaneId: providedPaneId, activate } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+      if (refuseMutationWhileClosing(state, tabId, 'splitPane')) return
+
+      const newPaneId = providedPaneId ?? nanoid()
+      const normalizedContent = normalizePaneContent(newContent)
+
+      const targetPane = findLeaf(root, paneId)
+      if (!targetPane) return
+
+      // Create the split node
+      const splitNode: PaneNode = {
+        type: 'split',
+        id: nanoid(),
+        direction,
+        sizes: [50, 50],
+        children: [
+          { ...targetPane }, // Keep original pane
+          { type: 'leaf', id: newPaneId, content: normalizedContent },
+        ],
+      }
+
+      // Replace the target pane with the split
+      const newRoot = findAndReplace(root, paneId, splitNode)
+      if (newRoot) {
+        state.layouts[tabId] = newRoot
+        if (activate !== false) {
+          state.activePane[tabId] = newPaneId
+        }
+
+        // Clear zoom so the new pane is visible
+        if (state.zoomedPane?.[tabId]) {
+          delete state.zoomedPane[tabId]
+        }
+
+        // Initialize title for new pane
+        if (!state.paneTitles[tabId]) {
+          state.paneTitles[tabId] = {}
+        }
+        state.paneTitles[tabId][newPaneId] = derivePaneTitle(normalizedContent)
+        reconcileRefreshRequestsForTab(state, tabId)
+      }
+    },
+
+    /**
+     * Add a pane by splitting the active pane horizontally (to the right).
+     * Preserves the existing layout structure instead of rebuilding a grid.
+     * The new pane is placed to the right of the active pane and becomes active.
+     */
+    addPane: (
+      state,
+      action: PayloadAction<{
+        tabId: string
+        newContent: PaneContentInput
+      }>
+    ) => {
+      const { tabId, newContent } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+      if (refuseMutationWhileClosing(state, tabId, 'addPane')) return
+
+      const activePaneId = state.activePane[tabId]
+
+      // Find the active pane; fall back to first leaf if active pane is missing
+      const activeLeaf = (activePaneId && findLeaf(root, activePaneId))
+        || collectLeaves(root)[0]
+      if (!activeLeaf) return
+
+      // Create new leaf
+      const newPaneId = nanoid()
+      const normalizedContent = normalizePaneContent(newContent)
+      const newLeaf: PaneNode = {
+        type: 'leaf',
+        id: newPaneId,
+        content: normalizedContent,
+      }
+
+      // Replace the active pane with a horizontal split: [activePane, newPane]
+      const replacement: PaneNode = {
+        type: 'split',
+        id: nanoid(),
+        direction: 'horizontal',
+        sizes: [50, 50],
+        children: [{ ...activeLeaf }, newLeaf],
+      }
+
+      const newRoot = findAndReplace(root, activeLeaf.id, replacement)
+      if (!newRoot) return
+
+      state.layouts[tabId] = newRoot
+      state.activePane[tabId] = newPaneId
+
+      // Clear zoom so the new pane is visible
+      if (state.zoomedPane?.[tabId]) {
+        delete state.zoomedPane[tabId]
+      }
+
+      // Initialize title for new pane
+      if (!state.paneTitles[tabId]) {
+        state.paneTitles[tabId] = {}
+      }
+      state.paneTitles[tabId][newPaneId] = derivePaneTitle(normalizedContent)
+      reconcileRefreshRequestsForTab(state, tabId)
+    },
+
+    closePane: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string }>
+    ) => {
+      const { tabId, paneId } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+
+      // Can't close the only pane
+      if (root.type === 'leaf') return
+
+      // Find the parent split containing the target pane and replace it
+      // with the surviving sibling. This preserves the rest of the tree
+      // structure exactly as the user arranged it.
+      // Returns [newTree, siblingNode] where siblingNode is the promoted sibling.
+      function removePane(node: PaneNode, targetId: string): [PaneNode, PaneNode] | null {
+        if (node.type === 'leaf') return null
+
+        const [left, right] = node.children
+
+        // Check if target is a direct child (leaf or split)
+        if (left.id === targetId) return [right, right]
+        if (right.id === targetId) return [left, left]
+
+        // Recurse into children
+        const leftResult = removePane(left, targetId)
+        if (leftResult) {
+          return [{ ...node, children: [leftResult[0], right] }, leftResult[1]]
+        }
+        const rightResult = removePane(right, targetId)
+        if (rightResult) {
+          return [{ ...node, children: [left, rightResult[0]] }, rightResult[1]]
+        }
+        return null
+      }
+
+      const result = removePane(root, paneId)
+      if (result) {
+        const [newRoot, sibling] = result
+        state.layouts[tabId] = newRoot
+
+        // Update active pane if the closed pane was active.
+        // Focus the first leaf in the promoted sibling subtree — that's the
+        // pane that now occupies the space where the closed pane was.
+        if (state.activePane[tabId] === paneId) {
+          const siblingLeaves = collectLeaves(sibling)
+          state.activePane[tabId] = siblingLeaves[0].id
+        }
+
+        // Clean up pane title and user-set flag
+        if (state.paneTitles[tabId]?.[paneId]) {
+          delete state.paneTitles[tabId][paneId]
+        }
+        if (state.paneTitleSetByUser?.[tabId]?.[paneId]) {
+          delete state.paneTitleSetByUser[tabId][paneId]
+        }
+
+        // Clear zoom if the zoomed pane was closed
+        if (state.zoomedPane?.[tabId] === paneId) {
+          delete state.zoomedPane[tabId]
+        }
+
+        // Drop the closed pane's ephemeral focus-epoch entry.
+        if (state.focusEpochByPaneId) {
+          delete state.focusEpochByPaneId[paneId]
+        }
+
+        reconcileRefreshRequestsForTab(state, tabId)
+      }
+    },
+
+    setActivePane: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string; focusNudge?: boolean }>
+    ) => {
+      const { tabId, paneId, focusNudge } = action.payload
+      state.activePane[tabId] = paneId
+      // The epoch bump is ONLY for explicit select folds (ui-commands), where
+      // "select moves DOM focus" is the contract even without an eligibility
+      // transition. Plain pointer activations (Pane mousedown bubbles from
+      // in-pane inputs like rename/search) must NOT bump — that would re-run
+      // focus effects and steal focus back from the element just clicked.
+      if (focusNudge) {
+        state.focusEpochByPaneId ??= {}
+        state.focusEpochByPaneId[paneId] = (state.focusEpochByPaneId[paneId] ?? 0) + 1
+      }
+    },
+
+    /**
+     * tab.select fold: the tab's ACTIVE pane gets the focus nudge, so an
+     * explicit tab select re-focuses content even when the tab was already
+     * Redux-active (no eligibility transition).
+     */
+    nudgePaneFocus: (
+      state,
+      action: PayloadAction<{ tabId: string }>
+    ) => {
+      const paneId = state.activePane[action.payload.tabId]
+      if (!paneId) return
+      state.focusEpochByPaneId ??= {}
+      state.focusEpochByPaneId[paneId] = (state.focusEpochByPaneId[paneId] ?? 0) + 1
+    },
+
+    resizePanes: (
+      state,
+      action: PayloadAction<{ tabId: string; splitId: string; sizes: [number, number] }>
+    ) => {
+      const { tabId, splitId, sizes } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+
+      function updateSizes(node: PaneNode): PaneNode {
+        if (node.type === 'leaf') return node
+        if (node.id === splitId) {
+          return { ...node, sizes }
+        }
+        return {
+          ...node,
+          children: [updateSizes(node.children[0]), updateSizes(node.children[1])],
+        }
+      }
+
+      state.layouts[tabId] = updateSizes(root)
+    },
+
+    resizeMultipleSplits: (
+      state,
+      action: PayloadAction<{
+        tabId: string
+        resizes: Array<{ splitId: string; sizes: [number, number] }>
+      }>
+    ) => {
+      const { tabId, resizes } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+
+      function applySizes(node: PaneNode): PaneNode {
+        if (node.type === 'leaf') return node
+        const match = resizes.find(r => r.splitId === node.id)
+        const newSizes = match ? match.sizes : node.sizes
+        return {
+          ...node,
+          sizes: newSizes,
+          children: [applySizes(node.children[0]), applySizes(node.children[1])],
+        }
+      }
+
+      state.layouts[tabId] = applySizes(root)
+    },
+
+    resetSplit: (
+      state,
+      action: PayloadAction<{ tabId: string; splitId: string }>
+    ) => {
+      const { tabId, splitId } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+
+      function update(node: PaneNode): PaneNode {
+        if (node.type === 'leaf') return node
+        if (node.id === splitId) {
+          return { ...node, sizes: [50, 50] }
+        }
+        return {
+          ...node,
+          children: [update(node.children[0]), update(node.children[1])],
+        }
+      }
+
+      state.layouts[tabId] = update(root)
+    },
+
+    swapSplit: (
+      state,
+      action: PayloadAction<{ tabId: string; splitId: string }>
+    ) => {
+      const { tabId, splitId } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+
+      function update(node: PaneNode): PaneNode {
+        if (node.type === 'leaf') return node
+        if (node.id === splitId) {
+          return {
+            ...node,
+            children: [node.children[1], node.children[0]],
+            sizes: [node.sizes[1], node.sizes[0]],
+          }
+        }
+        return {
+          ...node,
+          children: [update(node.children[0]), update(node.children[1])],
+        }
+      }
+
+      state.layouts[tabId] = update(root)
+    },
+
+    swapPanes: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string; otherId: string }>
+    ) => {
+      const { tabId, paneId, otherId } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+      // The shared pending-close guard (delta-round-8, Finding F1): the swap
+      // exchanges BOTH panes' complete contents — the createRequestId the
+      // close lanes key by INCLUDED — so it is an identity-CHANGING fold of
+      // both panes and obeys the one rule: REFUSED (logged, never deferred)
+      // while EITHER pane's close, or the whole tab's, is outstanding.
+      // Pre-fix, a mid-ack-wait swap moved the closing identity into the
+      // other pane: the ack covered the moved identity while the post-ack
+      // removal dropped the swapped-IN identity now occupying the original
+      // pane ID — the acknowledged identity stayed visibly open under
+      // standing close evidence, and the swapped-in identity's removal was
+      // journaled only by the middleware's unacknowledged belt.
+      if (isPaneClosePending(state, tabId, paneId) || isPaneClosePending(state, tabId, otherId)) {
+        log.warn('refusing an identity-changing pane fold while the close is in flight', { op: 'swapPanes', tabId, paneId, otherId })
+        return
+      }
+
+      function findLeaf(node: PaneNode, id: string): Extract<PaneNode, { type: 'leaf' }> | null {
+        if (node.type === 'leaf') return node.id === id ? node : null
+        return findLeaf(node.children[0], id) || findLeaf(node.children[1], id)
+      }
+
+      const a = findLeaf(root, paneId)
+      const b = findLeaf(root, otherId)
+      if (!a || !b) return
+      const paneContent = a.content
+      const otherContent = b.content
+
+      function update(node: PaneNode): PaneNode {
+        if (node.type === 'leaf') {
+          if (node.id === paneId) return { ...node, content: otherContent }
+          if (node.id === otherId) return { ...node, content: paneContent }
+          return node
+        }
+        return {
+          ...node,
+          children: [update(node.children[0]), update(node.children[1])],
+        }
+      }
+
+      state.layouts[tabId] = update(root)
+
+      if (state.paneTitles[tabId]) {
+        const titles = state.paneTitles[tabId]
+        const temp = titles[paneId]
+        titles[paneId] = titles[otherId]
+        titles[otherId] = temp
+      }
+
+      if (state.paneTitleSetByUser[tabId]) {
+        const titleSetByUser = state.paneTitleSetByUser[tabId]
+        const temp = titleSetByUser[paneId]
+        if (titleSetByUser[otherId] === undefined) {
+          delete titleSetByUser[paneId]
+        } else {
+          titleSetByUser[paneId] = titleSetByUser[otherId]
+        }
+        if (temp === undefined) {
+          delete titleSetByUser[otherId]
+        } else {
+          titleSetByUser[otherId] = temp
+        }
+      }
+
+      reconcileRefreshRequestsForTab(state, tabId)
+    },
+
+    replacePane: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string }>
+    ) => {
+      const { tabId, paneId } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+      if (refuseRekeyWhileClosing(state, tabId, paneId, 'replacePane')) return
+
+      const pickerContent: PaneContent = { kind: 'picker' }
+      let found = false
+
+      function updateContent(node: PaneNode): PaneNode {
+        if (node.type === 'leaf') {
+          if (node.id === paneId) {
+            found = true
+            return { ...node, content: pickerContent }
+          }
+          return node
+        }
+        return {
+          ...node,
+          children: [updateContent(node.children[0]), updateContent(node.children[1])],
+        }
+      }
+
+      state.layouts[tabId] = updateContent(root)
+
+      if (!found) return
+
+      // Reset title to picker-derived title ("New Tab")
+      if (!state.paneTitles[tabId]) {
+        state.paneTitles[tabId] = {}
+      }
+      state.paneTitles[tabId][paneId] = derivePaneTitle(pickerContent)
+
+      // Clear user-set flag so title auto-derives again
+      if (state.paneTitleSetByUser?.[tabId]?.[paneId]) {
+        delete state.paneTitleSetByUser[tabId][paneId]
+      }
+
+      reconcileRefreshRequestsForTab(state, tabId)
+    },
+
+    updatePaneContent: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string; content: PaneContentInput | PaneContent }>
+    ) => {
+      const { tabId, paneId, content } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+      if (isPaneClosePending(state, tabId, paneId)) {
+        // The pending-close freeze (round-4 F3, pane-scoped round-5 F2): only
+        // IDENTITY-CHANGING folds refuse (the picker-select path mints a fresh
+        // createRequestId; a wholesale content swap re-keys).
+        // Identity-preserving folds — the terminal.created terminalId fold,
+        // status/metadata writes — still land.
+        const target = findLeaf(root, paneId)
+        const next = target ? normalizePaneContent(content, target.content) : undefined
+        if (contentPaneIdentityKey(next) !== contentPaneIdentityKey(target?.content)) {
+          log.warn('refusing an identity-changing pane content fold while the close is in flight', { tabId, paneId })
+          return
+        }
+      }
+      let normalizedContentForTitle: PaneContent | null = null
+      let previousContentForTitle: PaneContent | null = null
+
+      function updateContent(node: PaneNode): PaneNode {
+        if (node.type === 'leaf') {
+          if (node.id === paneId) {
+            previousContentForTitle = node.content
+            const nextContent = normalizePaneContent(content, node.content)
+            // A19: when terminal.created folds a terminalId into this pane,
+            // the reconcile intent is consumed — stale respawn/fresh intent
+            // must never survive past a completed create.
+            if (
+              nextContent.kind === 'terminal'
+              && nextContent.pendingReconcile
+              && nextContent.terminalId
+              && (node.content.kind !== 'terminal' || node.content.terminalId !== nextContent.terminalId)
+            ) {
+              nextContent.pendingReconcile = undefined
+            }
+            normalizedContentForTitle = nextContent
+            return { ...node, content: nextContent }
+          }
+          return node
+        }
+        return {
+          ...node,
+          children: [updateContent(node.children[0]), updateContent(node.children[1])],
+        }
+      }
+
+      state.layouts[tabId] = updateContent(root)
+
+      // Update pane title when content changes, unless user explicitly set it
+      if (normalizedContentForTitle && !state.paneTitleSetByUser?.[tabId]?.[paneId]) {
+        if (!state.paneTitles[tabId]) {
+          state.paneTitles[tabId] = {}
+        }
+        const existingTitle = state.paneTitles[tabId][paneId]
+        // Pane titles are stored extension-unaware in this slice; canonical labels
+        // such as "OpenCode" are normalized later in the display layer.
+        if (!existingTitle || (previousContentForTitle && matchesDerivedPaneTitle(existingTitle, previousContentForTitle))) {
+          state.paneTitles[tabId][paneId] = derivePaneTitle(normalizedContentForTitle)
+        }
+      }
+
+      reconcileRefreshRequestsForTab(state, tabId)
+    },
+
+    materializeFreshAgentSession: (
+      state,
+      action: PayloadAction<FreshAgentSessionMaterializedPayload>
+    ) => {
+      for (const [tabId, root] of Object.entries(state.layouts)) {
+        let changed = false
+
+        function updateContent(node: PaneNode): PaneNode {
+          if (node.type === 'leaf') {
+            if (node.content.kind !== 'fresh-agent') return node
+            if (!freshAgentPaneMatchesMaterializedSession(node.content, action.payload)) return node
+            changed = true
+            return {
+              ...node,
+              content: buildMaterializedFreshAgentContent(node.content, action.payload),
+            }
+          }
+          return {
+            ...node,
+            children: [updateContent(node.children[0]), updateContent(node.children[1])],
+          }
+        }
+
+        state.layouts[tabId] = updateContent(root)
+        if (changed) {
+          reconcileRefreshRequestsForTab(state, tabId)
+        }
+      }
+    },
+
+    /** Partially merge fields into existing pane content (avoids stale-ref overwrites
+     *  when multiple effects dispatch in the same render batch). */
+    mergePaneContent: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string; updates: Partial<PaneContent> | Record<string, unknown> }>
+    ) => {
+      const { tabId, paneId, updates } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+      if (isPaneClosePending(state, tabId, paneId)) {
+        // The shared pending-close guard (round-5 F2): the same rule as
+        // updatePaneContent — a merge that would CHANGE the pane's identity
+        // key refuses; identity-preserving merges land.
+        const target = findLeaf(root, paneId)
+        const next = target
+          ? normalizePaneContent({ ...target.content, ...updates } as Record<string, unknown>, target.content)
+          : undefined
+        if (contentPaneIdentityKey(next) !== contentPaneIdentityKey(target?.content)) {
+          log.warn('refusing an identity-changing pane content merge while the close is in flight', { tabId, paneId })
+          return
+        }
+      }
+      let previousContentForTitle: PaneContent | null = null
+
+      function mergeContent(node: PaneNode): PaneNode {
+        if (node.type === 'leaf') {
+          if (node.id === paneId) {
+            previousContentForTitle = node.content
+            return {
+              ...node,
+              content: normalizePaneContent({ ...node.content, ...updates } as Record<string, unknown>, node.content),
+            }
+          }
+          return node
+        }
+        return {
+          ...node,
+          children: [mergeContent(node.children[0]), mergeContent(node.children[1])],
+        }
+      }
+
+      state.layouts[tabId] = mergeContent(root)
+
+      // Update pane title if content changed in a way that affects it
+      const leaf = findLeaf(state.layouts[tabId]!, paneId)
+      if (leaf && !state.paneTitleSetByUser?.[tabId]?.[paneId]) {
+        if (!state.paneTitles[tabId]) {
+          state.paneTitles[tabId] = {}
+        }
+        const existingTitle = state.paneTitles[tabId][paneId]
+        // Pane titles are stored extension-unaware in this slice; canonical labels
+        // such as "OpenCode" are normalized later in the display layer.
+        if (!existingTitle || (previousContentForTitle && matchesDerivedPaneTitle(existingTitle, previousContentForTitle))) {
+          state.paneTitles[tabId][paneId] = derivePaneTitle(leaf.content)
+        }
+      }
+
+      reconcileRefreshRequestsForTab(state, tabId)
+    },
+
+    restartFreshAgentCreate: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string }>
+    ) => {
+      const { tabId, paneId } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+      // The retry mints a fresh createRequestId — a re-key the pending-close
+      // freeze outlaws while ANY close covering this pane is in flight
+      // (round-5 F2: pane-scoped too, not just the whole-tab mark).
+      if (refuseRekeyWhileClosing(state, tabId, paneId, 'restartFreshAgentCreate')) return
+
+      function restartContent(node: PaneNode): PaneNode {
+        if (node.type === 'leaf') {
+          if (node.id !== paneId || node.content.kind !== 'fresh-agent') {
+            return node
+          }
+          return {
+            ...node,
+            content: normalizePaneContent({
+              ...node.content,
+              sessionId: undefined,
+              createRequestId: nanoid(),
+              status: 'creating',
+              createError: undefined,
+            }, node.content),
+          }
+        }
+        return {
+          ...node,
+          children: [restartContent(node.children[0]), restartContent(node.children[1])],
+        }
+      }
+
+      state.layouts[tabId] = restartContent(root)
+      reconcileRefreshRequestsForTab(state, tabId)
+    },
+
+    requestPaneRefresh: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string }>
+    ) => {
+      const { tabId, paneId } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+
+      const leaf = findLeaf(root, paneId)
+      if (!leaf) return
+
+      const target = buildPaneRefreshTarget(leaf.content)
+      if (!target) {
+        clearPaneRefreshRequest(state, tabId, paneId)
+        return
+      }
+
+      if (!state.refreshRequestsByPane) {
+        state.refreshRequestsByPane = {}
+      }
+      if (!state.refreshRequestsByPane[tabId]) {
+        state.refreshRequestsByPane[tabId] = {}
+      }
+      state.refreshRequestsByPane[tabId][paneId] = {
+        requestId: nanoid(),
+        target,
+      }
+    },
+
+    requestTabRefresh: (
+      state,
+      action: PayloadAction<{ tabId: string }>
+    ) => {
+      const { tabId } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+
+      // This intentional unzoom-first behavior is the user-requested and desired behavior so Refresh Tab refreshes the full tab immediately.
+      if (state.zoomedPane[tabId]) {
+        delete state.zoomedPane[tabId]
+      }
+
+      const nextRequests: Record<string, PaneRefreshRequest> = {}
+      for (const leaf of collectLeaves(root)) {
+        const target = buildPaneRefreshTarget(leaf.content)
+        if (!target) continue
+        nextRequests[leaf.id] = {
+          requestId: nanoid(),
+          target,
+        }
+      }
+
+      if (Object.keys(nextRequests).length === 0) {
+        delete state.refreshRequestsByPane?.[tabId]
+        return
+      }
+
+      if (!state.refreshRequestsByPane) {
+        state.refreshRequestsByPane = {}
+      }
+      state.refreshRequestsByPane[tabId] = nextRequests
+    },
+
+    consumePaneRefreshRequest: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string; requestId: string }>
+    ) => {
+      const { tabId, paneId, requestId } = action.payload
+      const request = state.refreshRequestsByPane?.[tabId]?.[paneId]
+      if (!request || request.requestId !== requestId) return
+      clearPaneRefreshRequest(state, tabId, paneId)
+    },
+
+    /**
+     * Focused-episode-7 round 4 (Finding F3) — mark/un-mark a tab's close as
+     * IN FLIGHT. The `closeTab` thunk marks before it awaits the batch
+     * acknowledgement and clears on either resolution; while marked, the
+     * gaining/re-keying reducers above refuse (`refuseMutationWhileClosing`)
+     * so the post-ack removal applies exactly the pane set the acknowledged
+     * batch covered.
+     */
+    markTabClosing: (state, action: PayloadAction<{ tabId: string }>) => {
+      if (!state.closingTabs) state.closingTabs = {}
+      state.closingTabs[action.payload.tabId] = true
+    },
+    clearTabClosing: (state, action: PayloadAction<{ tabId: string }>) => {
+      if (state.closingTabs) delete state.closingTabs[action.payload.tabId]
+    },
+
+    /**
+     * Focused-episode-7 round 5 (Finding F2) — mark/un-mark ONE pane's close
+     * as IN FLIGHT (the single-pane and replace gates). The
+     * `${tabId}:${paneId}` key is per pane; the delta-round-9 close-op
+     * serialization (one close per TAB at a time — `hasAnyClosePending` in
+     * the thunks) means two panes' marks never stand in one tab at once, but
+     * the keying keeps the reducer-side guard pane-scoped exactly as the
+     * round-5 freeze needs.
+     */
+    markPaneClosing: (state, action: PayloadAction<{ tabId: string; paneId: string }>) => {
+      if (!state.closingPanes) state.closingPanes = {}
+      state.closingPanes[`${action.payload.tabId}:${action.payload.paneId}`] = true
+    },
+    clearPaneClosing: (state, action: PayloadAction<{ tabId: string; paneId: string }>) => {
+      if (state.closingPanes) delete state.closingPanes[`${action.payload.tabId}:${action.payload.paneId}`]
+    },
+
+    removeLayout: (
+      state,
+      action: PayloadAction<{ tabId: string }>
+    ) => {
+      const { tabId } = action.payload
+      const removedRoot = state.layouts[tabId]
+      delete state.layouts[tabId]
+      // Any restored tab gets fresh selection bookkeeping for its panes.
+      if (removedRoot && state.focusEpochByPaneId) {
+        for (const leaf of collectLeaves(removedRoot)) {
+          delete state.focusEpochByPaneId[leaf.id]
+        }
+      }
+      delete state.activePane[tabId]
+      delete state.paneTitles[tabId]
+      // The tab is gone — any in-flight close guard for it is spent.
+      if (state.closingTabs) {
+        delete state.closingTabs[tabId]
+      }
+      if (state.closingPanes) {
+        const prefix = `${tabId}:`
+        for (const key of Object.keys(state.closingPanes)) {
+          if (key.startsWith(prefix)) delete state.closingPanes[key]
+        }
+      }
+      if (state.zoomedPane) {
+        delete state.zoomedPane[tabId]
+      }
+      if (state.paneTitleSetByUser) {
+        delete state.paneTitleSetByUser[tabId]
+      }
+      if (state.refreshRequestsByPane) {
+        delete state.refreshRequestsByPane[tabId]
+      }
+      if (state.restoreFallbackAttemptsByPane) {
+        delete state.restoreFallbackAttemptsByPane[tabId]
+      }
+    },
+
+    hydratePanes: (state, action: PayloadAction<PanesState>) => {
+      const meta = (action as PayloadAction<PanesState, string, HydratePanesMeta | undefined>).meta
+      const incoming = action.payload
+
+      // Merge layouts: preserve local terminal assignments that are more
+      // advanced than the incoming (remote) state. This prevents cross-tab
+      // sync from clobbering in-progress terminal creation/attachment.
+      const mergedLayouts: Record<string, PaneNode> = {}
+      const incomingLayoutTabIds = new Set<string>()
+      for (const [tabId, incomingNode] of Object.entries(incoming.layouts || {})) {
+        const localNode = state.layouts[tabId]
+        if (localNode && hasAnyClosePending(state, tabId)) {
+          // The pending-close freeze (round-4 F3, pane-scoped round-5 F2): a
+          // tab with ANY outstanding close keeps its FROZEN local layout —
+          // the acknowledged close covered exactly the pane identity set the
+          // post-ack removal applies; a remote fold must never re-seed or
+          // re-key panes the close did not cover.
+          mergedLayouts[tabId] = localNode
+          continue
+        }
+        const incomingHasShape = hasPaneTreeShape(incomingNode)
+        const mergedNode = localNode
+          ? mergeTerminalState(incomingNode as PaneNode, localNode, meta)
+          : (incomingHasShape ? incomingNode as PaneNode : null)
+        const mergeUsedIncoming = mergedNode !== localNode
+        const normalizedNode = mergedNode ? normalizePaneTree(mergedNode, localNode) : null
+        if (normalizedNode) {
+          mergedLayouts[tabId] = normalizedNode
+          if (incomingHasShape && mergeUsedIncoming) {
+            incomingLayoutTabIds.add(tabId)
+          }
+        }
+      }
+      // Include any local-only tabs not in incoming (shouldn't normally happen,
+      // but defensive)
+      for (const tabId of Object.keys(state.layouts)) {
+        if (!(tabId in mergedLayouts)) {
+          const normalizedLocalNode = normalizePaneTree(state.layouts[tabId])
+          if (normalizedLocalNode) {
+            mergedLayouts[tabId] = normalizedLocalNode
+          }
+        }
+      }
+
+      state.layouts = mergedLayouts
+      const nextMetadata = mergeHydratedPaneMetadata(state, incoming, mergedLayouts, incomingLayoutTabIds)
+      state.activePane = nextMetadata.activePane
+      state.paneTitles = nextMetadata.paneTitles
+      state.paneTitleSetByUser = nextMetadata.paneTitleSetByUser
+      // Ephemeral signals must never be hydrated from remote
+      state.renameRequestTabId = null
+      state.renameRequestPaneId = null
+      state.zoomedPane = {}
+      state.refreshRequestsByPane = {}
+      state.restoreFallbackAttemptsByPane = {}
+      // Focus epochs are ephemeral select bookkeeping: prune entries of panes
+      // no longer present after the merge — unlike closePane/removeLayout,
+      // hydration can drop leaves wholesale (cross-device removals), otherwise
+      // one stale entry per remotely-removed explicitly-selected pane persists
+      // for the page lifetime and inflates every epoch-map update.
+      if (state.focusEpochByPaneId) {
+        const live = new Set<string>()
+        for (const root of Object.values(mergedLayouts)) {
+          for (const leaf of collectLeaves(root)) live.add(leaf.id)
+        }
+        for (const id of Object.keys(state.focusEpochByPaneId)) {
+          if (!live.has(id)) delete state.focusEpochByPaneId[id]
+        }
+      }
+      state.deadSessionAdjudication = []
+      state.reconcileWarming = null
+      state.reconcilePendingPanes = {}
+    },
+
+    updatePaneTitle: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string; title: string; setByUser?: boolean }>
+    ) => {
+      const { tabId, paneId, title, setByUser } = action.payload
+      // Skip programmatic updates when user has explicitly set the title
+      if (setByUser === false && state.paneTitleSetByUser?.[tabId]?.[paneId]) {
+        return
+      }
+      if (!state.paneTitles[tabId]) {
+        state.paneTitles[tabId] = {}
+      }
+      state.paneTitles[tabId][paneId] = title
+      if (setByUser !== false) {
+        if (!state.paneTitleSetByUser) {
+          state.paneTitleSetByUser = {}
+        }
+        if (!state.paneTitleSetByUser[tabId]) {
+          state.paneTitleSetByUser[tabId] = {}
+        }
+        state.paneTitleSetByUser[tabId][paneId] = true
+      }
+    },
+
+    requestPaneRename: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string }>
+    ) => {
+      state.renameRequestTabId = action.payload.tabId
+      state.renameRequestPaneId = action.payload.paneId
+    },
+
+    clearPaneRenameRequest: (state) => {
+      state.renameRequestTabId = null
+      state.renameRequestPaneId = null
+    },
+
+    toggleZoom: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string }>
+    ) => {
+      const { tabId, paneId } = action.payload
+      if (state.zoomedPane[tabId] === paneId) {
+        // Same pane already zoomed -> unzoom
+        delete state.zoomedPane[tabId]
+      } else {
+        // Different pane or not zoomed -> zoom it
+        state.zoomedPane[tabId] = paneId
+      }
+    },
+
+    /**
+     * Walk all tabs' pane trees and update the title for any pane whose
+     * terminal content has the given terminalId. Used when a session rename
+     * from the history view should cascade to the pane title bar.
+     */
+    updatePaneTitleByTerminalId: (
+      state,
+      action: PayloadAction<{ terminalId: string; title: string; setByUser?: boolean }>
+    ) => {
+      const { terminalId, title, setByUser } = action.payload
+      for (const tabId of Object.keys(state.layouts)) {
+        const paneId = findPaneIdByTerminalId(state.layouts[tabId], terminalId)
+        if (paneId) {
+          if (setByUser === false && state.paneTitleSetByUser?.[tabId]?.[paneId]) {
+            continue
+          }
+          if (!state.paneTitles[tabId]) state.paneTitles[tabId] = {}
+          state.paneTitles[tabId][paneId] = title
+          if (setByUser !== false) {
+            // Mark as user-set so programmatic updates don't overwrite it
+            if (!state.paneTitleSetByUser) state.paneTitleSetByUser = {}
+            if (!state.paneTitleSetByUser[tabId]) state.paneTitleSetByUser[tabId] = {}
+            state.paneTitleSetByUser[tabId][paneId] = true
+          }
+        }
+      }
+    },
+
+    /**
+     * Walk all tabs' pane trees and update the title for any pane bound to
+     * the given provider:sessionId — fresh-agent panes by provider/sessionId,
+     * terminal panes by sessionRef. Used when a session rename must mirror
+     * into pane titles even when no terminal cascade exists (SDK panes,
+     * exited coding-CLI terminals).
+     */
+    updatePaneTitleBySessionRef: (
+      state,
+      action: PayloadAction<{ provider: string; sessionId: string; title: string; setByUser?: boolean }>
+    ) => {
+      const { provider, sessionId, title, setByUser } = action.payload
+      for (const tabId of Object.keys(state.layouts)) {
+        const paneId = findPaneIdBySessionRef(state.layouts[tabId], provider, sessionId)
+        if (paneId) {
+          if (setByUser === false && state.paneTitleSetByUser?.[tabId]?.[paneId]) {
+            continue
+          }
+          if (!state.paneTitles[tabId]) state.paneTitles[tabId] = {}
+          state.paneTitles[tabId][paneId] = title
+          if (setByUser !== false) {
+            // Mark as user-set so programmatic updates don't overwrite it
+            if (!state.paneTitleSetByUser) state.paneTitleSetByUser = {}
+            if (!state.paneTitleSetByUser[tabId]) state.paneTitleSetByUser[tabId] = {}
+            state.paneTitleSetByUser[tabId][paneId] = true
+          }
+        }
+      }
+    },
+
+    reconcileTerminalSessionRefByTerminalId: (
+      state,
+      action: PayloadAction<{ terminalId: string; sessionRef: unknown }>
+    ) => {
+      const terminalId = action.payload.terminalId
+      const sessionRef = sanitizeSessionRef(action.payload.sessionRef)
+      if (!terminalId || !sessionRef) return
+      const canonicalSessionRef = sessionRef
+
+      function reconcileNode(node: PaneNode, tabId: string): void {
+        if (node.type === 'leaf') {
+          const content = node.content
+          if (
+            content.kind !== 'terminal'
+            || content.terminalId !== terminalId
+          ) {
+            return
+          }
+
+          if (!sessionRefsEqual(content.sessionRef, canonicalSessionRef)) {
+            content.sessionRef = canonicalSessionRef
+          }
+          content.resumeSessionId = undefined
+          if (!codexDurabilityMatchesCanonicalSession(content.codexDurability, canonicalSessionRef)) {
+            content.codexDurability = undefined
+          }
+          clearRestoreFallbackAttemptForPane(state, tabId, node.id)
+          return
+        }
+        reconcileNode(node.children[0], tabId)
+        reconcileNode(node.children[1], tabId)
+      }
+
+      for (const [tabId, layout] of Object.entries(state.layouts)) {
+        reconcileNode(layout, tabId)
+      }
+    },
+
+    clearDeadTerminals: (state, action: PayloadAction<{ liveTerminalIds: string[] }>) => {
+      const liveSet = new Set(action.payload.liveTerminalIds)
+
+      function clearDeadInNode(node: PaneNode, tabId: string): boolean {
+        if (node.type === 'leaf') {
+          if (
+            node.content?.kind === 'terminal' &&
+            node.content.terminalId &&
+            !liveSet.has(node.content.terminalId)
+          ) {
+            // The shared pending-close guard (round-5 F2): never re-mint the
+            // identity of a pane whose close is awaiting acknowledgement —
+            // the ack covers the CURRENT identity and the post-ack removal
+            // must drop exactly it. Skipped PER LEAF: an un-pending sibling's
+            // dead-handle rekey still lands. Not lost forever: the pane's
+            // close either succeeds (the pane is removed) or fails (the next
+            // dead-handle pass rekeys it then).
+            if (isPaneClosePending(state, tabId, node.id)) {
+              log.warn('skipping a dead-handle rekey while the pane close is in flight', {
+                op: 'clearDeadTerminals',
+                tabId,
+                paneId: node.id,
+              })
+              return false
+            }
+            clearTerminalContentForRecreate(state, node, tabId)
+            return true
+          }
+          return false
+        }
+        if (node.type === 'split' && Array.isArray(node.children)) {
+          let changed = false
+          for (const child of node.children) {
+            if (clearDeadInNode(child, tabId)) changed = true
+          }
+          return changed
+        }
+        return false
+      }
+
+      for (const [tabId, layout] of Object.entries(state.layouts)) {
+        clearDeadInNode(layout, tabId)
+      }
+    },
+
+    clearTerminalLiveHandles: (state, action: PayloadAction<{ terminalIds: string[] }>) => {
+      const removedSet = new Set(action.payload.terminalIds.filter(Boolean))
+
+      function clearInNode(node: PaneNode, tabId: string): void {
+        if (node.type === 'leaf') {
+          if (
+            node.content?.kind === 'terminal' &&
+            node.content.terminalId &&
+            removedSet.has(node.content.terminalId)
+          ) {
+            // The shared pending-close guard (round-5 F2; same per-leaf rule
+            // as clearDeadTerminals): a re-mint during the ack wait would make
+            // the post-ack removal drop an evidenceless replacement identity.
+            if (isPaneClosePending(state, tabId, node.id)) {
+              log.warn('skipping a live-handle rekey while the pane close is in flight', {
+                op: 'clearTerminalLiveHandles',
+                tabId,
+                paneId: node.id,
+              })
+              return
+            }
+            clearTerminalContentForRecreate(state, node, tabId)
+          }
+          return
+        }
+        if (node.type === 'split' && Array.isArray(node.children)) {
+          for (const child of node.children) clearInNode(child, tabId)
+        }
+      }
+
+      for (const [tabId, layout] of Object.entries(state.layouts)) {
+        clearInNode(layout, tabId)
+      }
+    },
+
+    /**
+     * Fold a pane.reconcile attach/duplicate verdict into pane content.
+     * Council rule 2: never mints a createRequestId — the existing one is preserved.
+     */
+    applyReconcileAttach: (
+      state,
+      action: PayloadAction<{
+        tabId: string
+        paneId: string
+        terminalId: string
+        serverInstanceId?: string
+        sessionRef?: SessionLocator
+        corrected?: boolean
+        duplicate?: boolean
+      }>
+    ) => {
+      const { tabId, paneId, terminalId, serverInstanceId, corrected, duplicate } = action.payload
+      if (!terminalId) return
+      const content = findReconcileTerminalContent(state, tabId, paneId)
+      if (!content) return
+
+      foldLiveTerminalAttach(content, terminalId)
+      content.serverInstanceId = serverInstanceId
+      const sessionRef = sanitizeSessionRef(action.payload.sessionRef)
+      if (sessionRef) {
+        content.sessionRef = sessionRef
+        content.resumeSessionId = undefined
+      }
+      content.pendingReconcile = undefined
+      if (corrected) {
+        content.reconcileNotice = RECONCILE_NOTICE_CORRECTED
+      } else if (duplicate) {
+        content.reconcileNotice = RECONCILE_NOTICE_DUPLICATE
+      }
+      clearRestoreFallbackAttemptForPane(state, tabId, paneId)
+      clearReconcilePendingForPane(state, tabId, paneId)
+    },
+
+    /** Close→reopen revival: a D7 refusal named the live owner terminal — reattach
+     * the pane to it. The reconcileEpoch bump is the lifecycle effect's ONLY
+     * re-fire signal (createRequestId is preserved), mirroring applyReconcileAttach. */
+    applyReattachToLiveTerminal: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string; terminalId: string }>
+    ) => {
+      const { tabId, paneId, terminalId } = action.payload
+      if (!terminalId) return
+      const content = findReconcileTerminalContent(state, tabId, paneId)
+      if (!content) return
+      foldLiveTerminalAttach(content, terminalId)
+    },
+
+    /**
+     * Fold a pane.reconcile respawn/fresh verdict: clear live handles so
+     * TerminalView re-creates, PRESERVING createRequestId (D4 — the
+     * load-bearing difference from clearTerminalContentForRecreate).
+     */
+    resetPaneForReconcileCreate: (
+      state,
+      action: PayloadAction<{
+        tabId: string
+        paneId: string
+        intent: 'respawn' | 'fresh'
+        sessionRef?: SessionLocator
+        reason?: string
+        corrected?: boolean
+      }>
+    ) => {
+      const { tabId, paneId, corrected } = action.payload
+      const content = findReconcileTerminalContent(state, tabId, paneId)
+      if (!content) return
+      let intent = action.payload.intent
+      let reason = action.payload.reason
+      const sessionRef = sanitizeSessionRef(action.payload.sessionRef)
+
+      content.terminalId = undefined
+      content.serverInstanceId = undefined
+      content.streamId = undefined
+      content.status = 'creating'
+      content.restoreError = undefined
+
+      if (intent === 'respawn') {
+        if (sessionRef && sessionRef.provider === content.mode) {
+          content.sessionRef = sessionRef
+          content.resumeSessionId = undefined
+        } else {
+          // Invariant: respawn requires sessionRef.provider === pane mode.
+          // The server create path filters on it; a mismatch spawns
+          // identity-less. Degrade loudly to fresh-with-notice.
+          log.error('resetPaneForReconcileCreate: respawn sessionRef/provider mismatch — degrading to fresh', {
+            tabId,
+            paneId,
+            paneMode: content.mode,
+            sessionRefProvider: sessionRef?.provider,
+          })
+          intent = 'fresh'
+          reason = reason ?? (sessionRef ? 'respawn_provider_mismatch' : 'respawn_session_ref_missing')
+        }
+      }
+      if (intent === 'fresh') {
+        content.sessionRef = undefined
+        content.resumeSessionId = undefined
+        content.codexDurability = undefined
+        // znhn item 1 (fresh-eyes fix): a fresh create is a genuinely NEW
+        // identity-less conversation — the persisted "crashed & auto-resumed"
+        // trace belongs to the retired session and must not leak onto it.
+        // The 'respawn' branch deliberately KEEPS it (same conversation).
+        content.crashTrace = undefined
+      }
+      content.pendingReconcile = intent
+      // A1 fix: same-createRequestId folds are only observable via the epoch bump.
+      content.reconcileEpoch = (content.reconcileEpoch ?? 0) + 1
+      if (corrected) {
+        content.reconcileNotice = RECONCILE_NOTICE_CORRECTED
+      } else if (intent === 'fresh' && reason) {
+        content.reconcileNotice = reconcileFreshNotice(reason)
+      }
+      clearRestoreFallbackAttemptForPane(state, tabId, paneId)
+      clearReconcilePendingForPane(state, tabId, paneId)
+    },
+
+    /**
+     * Fold a pane.reconcile attach/duplicate verdict into a FRESH-AGENT pane.
+     * The verdict carries the durable sessionRef (terminalId is None for
+     * fresh-agent panes); writing it as the live handle is valid for all three
+     * providers (codex/opencode key live sessions by durable id; claude gains
+     * server-side durable→live resolution in Task 10b).
+     * Council rule 2: never mints a createRequestId.
+     */
+    applyFreshAgentReconcileAttach: (
+      state,
+      action: PayloadAction<{
+        tabId: string
+        paneId: string
+        sessionRef?: SessionLocator
+        serverInstanceId?: string
+        corrected?: boolean
+        duplicate?: boolean
+      }>
+    ) => {
+      const { tabId, paneId, sessionRef, serverInstanceId, corrected, duplicate } = action.payload
+      const content = findReconcilePaneContent(state, tabId, paneId)
+      if (!content || content.kind !== 'fresh-agent') return
+      if (!sessionRef?.sessionId || sessionRef.provider !== content.provider) return // malformed verdict — no-op
+      content.sessionId = sessionRef.sessionId
+      content.sessionRef = { provider: sessionRef.provider, sessionId: sessionRef.sessionId }
+      content.resumeSessionId = sessionRef.sessionId
+      content.status = 'connected'
+      content.serverInstanceId = serverInstanceId
+      content.restoreError = undefined
+      content.createError = undefined
+      content.pendingReconcile = undefined
+      content.reconcileEpoch = (content.reconcileEpoch ?? 0) + 1
+      if (corrected) content.reconcileNotice = RECONCILE_NOTICE_CORRECTED
+      else if (duplicate) content.reconcileNotice = RECONCILE_NOTICE_DUPLICATE
+      clearReconcilePendingForPane(state, tabId, paneId)
+    },
+
+    /**
+     * Fold a pane.reconcile respawn/fresh verdict into a FRESH-AGENT pane:
+     * clear live handles so FreshAgentView re-creates, PRESERVING
+     * createRequestId (council rule 2 — folds re-fire via reconcileEpoch).
+     * Respawn provider mismatch degrades loudly to fresh.
+     */
+    resetFreshAgentPaneForReconcileCreate: (
+      state,
+      action: PayloadAction<{
+        tabId: string
+        paneId: string
+        intent: 'respawn' | 'fresh'
+        sessionRef?: SessionLocator
+        reason?: string
+        corrected?: boolean
+      }>
+    ) => {
+      const { tabId, paneId, sessionRef, reason, corrected } = action.payload
+      let { intent } = action.payload
+      const content = findReconcilePaneContent(state, tabId, paneId)
+      if (!content || content.kind !== 'fresh-agent') return
+      if (intent === 'respawn' && (!sessionRef?.sessionId || sessionRef.provider !== content.provider)) {
+        log.error('fresh-agent respawn verdict without a usable sessionRef — degrading to fresh', {
+          tabId,
+          paneId,
+          reason: sessionRef ? 'respawn_provider_mismatch' : 'respawn_session_ref_missing',
+        })
+        intent = 'fresh'
+      }
+      content.sessionId = undefined
+      content.serverInstanceId = undefined
+      content.status = 'creating'
+      content.restoreError = undefined
+      content.createError = undefined
+      if (intent === 'respawn' && sessionRef) {
+        content.sessionRef = { provider: sessionRef.provider, sessionId: sessionRef.sessionId }
+        content.resumeSessionId = sessionRef.sessionId
+      } else {
+        content.sessionRef = undefined
+        content.resumeSessionId = undefined
+      }
+      content.pendingReconcile = intent
+      content.reconcileEpoch = (content.reconcileEpoch ?? 0) + 1
+      if (corrected) content.reconcileNotice = RECONCILE_NOTICE_CORRECTED
+      else if (intent === 'fresh' && reason) content.reconcileNotice = reconcileFreshNotice(reason)
+      clearReconcilePendingForPane(state, tabId, paneId)
+    },
+
+    setPaneReconcileNotice: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string; notice: string }>
+    ) => {
+      const content = findReconcilePaneContent(state, action.payload.tabId, action.payload.paneId)
+      if (!content) return
+      content.reconcileNotice = action.payload.notice
+    },
+
+    // Delta-r7-r3 (focused-episode-7 round 2 Finding F2): the close gate's
+    // failure surface — the unconfirmed-close reason carried on the pane
+    // itself (TerminalView renders it as the xterm "[Close failed]" notice
+    // and clears it). Terminal panes only: the fresh-agent lane has its own
+    // session-error banner.
+    setPaneCloseError: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string; error: string }>
+    ) => {
+      const content = findReconcileTerminalContent(state, action.payload.tabId, action.payload.paneId)
+      if (!content) return
+      content.closeError = action.payload.error
+    },
+
+    clearPaneCloseError: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string }>
+    ) => {
+      const content = findReconcileTerminalContent(state, action.payload.tabId, action.payload.paneId)
+      if (!content) return
+      content.closeError = undefined
+    },
+
+    clearPaneReconcileNotice: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string }>
+    ) => {
+      const content = findReconcilePaneContent(state, action.payload.tabId, action.payload.paneId)
+      if (!content) return
+      content.reconcileNotice = undefined
+    },
+
+    // znhn item 1: persistent crash trace — written on terminal.replaced,
+    // cleared only by user dismissal (pane close deletes the pane node).
+    setPaneCrashTrace: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string; crashTrace: CrashTrace }>
+    ) => {
+      const content = findReconcileTerminalContent(state, action.payload.tabId, action.payload.paneId)
+      if (content) content.crashTrace = action.payload.crashTrace
+    },
+    clearPaneCrashTrace: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string }>
+    ) => {
+      const content = findReconcileTerminalContent(state, action.payload.tabId, action.payload.paneId)
+      if (content && content.crashTrace) delete content.crashTrace
+    },
+
+    /** Council rule 12: dead_session is a UI state, not a deletion — panes wait for the user. */
+    setDeadSessionAdjudication: (state, action: PayloadAction<DeadSessionEntry[]>) => {
+      state.deadSessionAdjudication = action.payload
+    },
+
+    resolveDeadSessionEntry: (state, action: PayloadAction<{ tabId: string; paneId: string }>) => {
+      const { tabId, paneId } = action.payload
+      state.deadSessionAdjudication = (state.deadSessionAdjudication ?? []).filter(
+        (entry) => !(entry.tabId === tabId && entry.paneId === paneId),
+      )
+    },
+
+    clearDeadSessionAdjudication: (state) => {
+      state.deadSessionAdjudication = []
+    },
+
+    setReconcileWarming: (state, action: PayloadAction<ReconcileWarmingState>) => {
+      state.reconcileWarming = action.payload
+    },
+
+    clearReconcileWarming: (state) => {
+      state.reconcileWarming = null
+    },
+
+    /** Replaces the map: paneKey -> startedAt for every pane named in an
+     *  outgoing pane.reconcile request (view-level pre-verdict wait state). */
+    setReconcilePendingPanes: (
+      state,
+      action: PayloadAction<{ paneKeys: string[]; startedAt: number }>
+    ) => {
+      const map: Record<string, number> = {}
+      for (const key of action.payload.paneKeys) map[key] = action.payload.startedAt
+      state.reconcilePendingPanes = map
+    },
+
+    clearReconcilePendingPane: (state, action: PayloadAction<{ paneKey: string }>) => {
+      if (state.reconcilePendingPanes) delete state.reconcilePendingPanes[action.payload.paneKey]
+    },
+
+    clearAllReconcilePendingPanes: (state) => {
+      state.reconcilePendingPanes = {}
+    },
+
+    /**
+     * Loud, non-destructive per-pane breadcrumb for reconcile
+     * dead_session/invalid/error verdicts. Sets only restoreError —
+     * never touches identity, handles, or createRequestId.
+     */
+    setPaneRestoreError: (
+      state,
+      action: PayloadAction<{ tabId: string; paneId: string; restoreError: RestoreError }>
+    ) => {
+      const content = findReconcilePaneContent(state, action.payload.tabId, action.payload.paneId)
+      if (!content) return
+      content.restoreError = action.payload.restoreError
+      // dead/invalid/error verdicts resolve the pre-verdict wait too
+      clearReconcilePendingForPane(state, action.payload.tabId, action.payload.paneId)
+    },
+
+    repairCodexIdentityMismatch: (
+      state,
+      action: PayloadAction<{
+        tabId: string
+        paneId: string
+        staleTerminalId: string
+        expectedSessionRef: { provider: string; sessionId: string }
+        createRequestId: string
+      }>
+    ) => {
+      const { tabId, paneId, staleTerminalId, expectedSessionRef, createRequestId } = action.payload
+      const root = state.layouts[tabId]
+      if (!root) return
+      // The shared pending-close guard (round-5 F2): the repair re-keys the
+      // pane wholesale (a fresh createRequestId) — refused while the pane's
+      // close is outstanding (the ack covers the snapshot identity).
+      if (refuseRekeyWhileClosing(state, tabId, paneId, 'repairCodexIdentityMismatch')) return
+
+      function repairNode(node: PaneNode): void {
+        if (node.type === 'leaf') {
+          if (node.id !== paneId || node.content.kind !== 'terminal') return
+          if (node.content.terminalId !== staleTerminalId) return
+          if (!sessionRefsEqual(node.content.sessionRef, expectedSessionRef)) return
+
+          node.content.terminalId = undefined
+          node.content.serverInstanceId = undefined
+          node.content.streamId = undefined
+          node.content.status = 'creating'
+          node.content.createRequestId = createRequestId
+          node.content.sessionRef = expectedSessionRef
+          node.content.codexDurability = codexDurabilityMatchesCanonicalSession(
+            node.content.codexDurability,
+            expectedSessionRef,
+          )
+            ? node.content.codexDurability
+            : undefined
+          clearRestoreFallbackAttemptForPane(state, tabId, paneId)
+          return
+        }
+        repairNode(node.children[0])
+        repairNode(node.children[1])
+      }
+
+      repairNode(root)
+    },
+  },
+})
+
+export const {
+  initLayout,
+  restoreLayout,
+  resetLayout,
+  splitPane,
+  addPane,
+  closePane,
+  setActivePane,
+  nudgePaneFocus,
+  resizePanes,
+  resizeMultipleSplits,
+  resetSplit,
+  swapSplit,
+  replacePane,
+  swapPanes,
+  updatePaneContent,
+  materializeFreshAgentSession,
+  mergePaneContent,
+  restartFreshAgentCreate,
+  requestPaneRefresh,
+  requestTabRefresh,
+  consumePaneRefreshRequest,
+  removeLayout,
+  markTabClosing,
+  clearTabClosing,
+  markPaneClosing,
+  clearPaneClosing,
+  hydratePanes,
+  updatePaneTitle,
+  updatePaneTitleByTerminalId,
+  updatePaneTitleBySessionRef,
+  reconcileTerminalSessionRefByTerminalId,
+  requestPaneRename,
+  clearPaneRenameRequest,
+  toggleZoom,
+  clearDeadTerminals,
+  clearTerminalLiveHandles,
+  applyReconcileAttach,
+  applyReattachToLiveTerminal,
+  resetPaneForReconcileCreate,
+  applyFreshAgentReconcileAttach,
+  resetFreshAgentPaneForReconcileCreate,
+  setPaneReconcileNotice,
+  clearPaneReconcileNotice,
+  setPaneCloseError,
+  clearPaneCloseError,
+  setPaneCrashTrace,
+  clearPaneCrashTrace,
+  setDeadSessionAdjudication,
+  resolveDeadSessionEntry,
+  clearDeadSessionAdjudication,
+  setReconcileWarming,
+  clearReconcileWarming,
+  setReconcilePendingPanes,
+  clearReconcilePendingPane,
+  clearAllReconcilePendingPanes,
+  setPaneRestoreError,
+  repairCodexIdentityMismatch,
+} = panesSlice.actions
+
+export default panesSlice.reducer
+export type { PanesState }
+
+/**
+ * Per-pane focus-nudge epoch (see PanesState.focusEpochByPaneId). Tolerant by
+ * design: bare component test stores may omit the panes slice or preload a
+ * partial panes state without the optional epoch map.
+ */
+export function selectPaneFocusEpoch(state: { panes?: PanesState }, paneId: string): number {
+  return state.panes?.focusEpochByPaneId?.[paneId] ?? 0
+}

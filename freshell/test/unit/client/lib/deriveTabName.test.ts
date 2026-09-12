@@ -1,0 +1,130 @@
+import { describe, it, expect } from 'vitest'
+import { deriveTabName } from '@/lib/deriveTabName'
+import type { PaneNode } from '@/store/paneTypes'
+import type { ClientExtensionEntry } from '@shared/extension-types'
+
+const mockExtensions: ClientExtensionEntry[] = [
+  { name: 'codex', label: 'Codex CLI', category: 'cli', version: '1.0.0', description: '' },
+  { name: 'gemini', label: 'Gemini', category: 'cli', version: '1.0.0', description: '' },
+]
+
+describe('deriveTabName', () => {
+  it('returns System Status for a host-stats pane', () => {
+    const layout: PaneNode = {
+      type: 'leaf',
+      id: 'pane-1',
+      content: { kind: 'host-stats' },
+    }
+
+    expect(deriveTabName(layout)).toBe('System Status')
+  })
+
+  it('returns provider label for codex terminal', () => {
+    const layout: PaneNode = {
+      type: 'leaf',
+      id: 'pane-1',
+      content: {
+        kind: 'terminal',
+        mode: 'codex',
+        status: 'running',
+        createRequestId: 'req-1',
+      },
+    }
+
+    expect(deriveTabName(layout, mockExtensions)).toBe('Codex CLI')
+  })
+
+  it('returns provider label for gemini terminal', () => {
+    const layout: PaneNode = {
+      type: 'leaf',
+      id: 'pane-1',
+      content: {
+        kind: 'terminal',
+        mode: 'gemini',
+        status: 'running',
+        createRequestId: 'req-1',
+      },
+    }
+
+    expect(deriveTabName(layout, mockExtensions)).toBe('Gemini')
+  })
+
+  it('falls back to capitalized name without extensions', () => {
+    const layout: PaneNode = {
+      type: 'leaf',
+      id: 'pane-1',
+      content: {
+        kind: 'terminal',
+        mode: 'codex',
+        status: 'running',
+        createRequestId: 'req-1',
+      },
+    }
+
+    expect(deriveTabName(layout)).toBe('Codex')
+  })
+
+  it('returns the last working-directory segment for a fresh-agent pane', () => {
+    const layout: PaneNode = {
+      type: 'leaf',
+      id: 'pane-1',
+      content: {
+        kind: 'fresh-agent',
+        sessionType: 'freshcodex',
+        provider: 'codex',
+        status: 'idle',
+        createRequestId: 'req-1',
+        initialCwd: '/home/dan/code/freshell',
+      },
+    }
+
+    expect(deriveTabName(layout, mockExtensions)).toBe('freshell')
+  })
+
+  it('falls back to the fresh-agent label when there is no working directory', () => {
+    const layout: PaneNode = {
+      type: 'leaf',
+      id: 'pane-1',
+      content: {
+        kind: 'fresh-agent',
+        sessionType: 'freshopencode',
+        provider: 'opencode',
+        status: 'idle',
+        createRequestId: 'req-1',
+      },
+    }
+
+    expect(deriveTabName(layout, mockExtensions)).toBe('Freshopencode')
+  })
+
+  it('returns the working-directory basename for a CLI (claude) terminal with initialCwd', () => {
+    const layout: PaneNode = {
+      type: 'leaf',
+      id: 'pane-1',
+      content: {
+        kind: 'terminal',
+        mode: 'claude',
+        status: 'running',
+        createRequestId: 'req-1',
+        initialCwd: '/home/dan/code/freshell',
+      },
+    }
+
+    expect(deriveTabName(layout, mockExtensions)).toBe('freshell')
+  })
+
+  it('falls back to the provider label for a CLI terminal without initialCwd', () => {
+    const layout: PaneNode = {
+      type: 'leaf',
+      id: 'pane-1',
+      content: {
+        kind: 'terminal',
+        mode: 'codex',
+        status: 'running',
+        createRequestId: 'req-1',
+      },
+    }
+
+    expect(deriveTabName(layout, mockExtensions)).toBe('Codex CLI')
+  })
+})

@@ -1,0 +1,1411 @@
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
+import { render as renderWithoutStore, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
+import type { ReactElement } from 'react'
+import { Provider } from 'react-redux'
+import { configureStore } from '@reduxjs/toolkit'
+import PaneHeader from '@/components/panes/PaneHeader'
+import freshAgentReducer, { freshAgentSnapshotReceived, sessionInit } from '@/store/freshAgentSlice'
+import repoIconsReducer from '@/store/repoIconsSlice'
+import settingsReducer from '@/store/settingsSlice'
+import terminalMetaReducer from '@/store/terminalMetaSlice'
+import { formatPaneRuntimeLabel, formatPaneRuntimeTooltip } from '@/lib/format-terminal-title-meta'
+import type { FreshAgentSnapshot } from '@shared/fresh-agent-contract'
+import type { PaneContent } from '@/store/paneTypes'
+
+// PaneHeader now owns its repo-icon probe (fetchRepoIconMeta → api.get); keep
+// resolution deterministic per test instead of letting it hit real fetch.
+const { mockApiGet } = vi.hoisted(() => ({
+  mockApiGet: vi.fn(),
+}))
+
+function defaultRepoIconMetaResponse(path: string) {
+  const cwd = new URLSearchParams(path.split('?')[1] ?? '').get('cwd') ?? ''
+  const repoName = cwd.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean).pop() ?? ''
+  return Promise.resolve({ repoRoot: cwd, checkoutRoot: cwd, repoName, hasIcon: false })
+}
+
+vi.mock('@/lib/api', () => ({
+  api: {
+    get: (path: string) => mockApiGet(path),
+  },
+}))
+
+vi.mock('lucide-react', () => ({
+  X: ({ className }: { className?: string }) => (
+    <svg data-testid="x-icon" className={className} />
+  ),
+  Circle: ({ className }: { className?: string }) => (
+    <svg data-testid="circle-icon" className={className} />
+  ),
+  Search: ({ className }: { className?: string }) => (
+    <svg data-testid="search-icon" className={className} />
+  ),
+  Maximize2: ({ className }: { className?: string }) => (
+    <svg data-testid="maximize-icon" className={className} />
+  ),
+  Minimize2: ({ className }: { className?: string }) => (
+    <svg data-testid="minimize-icon" className={className} />
+  ),
+  RefreshCw: ({ className }: { className?: string }) => (
+    <svg data-testid="refresh-icon" className={className} />
+  ),
+  Terminal: ({ className }: { className?: string }) => (
+    <svg data-testid="terminal-icon" className={className} />
+  ),
+  FileSearch: ({ className }: { className?: string }) => (
+    <svg data-testid="filesearch-icon" className={className} />
+  ),
+  Globe: ({ className }: { className?: string }) => (
+    <svg data-testid="globe-icon" className={className} />
+  ),
+  FilePen: ({ className }: { className?: string }) => (
+    <svg data-testid="filepen-icon" className={className} />
+  ),
+  FileText: ({ className }: { className?: string }) => (
+    <svg data-testid="filetext-icon" className={className} />
+  ),
+  SquareTerminal: ({ className }: { className?: string }) => (
+    <svg data-testid="square-terminal-icon" className={className} />
+  ),
+}))
+
+vi.mock('@/components/icons/PaneIcon', () => ({
+  default: ({ content, className }: { content: any; className?: string }) => (
+    <svg data-testid="pane-icon" data-content-kind={content.kind} data-content-mode={content.mode} className={className} />
+  ),
+}))
+
+vi.mock('@/components/icons/RepoIcon', () => ({
+  default: ({ info, className }: { info?: { repoKey?: string; repoName?: string }; className?: string }) => (
+    <svg data-testid="repo-icon" data-repo-key={info?.repoKey} data-repo-name={info?.repoName} className={className} />
+  ),
+}))
+
+vi.mock('@/components/fresh-agent/FreshAgentSettingsButton', () => ({
+  default: () => (
+    <button type="button" aria-label="Agent settings" title="Agent settings" data-testid="settings-button-stub" />
+  ),
+}))
+
+function makeTerminalContent(mode = 'shell') {
+  return { kind: 'terminal' as const, mode, shell: 'system' as const, createRequestId: 'r1', status: 'running' as const }
+}
+
+function makeFreshAgentStore() {
+  return configureStore({
+    reducer: {
+      freshAgent: freshAgentReducer,
+      repoIcons: repoIconsReducer,
+      terminalMeta: terminalMetaReducer,
+      settings: settingsReducer,
+    },
+  })
+}
+
+// PaneHeader reads the store (repo icons); in the app it always renders under
+// the Redux Provider, so mirror that by default. Tests that need a specific
+// store still nest their own <Provider>, which takes precedence.
+function render(ui: ReactElement) {
+  return renderWithoutStore(<Provider store={makeFreshAgentStore()}>{ui}</Provider>)
+}
+
+function makeFreshAgentSnapshot(
+  overrides: Partial<FreshAgentSnapshot> & {
+    threadId: string
+    sessionType: FreshAgentSnapshot['sessionType']
+    provider: FreshAgentSnapshot['provider']
+    tokenUsage: FreshAgentSnapshot['tokenUsage']
+  },
+): FreshAgentSnapshot {
+  return {
+    threadId: overrides.threadId,
+    sessionType: overrides.sessionType,
+    provider: overrides.provider,
+    revision: overrides.revision ?? 1,
+    status: overrides.status ?? 'idle',
+    capabilities: overrides.capabilities ?? {
+      send: true,
+      interrupt: true,
+      approvals: true,
+      questions: true,
+      fork: false,
+    },
+    tokenUsage: overrides.tokenUsage,
+    pendingApprovals: overrides.pendingApprovals ?? [],
+    pendingQuestions: overrides.pendingQuestions ?? [],
+    worktrees: overrides.worktrees ?? [],
+    diffs: overrides.diffs ?? [],
+    childThreads: overrides.childThreads ?? [],
+    turns: overrides.turns ?? [],
+    extensions: overrides.extensions ?? {},
+  } as FreshAgentSnapshot
+}
+
+describe('PaneHeader', () => {
+  beforeEach(() => {
+    mockApiGet.mockReset()
+    mockApiGet.mockImplementation(defaultRepoIconMetaResponse)
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  describe('rendering', () => {
+    it('renders the title', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+        />
+      )
+
+      expect(screen.getByText('My Terminal')).toBeInTheDocument()
+    })
+
+    it('renders its pane-header context marker and exact pane identity', () => {
+      render(
+        <PaneHeader
+          tabId="tab-header"
+          paneId="pane-header"
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+        />
+      )
+
+      const header = screen.getByRole('banner', { name: 'Pane: My Terminal' })
+      expect(header).toHaveAttribute('data-context', 'pane-header')
+      expect(header).toHaveAttribute('data-tab-id', 'tab-header')
+      expect(header).toHaveAttribute('data-pane-id', 'pane-header')
+    })
+
+    it('renders status indicator', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+        />
+      )
+
+      expect(screen.getByTestId('pane-icon')).toBeInTheDocument()
+    })
+
+    it('renders close button', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+        />
+      )
+
+      expect(screen.getByTitle('Close pane')).toBeInTheDocument()
+    })
+
+    it('renders right-aligned metadata text before action icons', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          metaLabel="freshell (main*)  25%"
+          metaTooltip={'Directory: /home/user/code/freshell\nbranch: main*\nTokens: 54,414/167,000(33% full)'}
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          onToggleZoom={vi.fn()}
+          content={makeTerminalContent('codex')}
+        />
+      )
+
+      expect(
+        screen.getByText((_, element) =>
+          element?.getAttribute('title') === 'Directory: /home/user/code/freshell\nbranch: main*\nTokens: 54,414/167,000(33% full)',
+        ),
+      ).toBeInTheDocument()
+      expect(screen.getByTitle('Maximize pane')).toBeInTheDocument()
+      expect(screen.getByTitle('Close pane')).toBeInTheDocument()
+    })
+
+    it('renders repo + agent icons for a fresh-agent pane, before metadata, with no session-type text label', () => {
+      render(
+        <Provider store={makeFreshAgentStore()}>
+          <PaneHeader
+            tabId="tab-1"
+            paneId="pane-1"
+            title="freshell"
+            metaLabel="freshell (main)"
+            metaTooltip="Directory: /home/dan/code/freshell"
+            status="running"
+            isActive={true}
+            onClose={vi.fn()}
+            onRefresh={vi.fn()}
+            onToggleZoom={vi.fn()}
+            content={{
+              kind: 'fresh-agent',
+              sessionType: 'freshcodex',
+              provider: 'codex',
+              sessionId: 'fresh-session-1',
+              createRequestId: 'fresh-req-1',
+              status: 'idle',
+              initialCwd: '/home/dan/code/freshell',
+            }}
+          />
+        </Provider>,
+      )
+
+      const banner = screen.getByRole('banner', { name: 'Pane: freshell' })
+      // No repo metadata in store → the tooltip is the pane's cwd path (never
+      // a guessed basename claimed as the repo name).
+      const repoIcon = screen.getByTitle('/home/dan/code/freshell')
+      const agentIcon = screen.getByTitle('Codex (freshcodex pane)')
+      const metadata = screen.getByText('freshell (main)')
+
+      expect(banner).toContainElement(repoIcon)
+      expect(banner).toContainElement(agentIcon)
+      expect(banner).toContainElement(metadata)
+      // The session type is tooltip-only now — never rendered as text.
+      expect(banner.textContent ?? '').not.toContain('freshcodex')
+      const agentIconSvg = agentIcon.querySelector('[data-testid="pane-icon"]')
+      expect(agentIconSvg).not.toBeNull()
+      expect(agentIconSvg?.getAttribute('class')).toContain('text-muted-foreground')
+      expect(repoIcon.querySelector('[data-testid="repo-icon"]')).not.toBeNull()
+      expect(
+        repoIcon.compareDocumentPosition(agentIcon) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy()
+      expect(
+        agentIcon.compareDocumentPosition(metadata) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy()
+    })
+
+    it('keeps a custom fresh-agent pane title visible after the icons, before metadata', () => {
+      render(
+        <Provider store={makeFreshAgentStore()}>
+          <PaneHeader
+            tabId="tab-1"
+            paneId="pane-1"
+            title="Ops desk"
+            metaLabel="freshell (main)"
+            metaTooltip="Directory: /home/dan/code/freshell"
+            status="running"
+            isActive={true}
+            onClose={vi.fn()}
+            content={{
+              kind: 'fresh-agent',
+              sessionType: 'freshcodex',
+              provider: 'codex',
+              sessionId: 'fresh-session-1',
+              createRequestId: 'fresh-req-1',
+              status: 'idle',
+              initialCwd: '/home/dan/code/freshell',
+            }}
+          />
+        </Provider>,
+      )
+
+      const banner = screen.getByRole('banner', { name: 'Pane: Ops desk' })
+      const agentIcon = screen.getByTitle('Codex (freshcodex pane)')
+      const customTitle = screen.getByText('Ops desk')
+      const metadata = screen.getByText('freshell (main)')
+
+      expect(banner.textContent ?? '').not.toContain('freshcodex')
+      expect(
+        agentIcon.compareDocumentPosition(customTitle) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy()
+      expect(
+        customTitle.compareDocumentPosition(metadata) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy()
+      expect(metadata).toHaveAttribute('title', 'Directory: /home/dan/code/freshell')
+    })
+
+    it('does not duplicate the default fresh-agent title when CLI-style metadata is available', () => {
+      render(
+        <Provider store={makeFreshAgentStore()}>
+          <PaneHeader
+            tabId="tab-1"
+            paneId="pane-1"
+            title="freshell"
+            metaLabel="freshell (main)"
+            status="running"
+            isActive={true}
+            onClose={vi.fn()}
+            content={{
+              kind: 'fresh-agent',
+              sessionType: 'freshcodex',
+              provider: 'codex',
+              sessionId: 'fresh-session-1',
+              createRequestId: 'fresh-req-1',
+              status: 'idle',
+              initialCwd: '/home/dan/code/freshell',
+            }}
+          />
+        </Provider>,
+      )
+
+      const banner = screen.getByRole('banner', { name: 'Pane: freshell' })
+      expect(screen.getByText('freshell (main)')).toBeInTheDocument()
+      expect(screen.queryByText('freshell')).toBeNull()
+      expect(banner.textContent ?? '').not.toContain('freshcodex')
+      expect(screen.getByTitle('Codex (freshcodex pane)')).toBeInTheDocument()
+    })
+
+    it('omits the redundant default label when a fresh-agent pane has no cwd metadata yet', () => {
+      render(
+        <Provider store={makeFreshAgentStore()}>
+          <PaneHeader
+            tabId="tab-1"
+            paneId="pane-1"
+            title="Freshcodex"
+            status="creating"
+            isActive={true}
+            onClose={vi.fn()}
+            content={{
+              kind: 'fresh-agent',
+              sessionType: 'freshcodex',
+              provider: 'codex',
+              createRequestId: 'fresh-req-1',
+              status: 'creating',
+            }}
+          />
+        </Provider>,
+      )
+
+      const banner = screen.getByRole('banner', { name: 'Pane: Freshcodex' })
+      // The agent icon carries the identity via tooltip; no session-type text,
+      // no default title, and (no cwd) no repo icon.
+      expect(screen.getByTitle('Codex (freshcodex pane)')).toBeInTheDocument()
+      expect(banner.textContent ?? '').not.toContain('Freshcodex')
+      expect(banner.textContent ?? '').not.toContain('freshcodex')
+      expect(screen.queryByTestId('repo-icon')).toBeNull()
+    })
+
+    it.each([
+      ['freshclaude', 'Claude', 'claude'],
+      ['freshcodex', 'Codex', 'codex'],
+      ['freshopencode', 'OpenCode', 'opencode'],
+      ['kilroy', 'Claude', 'claude'],
+    ] as const)('identifies a %s pane only by its agent icon tooltip', (sessionType, label, provider) => {
+      render(
+        <Provider store={makeFreshAgentStore()}>
+          <PaneHeader
+            tabId="tab-1"
+            paneId="pane-1"
+            title="freshell"
+            metaLabel="freshell (main)"
+            status="running"
+            isActive={true}
+            onClose={vi.fn()}
+            content={{
+              kind: 'fresh-agent',
+              sessionType,
+              provider,
+              sessionId: `${sessionType}-session`,
+              createRequestId: `${sessionType}-req`,
+              status: 'idle',
+            }}
+          />
+        </Provider>,
+      )
+
+      const banner = screen.getByRole('banner', { name: 'Pane: freshell' })
+      expect(screen.getByTitle(`${label} (${sessionType} pane)`)).toBeInTheDocument()
+      expect(banner.textContent ?? '').not.toContain(sessionType)
+    })
+
+    it('probes repo-icon meta itself and renders the letter-avatar fallback when repoIconsOnTabs is false', async () => {
+      mockApiGet.mockRejectedValue(new Error('no icon endpoint'))
+      const store = makeFreshAgentStore()
+      store.dispatch({
+        type: 'settings/updateSettingsLocal',
+        payload: { panes: { repoIconsOnTabs: false } },
+      })
+
+      render(
+        <Provider store={store}>
+          <PaneHeader
+            tabId="tab-1"
+            paneId="pane-1"
+            title="freshell"
+            metaLabel="freshell (main)"
+            status="running"
+            isActive={true}
+            onClose={vi.fn()}
+            content={{
+              kind: 'fresh-agent',
+              sessionType: 'freshcodex',
+              provider: 'codex',
+              sessionId: 'fresh-session-1',
+              createRequestId: 'fresh-req-1',
+              status: 'idle',
+              initialCwd: '/home/dan/code/freshell',
+            }}
+          />
+        </Provider>,
+      )
+
+      // Fresh-agent headers own their probe (TabBar may be unmounted or the
+      // tab-icon setting off): the meta request fires for this repoCwd…
+      expect(mockApiGet).toHaveBeenCalledWith(
+        '/api/repo-icon/meta?cwd=%2Fhome%2Fdan%2Fcode%2Ffreshell',
+      )
+      // …and the letter-avatar fallback renders immediately, tooltip showing
+      // the pane cwd path (metadata absent → no guessed repo name).
+      const repoIcon = screen.getByTitle('/home/dan/code/freshell')
+      expect(repoIcon.querySelector('[data-testid="repo-icon"]')).not.toBeNull()
+
+      await waitFor(() => {
+        expect(store.getState().repoIcons.byCwd['/home/dan/code/freshell']?.status).toBe('error')
+      })
+      // The tooltip stays put through the probe's error landing.
+      expect(screen.getByTitle('/home/dan/code/freshell')).toBeInTheDocument()
+    })
+
+    it('renders fresh-agent controls in settings refresh zoom close order without open-terminal or context-meter controls', () => {
+      const store = makeFreshAgentStore()
+      store.dispatch(sessionInit({
+        sessionId: 'fresh-session-1',
+        sessionType: 'freshcodex',
+        provider: 'codex',
+        tools: [{ name: 'Bash' }, { name: 'Read' }, { name: 'Glob' }, { name: 'WebFetch' }],
+      }))
+      store.dispatch(freshAgentSnapshotReceived({
+        snapshot: makeFreshAgentSnapshot({
+          threadId: 'fresh-session-1',
+          sessionType: 'freshcodex',
+          provider: 'codex',
+          tokenUsage: {
+            inputTokens: 1200,
+            outputTokens: 300,
+            totalTokens: 1500,
+            contextTokens: 1500,
+            compactPercent: 56,
+          },
+        }),
+      }))
+
+      render(
+        <Provider store={store}>
+          <PaneHeader
+            tabId="tab-1"
+            paneId="pane-1"
+            title="freshell"
+            metaLabel="freshell (main)  56%"
+            status="running"
+            isActive={true}
+            onClose={vi.fn()}
+            onRefresh={vi.fn()}
+            onSearch={vi.fn()}
+            onToggleZoom={vi.fn()}
+            content={{
+              kind: 'fresh-agent',
+              sessionType: 'freshcodex',
+              provider: 'codex',
+              sessionId: 'fresh-session-1',
+              createRequestId: 'fresh-req-1',
+              status: 'idle',
+            }}
+          />
+        </Provider>,
+      )
+
+      const actionLabels = screen.getAllByRole('button').map((button) =>
+        button.getAttribute('aria-label') || button.getAttribute('title'),
+      )
+
+      expect(actionLabels).toEqual([
+        'Agent settings',
+        'Refresh pane',
+        'Maximize pane',
+        'Close pane',
+      ])
+      expect(screen.queryByTitle('Bash, Read, Glob, WebFetch')).toBeNull()
+      expect(screen.queryByTestId('terminal-icon')).toBeNull()
+      expect(screen.queryByTestId('filetext-icon')).toBeNull()
+      expect(screen.queryByTestId('filesearch-icon')).toBeNull()
+      expect(screen.queryByTestId('globe-icon')).toBeNull()
+      expect(screen.queryByTitle('Search in terminal')).toBeNull()
+      expect(screen.queryByLabelText('Open terminal at session directory')).toBeNull()
+      expect(screen.queryByRole('status', { name: /context/i })).toBeNull()
+      expect(screen.queryByText(/ctx/i)).toBeNull()
+    })
+
+    it('omits refresh from the fresh-agent control order when no refresh handler is provided', () => {
+      render(
+        <Provider store={makeFreshAgentStore()}>
+          <PaneHeader
+            tabId="tab-1"
+            paneId="pane-1"
+            title="freshell"
+            metaLabel="freshell (main)"
+            status="running"
+            isActive={true}
+            onClose={vi.fn()}
+            onToggleZoom={vi.fn()}
+            content={{
+              kind: 'fresh-agent',
+              sessionType: 'freshcodex',
+              provider: 'codex',
+              sessionId: 'fresh-session-1',
+              createRequestId: 'fresh-req-1',
+              status: 'idle',
+            }}
+          />
+        </Provider>,
+      )
+
+      const actionLabels = screen.getAllByRole('button').map((button) =>
+        button.getAttribute('aria-label') || button.getAttribute('title'),
+      )
+
+      expect(actionLabels).toEqual([
+        'Agent settings',
+        'Maximize pane',
+        'Close pane',
+      ])
+      expect(screen.queryByText(/ctx/i)).toBeNull()
+    })
+  })
+
+  describe('formatPaneRuntimeLabel()', () => {
+    it('formats codex and claude metadata with identical spacing/output for equivalent inputs', () => {
+      const codex = formatPaneRuntimeLabel({
+        checkoutRoot: '/home/user/freshell',
+        branch: 'main',
+        isDirty: true,
+        tokenUsage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          cachedTokens: 0,
+          totalTokens: 15,
+          compactPercent: 25,
+        },
+      })
+
+      const claude = formatPaneRuntimeLabel({
+        checkoutRoot: '/home/user/freshell',
+        branch: 'main',
+        isDirty: true,
+        tokenUsage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          cachedTokens: 0,
+          totalTokens: 15,
+          compactPercent: 25,
+        },
+      })
+
+      expect(codex).toBe('freshell (main*)  25%')
+      expect(claude).toBe(codex)
+    })
+
+    it('omits percentage when compact-threshold usage is unavailable', () => {
+      const label = formatPaneRuntimeLabel({
+        checkoutRoot: '/home/user/freshell',
+        branch: 'main',
+        isDirty: false,
+        tokenUsage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          cachedTokens: 0,
+          totalTokens: 15,
+        },
+      })
+
+      expect(label).toBe('freshell (main)')
+    })
+
+    it('formats FreshClaude runtime metadata with the same label contract as CLI panes', () => {
+      const label = formatPaneRuntimeLabel({
+        checkoutRoot: '/home/user/freshell',
+        cwd: '/home/user/freshell/.worktrees/issue-163',
+        branch: 'main',
+        isDirty: true,
+        tokenUsage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          cachedTokens: 0,
+          totalTokens: 15,
+          contextTokens: 15,
+          compactThresholdTokens: 60,
+          compactPercent: 25,
+        },
+      })
+
+      expect(label).toBe('freshell (main*)  25%')
+    })
+  })
+
+  describe('formatPaneRuntimeTooltip()', () => {
+    it('formats detailed hover text with directory, branch, and tokens', () => {
+      const tooltip = formatPaneRuntimeTooltip({
+        cwd: '/home/user/code/freshell/.worktrees/fix-token-percent-calc',
+        checkoutRoot: '/home/user/code/freshell/.worktrees/fix-token-percent-calc',
+        branch: 'fix/token-percent-calc',
+        isDirty: true,
+        tokenUsage: {
+          inputTokens: 1,
+          outputTokens: 8,
+          cachedTokens: 54405,
+          totalTokens: 54414,
+          contextTokens: 54414,
+          compactThresholdTokens: 167000,
+          compactPercent: 33,
+        },
+      })
+
+      expect(tooltip).toBe(
+        'Directory: /home/user/code/freshell/.worktrees/fix-token-percent-calc\n' +
+        'branch: fix/token-percent-calc*\n' +
+        'Tokens: 54,414/167,000(33% full)',
+      )
+    })
+  })
+
+  describe('PaneIcon rendering', () => {
+    it('renders PaneIcon with content instead of a plain circle', () => {
+      const content = makeTerminalContent('claude')
+      render(
+        <PaneHeader title="My Terminal" status="running" isActive={true} onClose={vi.fn()} content={content} />
+      )
+      const paneIcon = screen.getByTestId('pane-icon')
+      expect(paneIcon).toBeInTheDocument()
+      expect(paneIcon.getAttribute('data-content-mode')).toBe('claude')
+    })
+
+    it('applies success color to icon when status is running', () => {
+      render(
+        <PaneHeader title="Test" status="running" isActive={true} onClose={vi.fn()} content={makeTerminalContent()} />
+      )
+      const paneIcon = screen.getByTestId('pane-icon')
+      expect(paneIcon.getAttribute('class')).toContain('text-success')
+    })
+
+    it('applies destructive color to icon when status is error', () => {
+      render(
+        <PaneHeader title="Test" status="error" isActive={true} onClose={vi.fn()} content={makeTerminalContent()} />
+      )
+      const paneIcon = screen.getByTestId('pane-icon')
+      expect(paneIcon.getAttribute('class')).toContain('text-destructive')
+    })
+
+    it('applies muted color to icon when status is exited', () => {
+      render(
+        <PaneHeader title="Test" status="exited" isActive={true} onClose={vi.fn()} content={makeTerminalContent()} />
+      )
+      const paneIcon = screen.getByTestId('pane-icon')
+      expect(paneIcon.getAttribute('class')).toContain('text-muted-foreground/40')
+    })
+
+    it('applies muted styling when status is creating', () => {
+      render(
+        <PaneHeader title="Test" status="creating" isActive={true} onClose={vi.fn()} content={makeTerminalContent()} />
+      )
+      const paneIcon = screen.getByTestId('pane-icon')
+      expect(paneIcon.getAttribute('class')).toContain('text-muted-foreground')
+      expect(paneIcon.getAttribute('class')).not.toContain('text-blue-500')
+    })
+
+    it('applies blue icon color when busy is true', () => {
+      render(
+        <PaneHeader
+          title="Test"
+          status="running"
+          isActive={true}
+          busy={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent('codex')}
+        />
+      )
+      const paneIcon = screen.getByTestId('pane-icon')
+      expect(paneIcon.getAttribute('class')).toContain('text-blue-500')
+      expect(paneIcon.getAttribute('class')).not.toContain('animate-pulse')
+    })
+
+    it('applies blue color to the fresh-agent agent icon when busy is true', () => {
+      render(
+        <Provider store={makeFreshAgentStore()}>
+          <PaneHeader
+            title="freshell"
+            status="running"
+            isActive={true}
+            busy={true}
+            onClose={vi.fn()}
+            content={{
+              kind: 'fresh-agent',
+              sessionType: 'freshcodex',
+              provider: 'codex',
+              sessionId: 'fresh-session-1',
+              createRequestId: 'fresh-req-1',
+              status: 'running',
+            }}
+          />
+        </Provider>,
+      )
+
+      const agentIcon = screen.getByTitle('Codex (freshcodex pane)')
+      const agentIconSvg = agentIcon.querySelector('[data-testid="pane-icon"]')
+      expect(agentIconSvg).not.toBeNull()
+      expect(agentIconSvg?.getAttribute('class')).toContain('text-blue-500')
+      expect(agentIconSvg?.getAttribute('class')).toContain('h-3.5 w-3.5')
+    })
+  })
+
+  describe('repo icon', () => {
+    it('renders a repo icon next to the pane icon when repo meta is cached', () => {
+      const store = makeFreshAgentStore()
+      store.dispatch({
+        type: 'repoIcons/fetchMeta/fulfilled',
+        meta: { arg: '/repo/a' },
+        payload: { repoRoot: '/repo/a', checkoutRoot: '/repo/a', repoName: 'a', hasIcon: false },
+      })
+      render(
+        <Provider store={store}>
+          <PaneHeader
+            title="My Terminal"
+            status="running"
+            isActive={true}
+            onClose={vi.fn()}
+            content={{ kind: 'terminal', mode: 'claude', createRequestId: 'r', status: 'running', initialCwd: '/repo/a' } as PaneContent}
+          />
+        </Provider>,
+      )
+      expect(screen.getByTestId('repo-icon')).toBeTruthy()
+      expect(screen.getByTestId('repo-icon').getAttribute('class') || '').toContain('h-3.5 w-3.5')
+    })
+
+    it('renders no repo icon for plain shell panes', () => {
+      const store = makeFreshAgentStore()
+      render(
+        <Provider store={store}>
+          <PaneHeader
+            title="My Terminal"
+            status="running"
+            isActive={true}
+            onClose={vi.fn()}
+            content={{ kind: 'terminal', mode: 'shell', createRequestId: 'r', status: 'running', initialCwd: '/repo/a' } as PaneContent}
+          />
+        </Provider>,
+      )
+      expect(screen.queryByTestId('repo-icon')).toBeNull()
+    })
+  })
+
+  describe('interactions', () => {
+    it('calls onClose when close button is clicked', () => {
+      const onClose = vi.fn()
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={onClose}
+          content={makeTerminalContent()}
+        />
+      )
+
+      fireEvent.click(screen.getByTitle('Close pane'))
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+
+    it('stops propagation on close button click', () => {
+      const onClose = vi.fn()
+      const parentClick = vi.fn()
+
+      render(
+        <div onClick={parentClick}>
+          <PaneHeader
+            title="My Terminal"
+            status="running"
+            isActive={true}
+            onClose={onClose}
+            content={makeTerminalContent()}
+          />
+        </div>
+      )
+
+      fireEvent.click(screen.getByTitle('Close pane'))
+      expect(onClose).toHaveBeenCalledTimes(1)
+      expect(parentClick).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('inline rename', () => {
+    it('shows input when isRenaming is true', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          isRenaming={true}
+          renameValue="My Terminal"
+          onRenameChange={vi.fn()}
+          onRenameBlur={vi.fn()}
+          onRenameKeyDown={vi.fn()}
+        />
+      )
+
+      const input = screen.getByRole('textbox')
+      expect(input).toBeInTheDocument()
+      expect(input).toHaveValue('My Terminal')
+      // Title span should not be present
+      expect(screen.queryByText('My Terminal')).toBeNull()
+    })
+
+    it('shows title span when isRenaming is false', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          isRenaming={false}
+        />
+      )
+
+      expect(screen.getByText('My Terminal')).toBeInTheDocument()
+      expect(screen.queryByRole('textbox')).toBeNull()
+    })
+
+    it('calls onRenameChange when input value changes', () => {
+      const onRenameChange = vi.fn()
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          isRenaming={true}
+          renameValue="My Terminal"
+          onRenameChange={onRenameChange}
+          onRenameBlur={vi.fn()}
+          onRenameKeyDown={vi.fn()}
+        />
+      )
+
+      fireEvent.change(screen.getByRole('textbox'), { target: { value: 'New Name' } })
+      expect(onRenameChange).toHaveBeenCalledWith('New Name')
+    })
+
+    it('calls onRenameBlur when input loses focus', () => {
+      const onRenameBlur = vi.fn()
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          isRenaming={true}
+          renameValue="My Terminal"
+          onRenameChange={vi.fn()}
+          onRenameBlur={onRenameBlur}
+          onRenameKeyDown={vi.fn()}
+        />
+      )
+
+      fireEvent.blur(screen.getByRole('textbox'))
+      expect(onRenameBlur).toHaveBeenCalledTimes(1)
+    })
+
+    it('calls onRenameKeyDown on key events', () => {
+      const onRenameKeyDown = vi.fn()
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          isRenaming={true}
+          renameValue="My Terminal"
+          onRenameChange={vi.fn()}
+          onRenameBlur={vi.fn()}
+          onRenameKeyDown={onRenameKeyDown}
+        />
+      )
+
+      fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' })
+      expect(onRenameKeyDown).toHaveBeenCalledTimes(1)
+    })
+
+    it('stops click propagation on input', () => {
+      const parentClick = vi.fn()
+      render(
+        <div onClick={parentClick}>
+          <PaneHeader
+            title="My Terminal"
+            status="running"
+            isActive={true}
+            onClose={vi.fn()}
+            content={makeTerminalContent()}
+            isRenaming={true}
+            renameValue="My Terminal"
+            onRenameChange={vi.fn()}
+            onRenameBlur={vi.fn()}
+            onRenameKeyDown={vi.fn()}
+          />
+        </div>
+      )
+
+      fireEvent.click(screen.getByRole('textbox'))
+      expect(parentClick).not.toHaveBeenCalled()
+    })
+
+    it('calls onDoubleClick when title span is double-clicked', () => {
+      const onDoubleClick = vi.fn()
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          onDoubleClick={onDoubleClick}
+        />
+      )
+
+      fireEvent.doubleClick(screen.getByText('My Terminal'))
+      expect(onDoubleClick).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('zoom button', () => {
+    it('renders maximize button when not zoomed', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          onToggleZoom={vi.fn()}
+          isZoomed={false}
+        />
+      )
+
+      const btn = screen.getByTitle('Maximize pane')
+      expect(btn).toBeInTheDocument()
+      expect(btn).toHaveAttribute('aria-label', 'Maximize pane')
+      expect(screen.getByTestId('maximize-icon')).toBeInTheDocument()
+    })
+
+    it('renders restore button when zoomed', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          onToggleZoom={vi.fn()}
+          isZoomed={true}
+        />
+      )
+
+      const btn = screen.getByTitle('Restore pane')
+      expect(btn).toBeInTheDocument()
+      expect(btn).toHaveAttribute('aria-label', 'Restore pane')
+      expect(screen.getByTestId('minimize-icon')).toBeInTheDocument()
+    })
+
+    it('calls onToggleZoom when clicked', () => {
+      const onToggleZoom = vi.fn()
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          onToggleZoom={onToggleZoom}
+          isZoomed={false}
+        />
+      )
+
+      fireEvent.click(screen.getByTitle('Maximize pane'))
+      expect(onToggleZoom).toHaveBeenCalledTimes(1)
+    })
+
+    it('allows mouseDown to propagate so parent can activate pane', () => {
+      const parentMouseDown = vi.fn()
+      render(
+        <div onMouseDown={parentMouseDown}>
+          <PaneHeader
+            title="My Terminal"
+            status="running"
+            isActive={true}
+            onClose={vi.fn()}
+            content={makeTerminalContent()}
+            onToggleZoom={vi.fn()}
+            isZoomed={false}
+          />
+        </div>
+      )
+
+      fireEvent.mouseDown(screen.getByTitle('Maximize pane'))
+      expect(parentMouseDown).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not render zoom button when onToggleZoom is not provided', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+        />
+      )
+
+      expect(screen.queryByTitle('Maximize pane')).not.toBeInTheDocument()
+      expect(screen.queryByTitle('Restore pane')).not.toBeInTheDocument()
+    })
+  })
+
+  describe('search button', () => {
+    it('renders search button for terminal panes when onSearch is provided', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          onSearch={vi.fn()}
+        />
+      )
+
+      expect(screen.getByTitle('Search in terminal')).toBeInTheDocument()
+      expect(screen.getByTestId('search-icon')).toBeInTheDocument()
+    })
+
+    it('does not render search button when onSearch is not provided', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+        />
+      )
+
+      expect(screen.queryByTitle('Search in terminal')).not.toBeInTheDocument()
+    })
+
+    it('does not render search button for non-terminal panes', () => {
+      render(
+        <PaneHeader
+          title="My Browser"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={{ kind: 'browser', url: 'https://example.com', devToolsOpen: false }}
+          onSearch={vi.fn()}
+        />
+      )
+
+      expect(screen.queryByTitle('Search in terminal')).not.toBeInTheDocument()
+    })
+
+    it('calls onSearch when search button is clicked', () => {
+      const onSearch = vi.fn()
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          onSearch={onSearch}
+        />
+      )
+
+      fireEvent.click(screen.getByTitle('Search in terminal'))
+      expect(onSearch).toHaveBeenCalledTimes(1)
+    })
+
+    it('stops click propagation on search button', () => {
+      const onSearch = vi.fn()
+      const parentClick = vi.fn()
+
+      render(
+        <div onClick={parentClick}>
+          <PaneHeader
+            title="My Terminal"
+            status="running"
+            isActive={true}
+            onClose={vi.fn()}
+            content={makeTerminalContent()}
+            onSearch={onSearch}
+          />
+        </div>
+      )
+
+      fireEvent.click(screen.getByTitle('Search in terminal'))
+      expect(onSearch).toHaveBeenCalledTimes(1)
+      expect(parentClick).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('styling', () => {
+    it('applies active styling when active', () => {
+      const { container } = render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+        />
+      )
+
+      const header = container.firstChild as HTMLElement
+      expect(header.className).toContain('bg-muted')
+      expect(header.className).not.toContain('bg-muted/50')
+    })
+
+    it('applies inactive styling when not active', () => {
+      const { container } = render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={false}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+        />
+      )
+
+      const header = container.firstChild as HTMLElement
+      expect(header.className).toContain('bg-muted/50')
+    })
+
+    it('applies emerald attention styling when needsAttention is true', () => {
+      const { container } = render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={false}
+          needsAttention={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+        />
+      )
+
+      const header = container.firstChild as HTMLElement
+      expect(header.className).toContain('bg-emerald-50')
+      expect(header.className).toContain('border-l-emerald-500')
+      // Attention takes precedence: no active/inactive bg classes
+      expect(header.className).not.toContain('bg-muted/50')
+      expect(header.className).not.toContain('text-muted-foreground')
+    })
+
+    it('does not apply emerald styling when needsAttention is false', () => {
+      const { container } = render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          needsAttention={false}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+        />
+      )
+
+      const header = container.firstChild as HTMLElement
+      expect(header.className).not.toContain('bg-emerald-50')
+      expect(header.className).not.toContain('border-l-emerald-500')
+      expect(header.className).toContain('bg-muted')
+    })
+
+    it('does not apply emerald styling when needsAttention is undefined', () => {
+      const { container } = render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+        />
+      )
+
+      const header = container.firstChild as HTMLElement
+      expect(header.className).not.toContain('bg-emerald-50')
+      expect(header.className).not.toContain('border-l-emerald-500')
+    })
+  })
+
+  describe('refresh button', () => {
+    it('renders when onRefresh is provided', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          onRefresh={vi.fn()}
+        />
+      )
+
+      expect(screen.getByTitle('Refresh pane')).toBeInTheDocument()
+      expect(screen.getByTestId('refresh-icon')).toBeInTheDocument()
+    })
+
+    it('does not render when onRefresh is omitted', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+        />
+      )
+
+      expect(screen.queryByTitle('Refresh pane')).toBeNull()
+    })
+
+    it('calls onRefresh exactly once when clicked', () => {
+      const onRefresh = vi.fn()
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          onRefresh={onRefresh}
+        />
+      )
+
+      fireEvent.click(screen.getByTitle('Refresh pane'))
+      expect(onRefresh).toHaveBeenCalledTimes(1)
+    })
+
+    it('stops propagation to parent on click', () => {
+      const onRefresh = vi.fn()
+      const parentClick = vi.fn()
+
+      render(
+        <div onClick={parentClick}>
+          <PaneHeader
+            title="My Terminal"
+            status="running"
+            isActive={true}
+            onClose={vi.fn()}
+            content={makeTerminalContent()}
+            onRefresh={onRefresh}
+          />
+        </div>
+      )
+
+      fireEvent.click(screen.getByTitle('Refresh pane'))
+      expect(onRefresh).toHaveBeenCalledTimes(1)
+      expect(parentClick).not.toHaveBeenCalled()
+    })
+
+    it('renders for browser panes when onRefresh is provided', () => {
+      render(
+        <PaneHeader
+          title="My Browser"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={{ kind: 'browser', browserInstanceId: 'b1', url: 'https://example.com', devToolsOpen: false }}
+          onRefresh={vi.fn()}
+        />
+      )
+
+      expect(screen.getByTitle('Refresh pane')).toBeInTheDocument()
+    })
+
+    it('appears in correct DOM order (search < refresh < zoom < close)', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          onSearch={vi.fn()}
+          onRefresh={vi.fn()}
+          onToggleZoom={vi.fn()}
+          isZoomed={false}
+        />
+      )
+
+      const buttons = screen.getAllByRole('button')
+      const titles = buttons.map((b) => b.getAttribute('title'))
+      const searchIdx = titles.indexOf('Search in terminal')
+      const refreshIdx = titles.indexOf('Refresh pane')
+      const zoomIdx = titles.indexOf('Maximize pane')
+      const closeIdx = titles.indexOf('Close pane')
+
+      expect(searchIdx).toBeGreaterThanOrEqual(0)
+      expect(refreshIdx).toBeGreaterThanOrEqual(0)
+      expect(zoomIdx).toBeGreaterThanOrEqual(0)
+      expect(closeIdx).toBeGreaterThanOrEqual(0)
+      expect(searchIdx).toBeLessThan(refreshIdx)
+      expect(refreshIdx).toBeLessThan(zoomIdx)
+      expect(zoomIdx).toBeLessThan(closeIdx)
+    })
+
+    it('has correct aria-label', () => {
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          onRefresh={vi.fn()}
+        />
+      )
+
+      const btn = screen.getByTitle('Refresh pane')
+      expect(btn.getAttribute('aria-label')).toBe('Refresh pane')
+    })
+  })
+
+  describe('regression: existing buttons unaffected by refresh button', () => {
+    it('search and zoom buttons remain functional after refresh button insertion', () => {
+      const onSearch = vi.fn()
+      const onToggleZoom = vi.fn()
+
+      render(
+        <PaneHeader
+          title="My Terminal"
+          status="running"
+          isActive={true}
+          onClose={vi.fn()}
+          content={makeTerminalContent()}
+          onSearch={onSearch}
+          onRefresh={vi.fn()}
+          onToggleZoom={onToggleZoom}
+          isZoomed={false}
+        />
+      )
+
+      fireEvent.click(screen.getByTitle('Search in terminal'))
+      expect(onSearch).toHaveBeenCalledTimes(1)
+
+      fireEvent.click(screen.getByTitle('Maximize pane'))
+      expect(onToggleZoom).toHaveBeenCalledTimes(1)
+    })
+  })
+
+})

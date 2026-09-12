@@ -1,0 +1,344 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ComponentType, SVGProps } from 'react'
+import { Terminal, Globe, FileText, LayoutGrid, Gauge } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { useAppSelector } from '@/store/hooks'
+import { ContextIds } from '@/components/context-menu/context-menu-constants'
+import { getCliProviderConfigs, type CodingCliProviderConfig } from '@/lib/coding-cli-utils'
+import { getVisibleFreshAgentConfigs, type FreshAgentProviderName } from '@/lib/fresh-agent-provider-utils'
+import { FRESH_AGENT_REGISTRY } from '@/lib/fresh-agent-registry'
+import { ProviderIcon } from '@/components/icons/provider-icons'
+import { useEnsureExtensionsRegistry } from '@/hooks/useEnsureExtensionsRegistry'
+import { usePaneFocusAdoption } from '@/hooks/usePaneFocusAdoption'
+import { computePanePickerLayout } from '@/lib/pane-picker-layout'
+import type { CodingCliProviderName } from '@/lib/coding-cli-types'
+import type { ClientExtensionEntry } from '@shared/extension-types'
+import type { FreshAgentSessionType } from '@shared/fresh-agent'
+
+export type PanePickerType = 'shell' | 'cmd' | 'powershell' | 'wsl' | 'browser' | 'editor' | 'host-stats' | FreshAgentProviderName | FreshAgentSessionType | CodingCliProviderName | `ext:${string}`
+
+type IconComponent = ComponentType<{ className?: string } & SVGProps<SVGSVGElement>>
+
+interface PickerOption {
+  type: PanePickerType
+  label: string
+  icon: IconComponent | null
+  providerName?: CodingCliProviderName
+  shortcut: string
+  afterCli?: boolean
+}
+
+const shellOption: PickerOption = { type: 'shell', label: 'Shell', icon: Terminal, shortcut: 'S' }
+
+const windowsShellOptions: PickerOption[] = [
+  { type: 'cmd', label: 'CMD', icon: Terminal, shortcut: 'C' },
+  { type: 'powershell', label: 'PowerShell', icon: Terminal, shortcut: 'P' },
+  { type: 'wsl', label: 'WSL', icon: Terminal, shortcut: 'W' },
+]
+
+const nonShellOptions: PickerOption[] = [
+  { type: 'editor', label: 'Editor', icon: FileText, shortcut: 'E' },
+  { type: 'browser', label: 'Browser', icon: Globe, shortcut: 'B' },
+]
+
+// Host pressure dashboard (plan-pane-types §3c): the server-derived flag
+// already encodes platform support; the platform clause is belt-and-braces.
+const hostStatsOption: PickerOption = { type: 'host-stats', label: 'System Status', icon: Gauge, shortcut: 'H' }
+
+const EMPTY_AVAILABLE_CLIS: Record<string, boolean> = {}
+const EMPTY_FEATURE_FLAGS: Record<string, boolean> = {}
+const EMPTY_ENABLED_PROVIDERS: CodingCliProviderName[] = []
+const EMPTY_EXTENSION_ENTRIES: ClientExtensionEntry[] = []
+
+function cliConfigToOption(config: CodingCliProviderConfig, ext?: { picker?: { shortcut?: string } }): PickerOption {
+  return {
+    type: config.name,
+    label: config.label,
+    icon: null,
+    providerName: config.name,
+    shortcut: ext?.picker?.shortcut ?? config.name[0].toUpperCase(),
+  }
+}
+
+function isWindowsLike(platform: string | null): boolean {
+  return platform === 'win32' || platform === 'wsl'
+}
+
+function isFreshAgentSessionDisabled(sessionType: string, disabledItems: readonly string[]): boolean {
+  return disabledItems.includes(sessionType)
+}
+
+interface PanePickerProps {
+  onSelect: (type: PanePickerType) => void
+  onCancel: () => void
+  isOnlyPane: boolean
+  tabId?: string
+  paneId?: string
+  focusEligible?: boolean
+  /** Focus-nudge epoch: explicit same-target selects bump this so the focus
+   *  effect re-runs even without an eligibility transition. */
+  focusEpoch?: number
+}
+
+export default function PanePicker({ onSelect, onCancel, isOnlyPane, tabId, paneId, focusEligible = true, focusEpoch = 0 }: PanePickerProps) {
+  useEnsureExtensionsRegistry()
+
+  const platform = useAppSelector((s) => s.connection?.platform ?? null)
+  const availableClis = useAppSelector((s) => s.connection?.availableClis ?? EMPTY_AVAILABLE_CLIS)
+  const featureFlags = useAppSelector((s) => s.connection?.featureFlags ?? EMPTY_FEATURE_FLAGS)
+  const enabledProviders = useAppSelector((s) => s.settings?.settings?.codingCli?.enabledProviders ?? EMPTY_ENABLED_PROVIDERS)
+  const disabledExtensions = useAppSelector((s) => s.settings?.settings?.extensions?.disabled ?? EMPTY_ENABLED_PROVIDERS)
+  const freshClientsEnabled = useAppSelector((s) => (
+    s.settings?.settings?.freshAgent?.enabled ?? false
+  ))
+  const extensionEntries = useAppSelector((s) => s.extensions?.entries ?? EMPTY_EXTENSION_ENTRIES)
+
+  const options = useMemo(() => {
+    // CLI options: derived from extension entries, show if both available and enabled
+    const cliConfigs = getCliProviderConfigs(extensionEntries)
+    const cliOptions = cliConfigs
+      .filter((config) => availableClis[config.name] && enabledProviders.includes(config.name) && !disabledExtensions.includes(config.name))
+      .map((config) => cliConfigToOption(config, extensionEntries.find(e => e.name === config.name)))
+
+    // Shell options depend on platform
+    const shellOptions = isWindowsLike(platform) ? windowsShellOptions : [shellOption]
+
+    // Fresh-agent provider options: only show if underlying CLI is available, enabled, and not hidden by feature flag
+    const visibleFreshAgentConfigs = freshClientsEnabled ? getVisibleFreshAgentConfigs(featureFlags) : []
+    const freshAgentProviderOptions: PickerOption[] = visibleFreshAgentConfigs
+      .filter((config) => !isFreshAgentSessionDisabled(config.name, disabledExtensions))
+      .filter((config) => availableClis[config.codingCliProvider] && enabledProviders.includes(config.codingCliProvider) && !disabledExtensions.includes(config.codingCliProvider))
+      .map((config) => ({
+        type: config.name as PanePickerType,
+        label: config.label,
+        icon: config.icon,
+        shortcut: config.pickerShortcut,
+        afterCli: config.pickerAfterCli,
+      }))
+    const otherFreshAgentOptions: PickerOption[] = freshClientsEnabled
+      ? FRESH_AGENT_REGISTRY
+          .filter((entry) => !visibleFreshAgentConfigs.some((config) => config.name === entry.sessionType))
+          .filter((entry) => !entry.disabled)
+          .filter((entry) => !isFreshAgentSessionDisabled(entry.sessionType, disabledExtensions))
+          .filter((entry) => !entry.hidden || featureFlags[entry.featureFlag ?? entry.sessionType] === true)
+          .filter((entry) => availableClis[entry.runtimeProvider] && enabledProviders.includes(entry.runtimeProvider) && !disabledExtensions.includes(entry.runtimeProvider))
+          .map((entry) => ({
+            type: entry.sessionType as PanePickerType,
+            label: entry.label,
+            icon: entry.icon,
+            shortcut: entry.pickerShortcut,
+            afterCli: entry.pickerAfterCli,
+          }))
+      : []
+
+    const allFreshAgentOptions = [...freshAgentProviderOptions, ...otherFreshAgentOptions]
+    const freshAgentOptionsBeforeCli = allFreshAgentOptions.filter((o) => !o.afterCli)
+    const freshAgentOptionsAfterCli = allFreshAgentOptions.filter((o) => o.afterCli)
+
+    // Extension options from the registry (exclude CLI extensions and disabled extensions)
+    const extensionOptions: PickerOption[] = extensionEntries
+      .filter((ext) => ext.category !== 'cli' && !disabledExtensions.includes(ext.name))
+      .map((ext) => ({
+        type: `ext:${ext.name}` as PanePickerType,
+        label: ext.label,
+        icon: LayoutGrid,
+        shortcut: ext.picker?.shortcut ?? '',
+      }))
+
+    // Host Stats: gated on the server-advertised capability flag (which is
+    // false on win32) plus a direct platform clause; inserted before the
+    // non-shell options. First-match-wins shortcut dispatch accepts an 'H'
+    // collision with an H-named extension as cosmetic.
+    const hostStatsOptions = featureFlags.hostStatsAvailable === true && platform !== 'win32'
+      ? [hostStatsOption]
+      : []
+
+    // Order: fresh-agent clients (before), CLIs, fresh-agent clients (after), Host Stats, Editor, Browser, Shell(s), Extensions
+    return [...freshAgentOptionsBeforeCli, ...cliOptions, ...freshAgentOptionsAfterCli, ...hostStatsOptions, ...nonShellOptions, ...shellOptions, ...extensionOptions]
+  }, [platform, availableClis, featureFlags, enabledProviders, disabledExtensions, freshClientsEnabled, extensionEntries])
+
+  const [focusedIndex, setFocusedIndex] = useState<number | null>(null)
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
+  const [fading, setFading] = useState(false)
+  const [gridDims, setGridDims] = useState({ width: 0, height: 0 })
+  const pendingSelection = useRef<PanePickerType | null>(null)
+  const buttonRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  const handleSelect = useCallback((type: PanePickerType) => {
+    if (fading) return
+    pendingSelection.current = type
+    setFading(true)
+  }, [fading])
+
+  const handleTransitionEnd = useCallback(() => {
+    if (pendingSelection.current) {
+      onSelect(pendingSelection.current)
+    }
+  }, [onSelect])
+
+  // Scoped keyboard shortcuts — only fires when this picker container has focus
+  const handleContainerKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const key = e.key.toLowerCase()
+
+    // Single-key shortcuts
+    const option = options.find((o) => o.shortcut.toLowerCase() === key)
+    if (option) {
+      e.preventDefault()
+      e.stopPropagation()
+      handleSelect(option.type)
+      return
+    }
+
+    // Escape to cancel (only if not only pane)
+    if (e.key === 'Escape' && !isOnlyPane) {
+      e.preventDefault()
+      e.stopPropagation()
+      onCancel()
+    }
+  }, [handleSelect, onCancel, isOnlyPane, options])
+
+  const handleArrowNav = useCallback((e: React.KeyboardEvent, currentIndex: number) => {
+    let nextIndex: number | null = null
+
+    switch (e.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        e.preventDefault()
+        nextIndex = (currentIndex + 1) % options.length
+        break
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        e.preventDefault()
+        nextIndex = (currentIndex - 1 + options.length) % options.length
+        break
+      case 'Enter':
+      case ' ':
+        e.preventDefault()
+        handleSelect(options[currentIndex].type)
+        return
+    }
+
+    if (nextIndex !== null) {
+      setFocusedIndex(nextIndex)
+      buttonRefs.current[nextIndex]?.focus()
+    }
+  }, [handleSelect, options])
+
+  // Auto-focus the container when the picker owns focus, so keyboard shortcuts
+  // work immediately; background-mounted pickers must not steal DOM focus.
+  // Eligible mounts are ownership-gated (agent-driven remounts must not yank
+  // focus from app chrome); eligibility flips bypass the gate.
+  const mayFocusNow = usePaneFocusAdoption(paneId, focusEligible, focusEpoch)
+  useEffect(() => {
+    if (focusEligible && mayFocusNow()) containerRef.current?.focus()
+  }, [focusEligible, mayFocusNow])
+
+  // Measure the container once and track its size with a ResizeObserver so the
+  // adaptive grid re-layouts as the pane resizes.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const measure = () => {
+      setGridDims({ width: el.clientWidth, height: el.clientHeight })
+    }
+    measure()
+    let observer: ResizeObserver | null = null
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(measure)
+      observer.observe(el)
+    }
+    return () => {
+      observer?.disconnect()
+    }
+  }, [])
+
+  const showHint = (index: number) => focusedIndex === index || hoveredIndex === index
+
+  const layout = useMemo(
+    () => computePanePickerLayout(options.length, gridDims.width, gridDims.height),
+    [options.length, gridDims.width, gridDims.height],
+  )
+
+  // Slice options into rows by the computed layout, preserving the global
+  // flattened index for each option (rowStart + offset).
+  const optionRows = useMemo(() => {
+    const rows: { options: PickerOption[]; start: number }[] = []
+    let rowStart = 0
+    for (const size of layout.rowSizes) {
+      rows.push({ options: options.slice(rowStart, rowStart + size), start: rowStart })
+      rowStart += size
+    }
+    return rows
+  }, [options, layout])
+
+  return (
+    <div
+      ref={containerRef}
+      role="toolbar"
+      aria-label="Pane type picker"
+      tabIndex={0}
+      className={cn(
+        'pane-picker h-full w-full flex items-center justify-center',
+        'transition-opacity duration-150 ease-out',
+        'focus:outline-none',
+        fading && 'opacity-0'
+      )}
+      style={{ '--cols': layout.maxCols, '--rows': layout.rowSizes.length } as React.CSSProperties}
+      data-context={ContextIds.PanePicker}
+      data-tab-id={tabId}
+      data-pane-id={paneId}
+      onTransitionEnd={handleTransitionEnd}
+      onKeyDown={handleContainerKeyDown}
+    >
+      <div
+        className="pane-picker-options"
+        data-testid="pane-picker-options"
+      >
+        {optionRows.map((row, rowIndex) => (
+          <div
+            key={`row-${rowIndex}`}
+            className="pane-picker-option-row"
+            data-testid="pane-picker-option-row"
+          >
+            {row.options.map((option, offset) => {
+              const index = row.start + offset
+              return (
+                <button
+                  key={option.type}
+                  ref={(el) => { buttonRefs.current[index] = el }}
+                  aria-label={option.label}
+                  onClick={() => handleSelect(option.type)}
+                  onKeyDown={(e) => handleArrowNav(e, index)}
+                  onFocus={() => setFocusedIndex(index)}
+                  onBlur={() => setFocusedIndex(null)}
+                  onMouseEnter={() => setHoveredIndex(index)}
+                  onMouseLeave={() => setHoveredIndex(null)}
+                  className={cn(
+                    'pane-picker-tile flex flex-col items-center justify-center rounded-lg',
+                    'transition-all duration-150',
+                    'hover:opacity-100 focus:opacity-100 focus:outline-none',
+                    'opacity-50 hover:scale-105'
+                  )}
+                >
+                  {option.providerName ? (
+                    <ProviderIcon provider={option.providerName} />
+                  ) : option.icon ? (
+                    <option.icon />
+                  ) : null}
+                  <span className="pane-picker-tile-label font-medium">{option.label}</span>
+                  <span className={cn(
+                    'shortcut-hint pane-picker-tile-hint transition-opacity duration-150',
+                    showHint(index) ? 'opacity-40' : 'opacity-0'
+                  )}>
+                    {option.shortcut}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}

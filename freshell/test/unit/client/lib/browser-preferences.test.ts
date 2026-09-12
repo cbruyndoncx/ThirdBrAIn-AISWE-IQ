@@ -1,0 +1,135 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import {
+  BROWSER_PREFERENCES_STORAGE_KEY,
+  getSearchRangeDaysPreference,
+  loadBrowserPreferencesRecord,
+  patchBrowserPreferencesRecord,
+  seedBrowserPreferencesSettingsIfEmpty,
+} from '@/lib/browser-preferences'
+
+describe('browser preferences', () => {
+  beforeEach(() => {
+    localStorage.clear()
+  })
+
+  it('loads a sparse record from one versioned browser-preferences blob', () => {
+    localStorage.setItem(BROWSER_PREFERENCES_STORAGE_KEY, JSON.stringify({
+      settings: {
+        theme: 'dark',
+        terminal: {
+          fontSize: 18,
+        },
+      },
+      tabs: {
+        closedTabRetentionDays: 30,
+      },
+    }))
+
+    expect(loadBrowserPreferencesRecord()).toEqual({
+      settings: {
+        theme: 'dark',
+        terminal: {
+          fontSize: 18,
+        },
+      },
+      tabs: {
+        closedTabRetentionDays: 30,
+      },
+    })
+  })
+
+  it('migrates legacy font key into the new blob once', () => {
+    localStorage.setItem('freshell.terminal.fontFamily.v1', 'Fira Code')
+
+    expect(loadBrowserPreferencesRecord()).toEqual({
+      settings: {
+        terminal: {
+          fontFamily: 'Fira Code',
+        },
+      },
+    })
+    expect(localStorage.getItem('freshell.terminal.fontFamily.v1')).toBeNull()
+    expect(localStorage.getItem(BROWSER_PREFERENCES_STORAGE_KEY)).toBe(JSON.stringify({
+      settings: {
+        terminal: {
+          fontFamily: 'Fira Code',
+        },
+      },
+    }))
+  })
+
+  it('keeps legacy keys when migrating into the new blob fails to save', () => {
+    localStorage.setItem('freshell.terminal.fontFamily.v1', 'Fira Code')
+
+    const originalSetItem = Storage.prototype.setItem
+    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (key: string, value: string) {
+      if (key === BROWSER_PREFERENCES_STORAGE_KEY) {
+        throw new Error('quota exceeded')
+      }
+      return originalSetItem.call(this, key, value)
+    })
+
+    expect(loadBrowserPreferencesRecord()).toEqual({
+      settings: {
+        terminal: {
+          fontFamily: 'Fira Code',
+        },
+      },
+    })
+    expect(localStorage.getItem('freshell.terminal.fontFamily.v1')).toBe('Fira Code')
+    expect(localStorage.getItem(BROWSER_PREFERENCES_STORAGE_KEY)).toBeNull()
+
+    setItemSpy.mockRestore()
+  })
+
+  it('does not apply a legacy seed when the browser already has local settings', () => {
+    localStorage.setItem('freshell.terminal.fontFamily.v1', 'Fira Code')
+    expect(loadBrowserPreferencesRecord()).toEqual({
+      settings: {
+        terminal: {
+          fontFamily: 'Fira Code',
+        },
+      },
+    })
+
+    expect(seedBrowserPreferencesSettingsIfEmpty({
+      theme: 'light',
+      terminal: {
+        fontFamily: 'JetBrains Mono',
+      },
+      sidebar: {
+        showSubagents: true,
+      },
+    })).toEqual({
+      settings: {
+        terminal: {
+          fontFamily: 'Fira Code',
+        },
+      },
+      legacyLocalSettingsSeedApplied: true,
+    })
+  })
+
+  it('does not reapply a legacy seed after it has already been consumed', () => {
+    localStorage.setItem(BROWSER_PREFERENCES_STORAGE_KEY, JSON.stringify({
+      legacyLocalSettingsSeedApplied: true,
+    }))
+
+    expect(seedBrowserPreferencesSettingsIfEmpty({
+      theme: 'light',
+    })).toEqual({
+      legacyLocalSettingsSeedApplied: true,
+    })
+  })
+
+  it('clamps legacy search-range preferences to the new retention limit', () => {
+    patchBrowserPreferencesRecord({
+      tabs: {
+        searchRangeDays: 365,
+      },
+    })
+
+    expect(getSearchRangeDaysPreference()).toBe(30)
+  })
+})

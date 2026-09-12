@@ -1,0 +1,2360 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, cleanup, waitFor, act } from '@testing-library/react'
+import { Provider } from 'react-redux'
+import { configureStore } from '@reduxjs/toolkit'
+import App from '@/App'
+import settingsReducer, { defaultSettings } from '@/store/settingsSlice'
+import tabsReducer from '@/store/tabsSlice'
+import connectionReducer from '@/store/connectionSlice'
+import sessionsReducer from '@/store/sessionsSlice'
+import panesReducer from '@/store/panesSlice'
+import tabRegistryReducer from '@/store/tabRegistrySlice'
+import terminalMetaReducer from '@/store/terminalMetaSlice'
+import extensionsReducer from '@/store/extensionsSlice'
+import turnCompletionReducer from '@/store/turnCompletionSlice'
+import { networkReducer } from '@/store/networkSlice'
+import codexActivityReducer, { type CodexActivityState } from '@/store/codexActivitySlice'
+import opencodeActivityReducer, { type OpencodeActivityState } from '@/store/opencodeActivitySlice'
+import { makeSelectSortedSessionItems } from '@/store/selectors/sidebarSelectors'
+import {
+  composeResolvedSettings,
+  createDefaultServerSettings,
+  mergeServerSettings,
+  resolveLocalSettings,
+  type LocalSettingsPatch,
+  type ServerSettings,
+  type ServerSettingsPatch,
+} from '@shared/settings'
+
+// Mock heavy child components to avoid xterm/canvas issues
+vi.mock('@/components/TabContent', () => ({
+  default: () => <div data-testid="mock-tab-content">Tab Content</div>,
+}))
+vi.mock('@/components/Sidebar', () => ({
+  default: () => <div data-testid="mock-sidebar">Sidebar</div>,
+  AppView: {} as any,
+}))
+vi.mock('@/components/HistoryView', () => ({
+  default: () => <div data-testid="mock-history-view">History View</div>,
+}))
+vi.mock('@/components/SettingsView', () => ({
+  default: () => <div data-testid="mock-settings-view">Settings View</div>,
+}))
+vi.mock('@/components/OverviewView', () => ({
+  default: () => <div data-testid="mock-overview-view">Overview View</div>,
+}))
+vi.mock('@/hooks/useTheme', () => ({
+  useThemeEffect: () => {},
+}))
+vi.mock('@/components/SetupWizard', () => ({
+  SetupWizard: () => <div data-testid="mock-setup-wizard">Setup Wizard</div>,
+}))
+
+const defaultServerSettings = createDefaultServerSettings({
+  loggingDebug: defaultSettings.logging.debug,
+})
+
+function stubAudio(): void {
+  vi.stubGlobal('Audio', vi.fn(() => ({
+    preload: '',
+    volume: 1,
+    pause: vi.fn(),
+    play: vi.fn().mockResolvedValue(undefined),
+    currentTime: 0,
+    src: '',
+  }) as unknown as HTMLAudioElement))
+}
+
+function createSettingsState(options: {
+  server?: ServerSettingsPatch
+  local?: LocalSettingsPatch
+  loaded?: boolean
+} = {}) {
+  const serverSettings = mergeServerSettings(defaultServerSettings, options.server ?? {})
+  const localSettings = resolveLocalSettings(options.local)
+
+  return {
+    serverSettings,
+    localSettings,
+    settings: composeResolvedSettings(serverSettings, localSettings),
+    loaded: options.loaded ?? true,
+    lastSavedAt: undefined,
+  }
+}
+
+const wsMocks = vi.hoisted(() => ({
+  send: vi.fn(),
+  connect: vi.fn(),
+  onMessage: vi.fn(),
+  // Interest is transient and negotiated; this suite does not exercise it.
+  sendTerminalInterest: vi.fn(() => false),
+  onReconnect: vi.fn().mockReturnValue(() => {}),
+  onDisconnect: vi.fn().mockReturnValue(() => {}),
+  setHelloExtensionProvider: vi.fn(),
+  poke: vi.fn(),
+  isReady: false,
+  serverInstanceId: undefined as string | undefined,
+}))
+
+const terminalRestoreMocks = vi.hoisted(() => ({
+  addTerminalRestoreRequestId: vi.fn(),
+  addTerminalFreshRecoveryRequestId: vi.fn(),
+  setPaneReconcileActive: vi.fn(),
+  // Batch-6 arm/consume pair (restore offer live-reattach): a full-module
+  // mock must carry every export TerminalView imports, or the create path
+  // throws inside the mock and vitest reports an unhandled rejection.
+  armRecoveredLiveTerminalTarget: vi.fn(),
+  consumeRecoveredLiveTerminalTarget: vi.fn(() => undefined),
+}))
+
+vi.mock('@/lib/terminal-restore', () => ({
+  addTerminalRestoreRequestId: terminalRestoreMocks.addTerminalRestoreRequestId,
+  addTerminalFreshRecoveryRequestId: terminalRestoreMocks.addTerminalFreshRecoveryRequestId,
+  setPaneReconcileActive: terminalRestoreMocks.setPaneReconcileActive,
+  armRecoveredLiveTerminalTarget: terminalRestoreMocks.armRecoveredLiveTerminalTarget,
+  consumeRecoveredLiveTerminalTarget: terminalRestoreMocks.consumeRecoveredLiveTerminalTarget,
+}))
+
+let messageHandler: ((msg: any) => void) | null = null
+let disconnectHandler: (() => void) | null = null
+
+vi.mock('@/lib/ws-client', () => ({
+  getWsClient: () => ({
+    send: wsMocks.send,
+    connect: wsMocks.connect,
+    sendTerminalInterest: wsMocks.sendTerminalInterest,
+    onMessage: wsMocks.onMessage,
+    onReconnect: wsMocks.onReconnect,
+    onDisconnect: wsMocks.onDisconnect,
+    setHelloExtensionProvider: wsMocks.setHelloExtensionProvider,
+    poke: wsMocks.poke,
+    cancelCreate: vi.fn(),
+    setReconcilePendingCreates: vi.fn(),
+    clearReconcileCreateHold: vi.fn(),
+    get isReady() {
+      return wsMocks.isReady
+    },
+    get serverInstanceId() {
+      return wsMocks.serverInstanceId
+    },
+  }),
+}))
+
+const apiGet = vi.hoisted(() => vi.fn())
+const fetchSidebarSessionsSnapshot = vi.hoisted(() => vi.fn())
+const getTerminalDirectoryPage = vi.hoisted(() => vi.fn())
+const searchTerminalView = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/api', () => ({
+  getRecoveryInventory: async () => ({ recoverable: false, contentId: 'test', device: null, otherDevices: [], ledgerOnly: [] }),
+  api: {
+    get: (url: string) => apiGet(url),
+    patch: vi.fn().mockResolvedValue({}),
+    post: vi.fn().mockResolvedValue({}),
+  },
+  fetchSidebarSessionsSnapshot: (options?: unknown) => fetchSidebarSessionsSnapshot(options),
+  getTerminalDirectoryPage: (options?: unknown, init?: unknown) => getTerminalDirectoryPage(options, init),
+  searchTerminalView: (terminalId: string, query: string, options?: unknown) => searchTerminalView(terminalId, query, options),
+  isApiUnauthorizedError: (err: any) => !!err && typeof err === 'object' && err.status === 401,
+  isTransientRequestFailure: (err: any) =>
+    !!err && (err.name === 'NetworkError' || err.name === 'AbortError' || [502, 503, 504].includes(err.status)),
+}))
+
+function createStore(options?: {
+  settings?: {
+    server?: ServerSettingsPatch
+    local?: LocalSettingsPatch
+    loaded?: boolean
+  }
+  tabs?: Array<Record<string, unknown>>
+  activeTabId?: string | null
+  panes?: {
+    layouts: Record<string, unknown>
+    activePane: Record<string, string>
+    paneTitles?: Record<string, Record<string, string>>
+    paneTitleSetByUser?: Record<string, Record<string, boolean>>
+    renameRequestTabId?: string | null
+    renameRequestPaneId?: string | null
+    zoomedPane?: Record<string, string>
+  }
+  codexActivity?: Partial<CodexActivityState>
+  opencodeActivity?: Partial<OpencodeActivityState>
+  sessions?: Record<string, unknown>
+}) {
+  const defaultCodexActivity: CodexActivityState = {
+    byTerminalId: {},
+    lastSnapshotSeq: 0,
+    liveMutationSeqByTerminalId: {},
+    removedMutationSeqByTerminalId: {},
+  }
+  const defaultOpencodeActivity: OpencodeActivityState = {
+    byTerminalId: {},
+    lastSnapshotSeq: 0,
+    liveMutationSeqByTerminalId: {},
+    removedMutationSeqByTerminalId: {},
+  }
+  const tabs = options?.tabs ?? [{ id: 'tab-1', mode: 'shell' }]
+  const panes = {
+    layouts: options?.panes?.layouts ?? {},
+    activePane: options?.panes?.activePane ?? {},
+    paneTitles: options?.panes?.paneTitles ?? {},
+    paneTitleSetByUser: options?.panes?.paneTitleSetByUser ?? {},
+    renameRequestTabId: options?.panes?.renameRequestTabId ?? null,
+    renameRequestPaneId: options?.panes?.renameRequestPaneId ?? null,
+    zoomedPane: options?.panes?.zoomedPane ?? {},
+  }
+  return configureStore({
+    reducer: {
+      settings: settingsReducer,
+      tabs: tabsReducer,
+      connection: connectionReducer,
+      sessions: sessionsReducer,
+      panes: panesReducer,
+      network: networkReducer,
+      codexActivity: codexActivityReducer,
+      opencodeActivity: opencodeActivityReducer,
+      tabRegistry: tabRegistryReducer,
+      terminalMeta: terminalMetaReducer,
+      extensions: extensionsReducer,
+      turnCompletion: turnCompletionReducer,
+    },
+    middleware: (getDefault) =>
+      getDefault({
+        serializableCheck: { ignoredPaths: ['sessions.expandedProjects'] },
+      }),
+    preloadedState: {
+      settings: createSettingsState(options?.settings),
+      tabs: { tabs, activeTabId: options?.activeTabId ?? ((tabs[0]?.id as string | undefined) ?? null) },
+      connection: {
+        status: 'disconnected' as const,
+        lastError: undefined,
+        platform: null,
+        availableClis: {},
+      },
+      sessions: {
+        projects: [],
+        expandedProjects: new Set<string>(),
+        wsSnapshotReceived: false,
+        isLoading: false,
+        error: null,
+        windows: {},
+        ...options?.sessions,
+      },
+      panes,
+      network: { status: null, loading: false, configuring: false, error: null },
+      codexActivity: {
+        ...defaultCodexActivity,
+        ...(options?.codexActivity ?? {}),
+      },
+      opencodeActivity: {
+        ...defaultOpencodeActivity,
+        ...(options?.opencodeActivity ?? {}),
+      },
+      tabRegistry: {
+        deviceId: 'device-test',
+        deviceLabel: 'device-test',
+        deviceAliases: {},
+        localOpen: [],
+        remoteOpen: [],
+        closed: [],
+        localClosed: {},
+        searchRangeDays: 30,
+        loading: false,
+      },
+      terminalMeta: { byTerminalId: {} },
+      extensions: { entries: [] },
+      turnCompletion: {
+        seq: 0,
+        lastAtByTerminalId: {},
+        lastIdleAtByTerminalId: {},
+        pendingEvents: [],
+        attentionByTab: {},
+        attentionByPane: {},
+      },
+    },
+  })
+}
+
+describe('App WS bootstrap recovery', () => {
+  beforeEach(() => {
+    cleanup()
+    vi.resetAllMocks()
+    stubAudio()
+    wsMocks.onReconnect.mockReturnValue(() => {})
+    wsMocks.onDisconnect.mockImplementation((cb: () => void) => {
+      disconnectHandler = cb
+      return () => { disconnectHandler = null }
+    })
+    wsMocks.isReady = false
+    wsMocks.serverInstanceId = undefined
+    terminalRestoreMocks.addTerminalRestoreRequestId.mockClear()
+    terminalRestoreMocks.addTerminalFreshRecoveryRequestId.mockClear()
+    messageHandler = null
+    disconnectHandler = null
+
+    wsMocks.onMessage.mockImplementation((cb: (msg: any) => void) => {
+      messageHandler = cb
+      return () => { messageHandler = null }
+    })
+
+    fetchSidebarSessionsSnapshot.mockReset()
+    fetchSidebarSessionsSnapshot.mockResolvedValue([])
+    getTerminalDirectoryPage.mockReset()
+    getTerminalDirectoryPage.mockResolvedValue({ items: [], revision: 1, nextCursor: null })
+    searchTerminalView.mockReset()
+    searchTerminalView.mockResolvedValue({ matches: [] })
+
+    // Keep API calls fast and deterministic.
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/bootstrap') {
+        return Promise.resolve({
+          settings: defaultServerSettings,
+          platform: { platform: 'linux' },
+          shell: { authenticated: true, ready: true },
+        })
+      }
+      if (url === '/api/settings') return Promise.resolve(defaultSettings)
+      if (url === '/api/platform') return Promise.resolve({ platform: 'linux' })
+      return Promise.resolve({})
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it('marks connection as auth-required and skips websocket connect when the bootstrap request returns 401', async () => {
+    const store = createStore({
+      codexActivity: {
+        byTerminalId: {
+          'term-stale': {
+            terminalId: 'term-stale',
+            sessionId: 'session-stale',
+            phase: 'busy',
+            lastActivityAt: 10,
+          },
+        },
+        lastSnapshotSeq: 3,
+        liveMutationSeqByTerminalId: { 'term-stale': 3 },
+      },
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/bootstrap') {
+        return Promise.reject({ status: 401, message: 'Unauthorized' })
+      }
+      return Promise.resolve({})
+    })
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('disconnected')
+      expect(store.getState().connection.lastError).toBe('Authentication failed')
+      expect(store.getState().codexActivity.byTerminalId).toEqual({})
+    })
+
+    expect(wsMocks.connect).not.toHaveBeenCalled()
+  })
+
+  it('owns websocket startup by connecting after a successful bootstrap when no socket is preconnected', async () => {
+    const store = createStore()
+    wsMocks.connect.mockResolvedValueOnce(undefined)
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(wsMocks.connect).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('pokes the websocket from a foreground visibilitychange listener', async () => {
+    const store = createStore()
+    wsMocks.connect.mockResolvedValueOnce(undefined)
+    // jsdom reports 'prerender'; force the visible state the listener gates on.
+    const visibilitySpy = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+
+    try {
+      render(
+        <Provider store={store}>
+          <App />
+        </Provider>
+      )
+
+      await waitFor(() => {
+        expect(wsMocks.connect).toHaveBeenCalledTimes(1)
+      })
+
+      act(() => {
+        document.dispatchEvent(new Event('visibilitychange'))
+      })
+
+      expect(wsMocks.poke).toHaveBeenCalled()
+    } finally {
+      visibilitySpy.mockRestore()
+    }
+  })
+
+  it('loads shell-critical bootstrap through /api/bootstrap without falling back to legacy settings/platform reads', async () => {
+    const store = createStore()
+    wsMocks.connect.mockResolvedValueOnce(undefined)
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(wsMocks.connect).toHaveBeenCalledTimes(1)
+    })
+
+    expect(apiGet).toHaveBeenCalledWith('/api/bootstrap')
+    expect(apiGet).not.toHaveBeenCalledWith('/api/settings')
+    expect(apiGet).not.toHaveBeenCalledWith('/api/platform')
+  })
+
+  it('recomposes bootstrap server settings against already-loaded local browser preferences', async () => {
+    const store = createStore({
+      settings: {
+        local: {
+          theme: 'dark',
+          terminal: {
+            fontFamily: 'Fira Code',
+          },
+        },
+      },
+    })
+
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/bootstrap') {
+        return Promise.resolve({
+          settings: mergeServerSettings(defaultServerSettings, {
+            defaultCwd: '/workspace',
+            terminal: {
+              scrollback: 12000,
+            },
+          }),
+          platform: { platform: 'linux' },
+          shell: { authenticated: true, ready: true },
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().settings.serverSettings.defaultCwd).toBe('/workspace')
+      expect(store.getState().settings.settings.defaultCwd).toBe('/workspace')
+      expect(store.getState().settings.settings.terminal.scrollback).toBe(12000)
+      expect(store.getState().settings.settings.theme).toBe('dark')
+      expect(store.getState().settings.settings.terminal.fontFamily).toBe('Fira Code')
+    })
+  })
+
+  it('keeps browser-local overrides when websocket settings.updated replaces server settings', async () => {
+    const store = createStore({
+      settings: {
+        local: {
+          theme: 'dark',
+          terminal: {
+            fontFamily: 'Fira Code',
+          },
+        },
+      },
+    })
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(apiGet).toHaveBeenCalledWith('/api/bootstrap')
+    })
+
+    const nextServerSettings: ServerSettings = mergeServerSettings(defaultServerSettings, {
+      defaultCwd: '/server',
+      terminal: {
+        scrollback: 12000,
+      },
+    })
+
+    act(() => {
+      messageHandler?.({
+        type: 'settings.updated',
+        settings: nextServerSettings,
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().settings.serverSettings.defaultCwd).toBe('/server')
+    })
+
+    expect(store.getState().settings.settings.defaultCwd).toBe('/server')
+    expect(store.getState().settings.settings.terminal.scrollback).toBe(12000)
+    expect(store.getState().settings.settings.theme).toBe('dark')
+    expect(store.getState().settings.settings.terminal.fontFamily).toBe('Fira Code')
+  })
+
+  it('recovers bootstrap-owned provider availability and sidebar filters after transient pre-ready 503s', async () => {
+    const recoveredSettings = {
+      ...defaultSettings,
+      sidebar: {
+        ...defaultSettings.sidebar,
+        excludeFirstChatSubstrings: ['__AUTO__'],
+      },
+    }
+    let bootstrapCalls = 0
+    let sidebarCalls = 0
+
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/bootstrap') {
+        bootstrapCalls += 1
+        // 503 is transient, so the bootstrap loop retries once (150ms) before
+        // giving up — reject both the initial attempt and its retry so recovery
+        // still flows through the WS ready re-run this test exercises.
+        if (bootstrapCalls <= 2) {
+          return Promise.reject({ status: 503, message: 'Service Unavailable' })
+        }
+        return Promise.resolve({
+          settings: recoveredSettings,
+          platform: {
+            platform: 'linux',
+            availableClis: { claude: true, codex: true },
+            featureFlags: { kilroy: true },
+          },
+          shell: { authenticated: true, ready: true },
+        })
+      }
+      if (url === '/api/version') {
+        return Promise.resolve({
+          currentVersion: '0.6.0',
+          updateCheck: {
+            updateAvailable: false,
+            currentVersion: '0.6.0',
+          },
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    fetchSidebarSessionsSnapshot.mockImplementation(() => {
+      sidebarCalls += 1
+      if (sidebarCalls === 1) {
+        return Promise.reject({ status: 503, message: 'Service Unavailable' })
+      }
+      return Promise.resolve({
+        projects: [{
+          projectPath: '/work/app',
+          sessions: [
+            {
+              provider: 'codex',
+              sessionId: 'hidden-session',
+              projectPath: '/work/app',
+              lastActivityAt: 10,
+              title: 'Hidden Auto Session',
+              firstUserMessage: '__AUTO__ reconcile state',
+            },
+            {
+              provider: 'codex',
+              sessionId: 'visible-session',
+              projectPath: '/work/app',
+              lastActivityAt: 9,
+              title: 'Manual Session',
+              firstUserMessage: 'please fix tests',
+            },
+          ],
+        }],
+        totalSessions: 2,
+        oldestIncludedTimestamp: 9,
+        oldestIncludedSessionId: 'codex:visible-session',
+        hasMore: false,
+      })
+    })
+
+    wsMocks.connect.mockRejectedValueOnce(new Error('WebSocket error'))
+    const store = createStore()
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('disconnected')
+      expect(bootstrapCalls).toBe(2) // initial attempt + one transient-503 retry
+      expect(sidebarCalls).toBe(1)
+    })
+
+    act(() => {
+      messageHandler?.({
+        type: 'ready',
+        timestamp: new Date().toISOString(),
+        serverInstanceId: 'srv-recovered',
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().connection.serverInstanceId).toBe('srv-recovered')
+      expect(store.getState().connection.platform).toBe('linux')
+      expect(store.getState().connection.availableClis).toEqual({ claude: true, codex: true })
+      expect(store.getState().settings.settings.sidebar.excludeFirstChatSubstrings).toEqual(['__AUTO__'])
+      expect(store.getState().sessions.projects).toEqual([
+        expect.objectContaining({
+          projectPath: '/work/app',
+          sessions: expect.arrayContaining([
+            expect.objectContaining({
+              sessionId: 'hidden-session',
+              title: 'Hidden Auto Session',
+              firstUserMessage: '__AUTO__ reconcile state',
+            }),
+            expect.objectContaining({
+              sessionId: 'visible-session',
+              title: 'Manual Session',
+              firstUserMessage: 'please fix tests',
+            }),
+          ]),
+        }),
+      ])
+    })
+
+    const selectVisibleItems = makeSelectSortedSessionItems()
+    expect(selectVisibleItems(store.getState() as any, [], '').map((item) => item.title)).toEqual([
+      'Manual Session',
+    ])
+
+    expect(bootstrapCalls).toBe(3) // + the successful re-run after WS ready
+    expect(sidebarCalls).toBe(2)
+    expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'codex.activity.list' }))
+    expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'opencode.activity.list' }))
+  })
+
+  it('tears down the session and surfaces an auth failure when the sidebar window load returns 401', async () => {
+    const store = createStore()
+    // Bootstrap auth succeeds (beforeEach default apiGet), but the follow-up sidebar
+    // snapshot is unauthorized -> ensureSidebarSessionsWindow must perform the auth
+    // teardown even though fetchSessionWindow no longer throws.
+    fetchSidebarSessionsSnapshot.mockRejectedValue(Object.assign(new Error('Unauthorized'), { status: 401 }))
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      // Proves the thunk path actually ran and recorded the failure...
+      expect(store.getState().sessions.windows.sidebar?.error).toBe('Unauthorized')
+      // ...and that the 401 drove the full auth teardown.
+      expect(store.getState().connection.lastError).toBe('Authentication failed')
+      expect(store.getState().connection.status).toBe('disconnected')
+    })
+
+    // Residue-proof discriminator: the teardown makes ensureSidebarSessionsWindow
+    // return false, so bootstrap exits before the pre-connect clears and never
+    // connects the websocket. (Without the teardown, bootstrap proceeds and
+    // connect IS called — so this assertion alone keeps the test RED even if
+    // transient 'Authentication failed' residue were ever observable.)
+    expect(wsMocks.connect).not.toHaveBeenCalled()
+  })
+
+  it('repairs missing bootstrap platform capabilities from /api/platform after websocket readiness', async () => {
+    const store = createStore()
+    let platformCalls = 0
+
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/bootstrap') {
+        return Promise.resolve({
+          settings: defaultSettings,
+          platform: { platform: 'linux' },
+          shell: { authenticated: true, ready: true },
+        })
+      }
+      if (url === '/api/platform') {
+        platformCalls += 1
+        return Promise.resolve({
+          platform: 'linux',
+          availableClis: { claude: true, codex: true, opencode: true },
+          hostName: 'devbox',
+          featureFlags: { kilroy: true },
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(wsMocks.connect).toHaveBeenCalledTimes(1)
+      expect(store.getState().connection.availableClis).toEqual({})
+    })
+
+    act(() => {
+      messageHandler?.({
+        type: 'ready',
+        timestamp: new Date().toISOString(),
+        serverInstanceId: 'srv-platform-repair',
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().connection.availableClis).toEqual({
+        claude: true,
+        codex: true,
+        opencode: true,
+      })
+      expect(store.getState().connection.featureFlags).toEqual({ kilroy: true })
+    })
+
+    expect(platformCalls).toBe(1)
+    expect(apiGet).toHaveBeenCalledWith('/api/platform')
+  })
+
+  it('treats empty platform capability maps as loaded and does not refetch them on repeated ready events', async () => {
+    const store = createStore()
+    let platformCalls = 0
+
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/bootstrap') {
+        return Promise.resolve({
+          settings: defaultSettings,
+          platform: { platform: 'linux' },
+          shell: { authenticated: true, ready: true },
+        })
+      }
+      if (url === '/api/platform') {
+        platformCalls += 1
+        return Promise.resolve({
+          platform: 'linux',
+          availableClis: {},
+          featureFlags: {},
+          hostName: 'devbox',
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(wsMocks.connect).toHaveBeenCalledTimes(1)
+    })
+
+    act(() => {
+      messageHandler?.({
+        type: 'ready',
+        timestamp: new Date().toISOString(),
+        serverInstanceId: 'srv-platform-empty',
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().connection.availableClis).toEqual({})
+      expect(store.getState().connection.featureFlags).toEqual({})
+    })
+
+    act(() => {
+      messageHandler?.({
+        type: 'ready',
+        timestamp: new Date().toISOString(),
+        serverInstanceId: 'srv-platform-empty',
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().connection.serverInstanceId).toBe('srv-platform-empty')
+    })
+
+    expect(platformCalls).toBe(1)
+  })
+
+  it('refetches platform capabilities when a preconnected socket later reports a new server instance', async () => {
+    const store = createStore()
+    let platformCalls = 0
+    wsMocks.isReady = true
+    wsMocks.serverInstanceId = 'srv-preconnected-empty'
+
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/bootstrap') {
+        return Promise.resolve({
+          settings: defaultSettings,
+          platform: {
+            platform: 'linux',
+            availableClis: {},
+            featureFlags: {},
+            hostName: 'devbox-a',
+          },
+          shell: { authenticated: true, ready: true },
+        })
+      }
+      if (url === '/api/platform') {
+        platformCalls += 1
+        return Promise.resolve({
+          platform: 'linux',
+          availableClis: { claude: true, codex: true, opencode: true },
+          featureFlags: { kilroy: true },
+          hostName: 'devbox-b',
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('ready')
+      expect(store.getState().connection.serverInstanceId).toBe('srv-preconnected-empty')
+      expect(store.getState().connection.availableClis).toEqual({})
+    })
+
+    expect(platformCalls).toBe(0)
+
+    act(() => {
+      messageHandler?.({
+        type: 'ready',
+        timestamp: new Date().toISOString(),
+        serverInstanceId: 'srv-restarted',
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().connection.serverInstanceId).toBe('srv-restarted')
+      expect(store.getState().connection.availableClis).toEqual({
+        claude: true,
+        codex: true,
+        opencode: true,
+      })
+      expect(store.getState().connection.featureFlags).toEqual({ kilroy: true })
+    })
+
+    expect(platformCalls).toBe(1)
+  })
+
+  it('clears stale codex activity immediately when bootstrap attaches to an already-ready socket', async () => {
+    const store = createStore({
+      codexActivity: {
+        byTerminalId: {
+          'term-stale': {
+            terminalId: 'term-stale',
+            sessionId: 'session-stale',
+            phase: 'busy',
+            lastActivityAt: 10,
+          },
+        },
+        lastSnapshotSeq: 4,
+        liveMutationSeqByTerminalId: { 'term-stale': 4 },
+      },
+    })
+    wsMocks.isReady = true
+    wsMocks.serverInstanceId = 'srv-preconnected-stale'
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('ready')
+      expect(store.getState().connection.serverInstanceId).toBe('srv-preconnected-stale')
+      expect(store.getState().codexActivity.byTerminalId).toEqual({})
+    })
+
+    expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'codex.activity.list' }))
+    expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'opencode.activity.list' }))
+  })
+
+  it('clears stale opencode activity immediately when bootstrap attaches to an already-ready socket', async () => {
+    const store = createStore({
+      opencodeActivity: {
+        byTerminalId: {
+          'term-stale': {
+            terminalId: 'term-stale',
+            sessionId: 'session-stale',
+            phase: 'busy',
+            updatedAt: 10,
+          },
+        },
+        lastSnapshotSeq: 4,
+        liveMutationSeqByTerminalId: { 'term-stale': 4 },
+      },
+    })
+    wsMocks.isReady = true
+    wsMocks.serverInstanceId = 'srv-preconnected-opencode-stale'
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('ready')
+      expect(store.getState().connection.serverInstanceId).toBe('srv-preconnected-opencode-stale')
+      expect(store.getState().opencodeActivity.byTerminalId).toEqual({})
+    })
+
+    expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'opencode.activity.list' }))
+  })
+
+  it('registers regenerated restart request ids for durable restore and explicit fresh recovery', async () => {
+    const store = createStore({
+      tabs: [{ id: 'tab-restart', mode: 'codex', status: 'running' }],
+      panes: {
+        layouts: {
+          'tab-restart': {
+            type: 'split',
+            id: 'split-root',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              {
+                type: 'leaf',
+                id: 'pane-codex',
+                content: {
+                  kind: 'terminal',
+                  createRequestId: 'req-codex-old',
+                  status: 'running',
+                  mode: 'codex',
+                  shell: 'system',
+                  terminalId: 'term-codex-old',
+                  serverInstanceId: 'srv-old',
+                  sessionRef: {
+                    provider: 'codex',
+                    sessionId: 'codex-session-1',
+                  },
+                },
+              },
+              {
+                type: 'leaf',
+                id: 'pane-shell',
+                content: {
+                  kind: 'terminal',
+                  createRequestId: 'req-shell-old',
+                  status: 'running',
+                  mode: 'shell',
+                  shell: 'system',
+                  terminalId: 'term-shell-old',
+                  serverInstanceId: 'srv-old',
+                },
+              },
+            ],
+          },
+        },
+        activePane: { 'tab-restart': 'pane-codex' },
+      },
+    })
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(messageHandler).toBeTypeOf('function')
+    })
+
+    act(() => {
+      messageHandler?.({
+        type: 'terminal.inventory',
+        terminals: [],
+        terminalMeta: [],
+      })
+    })
+
+    await waitFor(() => {
+      const layout = store.getState().panes.layouts['tab-restart']
+      if (!layout || layout.type !== 'split') throw new Error('expected split layout')
+      const codexPane = layout.children[0]
+      const shellPane = layout.children[1]
+      if (codexPane.type !== 'leaf' || shellPane.type !== 'leaf') throw new Error('expected leaf panes')
+      const codexContent = codexPane.content
+      const shellContent = shellPane.content
+      if (codexContent.kind !== 'terminal' || shellContent.kind !== 'terminal') throw new Error('expected terminal panes')
+
+      expect(codexContent.terminalId).toBeUndefined()
+      expect(codexContent.status).toBe('creating')
+      expect(codexContent.createRequestId).not.toBe('req-codex-old')
+      expect(terminalRestoreMocks.addTerminalRestoreRequestId).toHaveBeenCalledWith(codexContent.createRequestId)
+
+      expect(shellContent.terminalId).toBeUndefined()
+      expect(shellContent.status).toBe('creating')
+      expect(shellContent.createRequestId).not.toBe('req-shell-old')
+      expect(terminalRestoreMocks.addTerminalFreshRecoveryRequestId).toHaveBeenCalledWith(
+        shellContent.createRequestId,
+        'fresh_after_restore_unavailable',
+      )
+    })
+  })
+
+  it('recovers an OpenCode sessionRef from inventory before clearing a stale live handle', async () => {
+    const store = createStore({
+      tabs: [{
+        id: 'tab-opencode-refresh',
+        mode: 'opencode',
+        status: 'running',
+        resumeSessionId: 'legacy-title-like-id',
+      }],
+      panes: {
+        layouts: {
+          'tab-opencode-refresh': {
+            type: 'leaf',
+            id: 'pane-opencode-refresh',
+            content: {
+              kind: 'terminal',
+              createRequestId: 'req-opencode-old',
+              status: 'running',
+              mode: 'opencode',
+              shell: 'system',
+              terminalId: 'term-opencode-old',
+              resumeSessionId: 'legacy-title-like-id',
+              serverInstanceId: 'srv-old',
+            },
+          },
+        },
+        activePane: { 'tab-opencode-refresh': 'pane-opencode-refresh' },
+      },
+    })
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(messageHandler).toBeTypeOf('function')
+    })
+
+    const sessionRef = {
+      provider: 'opencode',
+      sessionId: 'ses_root_inventory_refresh_restore',
+    }
+
+    act(() => {
+      messageHandler?.({
+        type: 'terminal.inventory',
+        terminals: [{
+          terminalId: 'term-opencode-old',
+          title: 'OpenCode',
+          mode: 'opencode',
+          createdAt: 1_000,
+          lastActivityAt: 1_700,
+          status: 'running',
+          sessionRef,
+        }],
+        terminalMeta: [],
+      })
+    })
+
+    await waitFor(() => {
+      const layout = store.getState().panes.layouts['tab-opencode-refresh']
+      if (!layout || layout.type !== 'leaf') throw new Error('expected leaf layout')
+      const content = layout.content
+      if (content.kind !== 'terminal') throw new Error('expected terminal pane')
+
+      expect(content.terminalId).toBe('term-opencode-old')
+      expect(content.status).toBe('running')
+      expect(content.createRequestId).toBe('req-opencode-old')
+      expect(content.sessionRef).toEqual(sessionRef)
+      expect(content.resumeSessionId).toBeUndefined()
+      expect(store.getState().tabs.tabs.find((tab) => tab.id === 'tab-opencode-refresh')?.sessionRef).toEqual(sessionRef)
+      expect(store.getState().tabs.tabs.find((tab) => tab.id === 'tab-opencode-refresh')?.resumeSessionId).toBeUndefined()
+    })
+
+    act(() => {
+      messageHandler?.({
+        type: 'terminal.inventory',
+        terminals: [],
+        terminalMeta: [],
+      })
+    })
+
+    await waitFor(() => {
+      const layout = store.getState().panes.layouts['tab-opencode-refresh']
+      if (!layout || layout.type !== 'leaf') throw new Error('expected leaf layout')
+      const content = layout.content
+      if (content.kind !== 'terminal') throw new Error('expected terminal pane')
+
+      expect(content.terminalId).toBeUndefined()
+      expect(content.status).toBe('creating')
+      expect(content.createRequestId).not.toBe('req-opencode-old')
+      expect(content.sessionRef).toEqual(sessionRef)
+      expect(content.resumeSessionId).toBeUndefined()
+      expect(store.getState().panes.restoreFallbackAttemptsByPane?.['tab-opencode-refresh']?.['pane-opencode-refresh']).toBeUndefined()
+      expect(terminalRestoreMocks.addTerminalRestoreRequestId).toHaveBeenCalledWith(content.createRequestId)
+      expect(terminalRestoreMocks.addTerminalFreshRecoveryRequestId).not.toHaveBeenCalledWith(
+        content.createRequestId,
+        'fresh_after_restore_unavailable',
+      )
+    })
+  })
+
+  it('restores an unmounted durable pane when terminals.changed removes its live terminal', async () => {
+    const sessionRef = {
+      provider: 'codex',
+      sessionId: 'codex-detached-thread-1',
+    }
+    const unrelatedSessionRef = {
+      provider: 'codex',
+      sessionId: 'codex-unrelated-thread-1',
+    }
+    const store = createStore({
+      tabs: [{
+        id: 'tab-detached-codex',
+        mode: 'codex',
+        status: 'running',
+        sessionRef,
+      }],
+      panes: {
+        layouts: {
+          'tab-detached-codex': {
+            type: 'split',
+            id: 'split-detached-codex',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              {
+                type: 'leaf',
+                id: 'pane-detached-codex',
+                content: {
+                  kind: 'terminal',
+                  createRequestId: 'req-detached-old',
+                  status: 'running',
+                  mode: 'codex',
+                  shell: 'system',
+                  terminalId: 'term-detached-dead',
+                  serverInstanceId: 'srv-old',
+                  streamId: 'stream-old',
+                  sessionRef,
+                },
+              },
+              {
+                type: 'leaf',
+                id: 'pane-unrelated-creating',
+                content: {
+                  kind: 'terminal',
+                  createRequestId: 'req-unrelated-existing',
+                  status: 'creating',
+                  mode: 'codex',
+                  shell: 'system',
+                  sessionRef: unrelatedSessionRef,
+                },
+              },
+            ],
+          },
+        },
+        activePane: { 'tab-detached-codex': 'pane-detached-codex' },
+      },
+    })
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(messageHandler).toBeTypeOf('function')
+    })
+
+    act(() => {
+      messageHandler?.({
+        type: 'terminals.changed',
+        revision: 7,
+        recoverableTerminalIds: ['term-detached-dead'],
+      })
+    })
+
+    await waitFor(() => {
+      const layout = store.getState().panes.layouts['tab-detached-codex']
+      if (!layout || layout.type !== 'split') throw new Error('expected split layout')
+      const recoveredPane = layout.children[0]
+      const unrelatedPane = layout.children[1]
+      if (recoveredPane.type !== 'leaf' || unrelatedPane.type !== 'leaf') throw new Error('expected leaf panes')
+      const recoveredContent = recoveredPane.content
+      const unrelatedContent = unrelatedPane.content
+      if (recoveredContent.kind !== 'terminal' || unrelatedContent.kind !== 'terminal') {
+        throw new Error('expected terminal panes')
+      }
+
+      expect(recoveredContent.terminalId).toBeUndefined()
+      expect(recoveredContent.serverInstanceId).toBeUndefined()
+      expect(recoveredContent.streamId).toBeUndefined()
+      expect(recoveredContent.status).toBe('creating')
+      expect(recoveredContent.createRequestId).not.toBe('req-detached-old')
+      expect(recoveredContent.sessionRef).toEqual(sessionRef)
+      expect(unrelatedContent.createRequestId).toBe('req-unrelated-existing')
+      expect(terminalRestoreMocks.addTerminalRestoreRequestId).toHaveBeenCalledWith(recoveredContent.createRequestId)
+      expect(terminalRestoreMocks.addTerminalRestoreRequestId).not.toHaveBeenCalledWith('req-unrelated-existing')
+      expect(terminalRestoreMocks.addTerminalFreshRecoveryRequestId).not.toHaveBeenCalled()
+    })
+  })
+
+  it.each(['terminal.session.associated', 'terminal.attach.ready'] as const)(
+    'persists OpenCode sessionRef from %s without TerminalView mounted',
+    async (type) => {
+      const store = createStore({
+        tabs: [{
+          id: 'tab-opencode-associated',
+          mode: 'opencode',
+          status: 'running',
+          codexDurability: {
+            schemaVersion: 1,
+            state: 'durable',
+            durableThreadId: 'stale-codex-thread',
+          },
+        }],
+        panes: {
+          layouts: {
+            'tab-opencode-associated': {
+              type: 'leaf',
+              id: 'pane-opencode-associated',
+              content: {
+                kind: 'terminal',
+                createRequestId: 'req-opencode-associated',
+                status: 'running',
+                mode: 'opencode',
+                shell: 'system',
+                terminalId: 'term-opencode-associated',
+                codexDurability: {
+                  schemaVersion: 1,
+                  state: 'durable',
+                  durableThreadId: 'stale-codex-thread',
+                },
+              },
+            },
+          },
+          activePane: { 'tab-opencode-associated': 'pane-opencode-associated' },
+        },
+      })
+
+      render(
+        <Provider store={store}>
+          <App />
+        </Provider>
+      )
+
+      await waitFor(() => {
+        expect(messageHandler).toBeTypeOf('function')
+      })
+
+      const sessionRef = {
+        provider: 'opencode',
+        sessionId: `ses_root_${type.replaceAll('.', '_')}`,
+      }
+
+      act(() => {
+        messageHandler?.(type === 'terminal.session.associated'
+          ? {
+              type,
+              terminalId: 'term-opencode-associated',
+              sessionRef,
+            }
+          : {
+              type,
+              terminalId: 'term-opencode-associated',
+              headSeq: 0,
+              replayFromSeq: 1,
+              replayToSeq: 0,
+              sessionRef,
+            })
+      })
+
+      await waitFor(() => {
+        const layout = store.getState().panes.layouts['tab-opencode-associated']
+        if (!layout || layout.type !== 'leaf') throw new Error('expected leaf layout')
+        const content = layout.content
+        if (content.kind !== 'terminal') throw new Error('expected terminal pane')
+        expect(content.sessionRef).toEqual(sessionRef)
+        expect(content.codexDurability).toBeUndefined()
+        expect(store.getState().tabs.tabs.find((tab) => tab.id === 'tab-opencode-associated')?.sessionRef).toEqual(sessionRef)
+        expect(store.getState().tabs.tabs.find((tab) => tab.id === 'tab-opencode-associated')?.codexDurability).toBeUndefined()
+      })
+    },
+  )
+
+  it('mounts with legacy ws clients that do not implement onDisconnect', async () => {
+    const store = createStore()
+    const originalOnDisconnect = wsMocks.onDisconnect
+    ;(wsMocks as { onDisconnect?: unknown }).onDisconnect = undefined
+    wsMocks.isReady = true
+    wsMocks.serverInstanceId = 'srv-legacy-ws'
+
+    try {
+      render(
+        <Provider store={store}>
+          <App />
+        </Provider>
+      )
+
+      await waitFor(() => {
+        expect(store.getState().connection.status).toBe('ready')
+        expect(store.getState().connection.serverInstanceId).toBe('srv-legacy-ws')
+      })
+    } finally {
+      wsMocks.onDisconnect = originalOnDisconnect
+    }
+  })
+
+  it('clears codex activity promptly when the websocket disconnects after readiness', async () => {
+    const store = createStore()
+    wsMocks.isReady = true
+    wsMocks.serverInstanceId = 'srv-preconnected-disconnect'
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('ready')
+    })
+
+    act(() => {
+      messageHandler?.({
+        type: 'codex.activity.updated',
+        upsert: [{
+          terminalId: 'term-live',
+          sessionId: 'session-live',
+          phase: 'busy',
+          lastActivityAt: 20,
+        }],
+        remove: [],
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().codexActivity.byTerminalId['term-live']?.phase).toBe('busy')
+    })
+
+    act(() => {
+      disconnectHandler?.()
+    })
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('disconnected')
+      expect(store.getState().codexActivity.byTerminalId).toEqual({})
+    })
+  })
+
+  it('clears opencode activity promptly when the websocket disconnects after readiness', async () => {
+    const store = createStore()
+    wsMocks.isReady = true
+    wsMocks.serverInstanceId = 'srv-preconnected-opencode-disconnect'
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('ready')
+    })
+
+    act(() => {
+      messageHandler?.({
+        type: 'opencode.activity.updated',
+        upsert: [{
+          terminalId: 'term-live',
+          sessionId: 'session-live',
+          phase: 'busy',
+          updatedAt: 20,
+        }],
+        remove: [],
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().opencodeActivity.byTerminalId['term-live']?.phase).toBe('busy')
+    })
+
+    act(() => {
+      disconnectHandler?.()
+    })
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('disconnected')
+      expect(store.getState().opencodeActivity.byTerminalId).toEqual({})
+    })
+  })
+
+  it('records the terminal.idle edge from the production WebSocket message path', async () => {
+    const store = createStore({
+      tabs: [{
+        id: 'tab-opencode',
+        createRequestId: 'req-opencode',
+        title: 'OpenCode',
+        status: 'running',
+        mode: 'opencode',
+        shell: 'system',
+        terminalId: 'term-opencode',
+        createdAt: 1,
+      }],
+      panes: {
+        layouts: {
+          'tab-opencode': {
+            type: 'leaf',
+            id: 'pane-opencode',
+            content: {
+              kind: 'terminal',
+              createRequestId: 'req-opencode',
+              status: 'running',
+              mode: 'opencode',
+              shell: 'system',
+              terminalId: 'term-opencode',
+              initialCwd: '/workspace',
+            },
+          },
+        },
+        activePane: {
+          'tab-opencode': 'pane-opencode',
+        },
+      },
+    })
+    wsMocks.isReady = true
+    wsMocks.serverInstanceId = 'srv-preconnected-opencode-turn-complete'
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('ready')
+    })
+
+    // terminal.turn.complete is informational for terminal CLI panes: no bell/shade.
+    act(() => {
+      messageHandler?.({
+        type: 'terminal.turn.complete',
+        terminalId: 'term-opencode',
+        provider: 'opencode',
+        sessionId: 'session-opencode',
+        at: 1234,
+        completionSeq: 5,
+      })
+    })
+    expect(store.getState().turnCompletion.pendingEvents).toEqual([])
+    expect(store.getState().turnCompletion.seq).toBe(0)
+
+    // The truly-idle edge is the ONLY bell/shade trigger.
+    act(() => {
+      messageHandler?.({
+        type: 'terminal.idle',
+        terminalId: 'term-opencode',
+        at: 2345,
+        reason: 'grace',
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().turnCompletion.attentionByPane['pane-opencode']).toBe(true)
+    })
+    expect(store.getState().turnCompletion.attentionByTab['tab-opencode']).toBe(true)
+    expect(store.getState().turnCompletion.lastIdleAtByTerminalId['term-opencode']).toBe(2345)
+    expect(store.getState().turnCompletion.seq).toBe(1)
+  })
+
+  it('ignores latestTurnCompletions in activity list responses (turn completions no longer ring or shade)', async () => {
+    const store = createStore({
+      tabs: [{
+        id: 'tab-opencode',
+        createRequestId: 'req-opencode',
+        title: 'OpenCode',
+        status: 'running',
+        mode: 'opencode',
+        shell: 'system',
+        terminalId: 'term-opencode',
+        createdAt: 1,
+      }],
+      panes: {
+        layouts: {
+          'tab-opencode': {
+            type: 'leaf',
+            id: 'pane-opencode',
+            content: {
+              kind: 'terminal',
+              createRequestId: 'req-opencode',
+              status: 'running',
+              mode: 'opencode',
+              shell: 'system',
+              terminalId: 'term-opencode',
+              initialCwd: '/workspace',
+            },
+          },
+        },
+        activePane: {
+          'tab-opencode': 'pane-opencode',
+        },
+      },
+    })
+    wsMocks.isReady = true
+    wsMocks.serverInstanceId = 'srv-preconnected-opencode-latest-completion'
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('ready')
+      expect(wsMocks.send.mock.calls.some(([payload]) => payload?.type === 'opencode.activity.list')).toBe(true)
+    })
+
+    const firstRequestId = wsMocks.send.mock.calls
+      .map(([payload]) => payload)
+      .filter((payload) => payload?.type === 'opencode.activity.list')
+      .at(-1)?.requestId as string
+
+    act(() => {
+      messageHandler?.({
+        type: 'opencode.activity.list.response',
+        requestId: firstRequestId,
+        terminals: [],
+        latestTurnCompletions: [{
+          terminalId: 'term-opencode',
+          at: 2_000,
+          completionSeq: 7,
+        }],
+      })
+    })
+
+    // Turn completions are informational: no bell, no shade, no pending events —
+    // the truly-idle terminal.idle edge is the only alerting trigger.
+    expect(store.getState().turnCompletion.pendingEvents).toEqual([])
+    expect(store.getState().turnCompletion.seq).toBe(0)
+    expect(store.getState().turnCompletion.attentionByPane['pane-opencode']).toBeUndefined()
+    expect(store.getState().turnCompletion.attentionByTab['tab-opencode']).toBeUndefined()
+  })
+
+  it('records the terminal.idle edge against the active tab when a terminal is duplicated', async () => {
+    const store = createStore({
+      activeTabId: 'tab-active',
+      tabs: [
+        {
+          id: 'tab-background',
+          createRequestId: 'req-background',
+          title: 'OpenCode background',
+          status: 'running',
+          mode: 'opencode',
+          shell: 'system',
+          terminalId: 'term-opencode',
+          createdAt: 1,
+        },
+        {
+          id: 'tab-active',
+          createRequestId: 'req-active',
+          title: 'OpenCode active',
+          status: 'running',
+          mode: 'opencode',
+          shell: 'system',
+          terminalId: 'term-opencode',
+          createdAt: 2,
+        },
+      ],
+      panes: {
+        layouts: {
+          'tab-background': {
+            type: 'leaf',
+            id: 'pane-background',
+            content: {
+              kind: 'terminal',
+              createRequestId: 'req-background',
+              status: 'running',
+              mode: 'opencode',
+              shell: 'system',
+              terminalId: 'term-opencode',
+              initialCwd: '/workspace',
+            },
+          },
+          'tab-active': {
+            type: 'leaf',
+            id: 'pane-active',
+            content: {
+              kind: 'terminal',
+              createRequestId: 'req-active',
+              status: 'running',
+              mode: 'opencode',
+              shell: 'system',
+              terminalId: 'term-opencode',
+              initialCwd: '/workspace',
+            },
+          },
+        },
+        activePane: {
+          'tab-background': 'pane-background',
+          'tab-active': 'pane-active',
+        },
+      },
+    })
+    wsMocks.isReady = true
+    wsMocks.serverInstanceId = 'srv-preconnected-opencode-turn-complete-duplicate'
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('ready')
+    })
+
+    act(() => {
+      messageHandler?.({
+        type: 'terminal.idle',
+        terminalId: 'term-opencode',
+        at: 5678,
+        reason: 'queue-empty',
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().turnCompletion.attentionByPane['pane-active']).toBe(true)
+    })
+    expect(store.getState().turnCompletion.attentionByTab['tab-active']).toBe(true)
+    expect(store.getState().turnCompletion.lastIdleAtByTerminalId['term-opencode']).toBe(5678)
+    expect(store.getState().turnCompletion.seq).toBe(1)
+  })
+
+  it('keeps the WS message handler registered after an initial connect failure, so a later ready can recover state', async () => {
+    const store = createStore()
+
+    wsMocks.connect.mockRejectedValueOnce(new Error('Handshake timeout'))
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('disconnected')
+      expect(store.getState().connection.lastError).toMatch(/Handshake timeout/i)
+    })
+
+    // Simulate a later successful auto-reconnect completing its handshake.
+    expect(messageHandler).toBeTypeOf('function')
+    act(() => {
+      messageHandler?.({
+        type: 'ready',
+        timestamp: new Date().toISOString(),
+        serverInstanceId: 'srv-test',
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('ready')
+      expect(store.getState().connection.lastError).toBeUndefined()
+      expect(store.getState().connection.serverInstanceId).toBe('srv-test')
+    })
+
+    expect(wsMocks.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'terminal.meta.list' }))
+    expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'codex.activity.list' }))
+    expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'opencode.activity.list' }))
+  })
+
+  it('dispatches wsCloseCode to lastErrorCode in Redux when connect rejects with close code', async () => {
+    const store = createStore()
+
+    const err = new Error('Server busy: max connections reached')
+    ;(err as any).wsCloseCode = 4003
+    wsMocks.connect.mockRejectedValueOnce(err)
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('disconnected')
+      expect(store.getState().connection.lastError).toMatch(/max connections/)
+      expect(store.getState().connection.lastErrorCode).toBe(4003)
+    })
+  })
+
+  it('clears lastErrorCode when a ready message arrives after a failed connect', async () => {
+    const store = createStore()
+
+    // First connect fails with 4003
+    const err = new Error('Server busy: max connections reached')
+    ;(err as any).wsCloseCode = 4003
+    wsMocks.connect.mockRejectedValueOnce(err)
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.lastErrorCode).toBe(4003)
+    })
+
+    // Simulate a later reconnect succeeding: the WS message handler
+    // (registered during bootstrap) receives a ready message, which
+    // dispatches setStatus('ready') — the reducer clears lastErrorCode.
+    expect(messageHandler).toBeTypeOf('function')
+    act(() => {
+      messageHandler?.({
+        type: 'ready',
+        timestamp: new Date().toISOString(),
+        serverInstanceId: 'srv-reconnect',
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('ready')
+      expect(store.getState().connection.lastErrorCode).toBeUndefined()
+      expect(store.getState().connection.lastError).toBeUndefined()
+    })
+  })
+
+  it('includes current mobile state in hello extensions', async () => {
+    const store = createStore()
+    ;(globalThis as any).setMobileForTest(true)
+    wsMocks.connect.mockResolvedValueOnce(undefined)
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(wsMocks.setHelloExtensionProvider).toHaveBeenCalled()
+    })
+
+    const provider = wsMocks.setHelloExtensionProvider.mock.calls.at(-1)?.[0] as (() => any) | undefined
+    expect(provider).toBeTypeOf('function')
+
+    const extension = provider?.()
+    expect(extension?.sessions).toBeDefined()
+    expect(extension?.client?.mobile).toBe(true)
+  })
+
+  it('loads the sidebar session window during bootstrap when no hydrated sidebar window exists', async () => {
+    const store = createStore({
+      tabs: [{ id: 'tab-older', mode: 'codex', resumeSessionId: 'older-open' }],
+      panes: {
+        layouts: {
+          'tab-older': {
+            type: 'leaf',
+            id: 'pane-older',
+            content: {
+              kind: 'terminal',
+              mode: 'codex',
+              createRequestId: 'req-older',
+              status: 'running',
+              resumeSessionId: 'older-open',
+              sessionRef: {
+                provider: 'codex',
+                sessionId: 'older-open',
+                serverInstanceId: 'srv-local',
+              },
+            },
+          },
+        },
+        activePane: {
+          'tab-older': 'pane-older',
+        },
+      },
+    })
+    fetchSidebarSessionsSnapshot.mockResolvedValueOnce({
+      projects: [{
+        projectPath: '/older',
+        sessions: [{
+          provider: 'codex',
+          sessionId: 'older-open',
+          projectPath: '/older',
+          lastActivityAt: 1,
+          title: 'Older Open Session',
+        }],
+      }],
+      totalSessions: 1,
+      oldestIncludedTimestamp: 1,
+      oldestIncludedSessionId: 'codex:older-open',
+      hasMore: false,
+    })
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(wsMocks.connect).toHaveBeenCalledTimes(1)
+    })
+
+    await waitFor(() => {
+      expect(fetchSidebarSessionsSnapshot).toHaveBeenCalledTimes(1)
+      expect(store.getState().sessions.projects).toEqual([
+        expect.objectContaining({
+          projectPath: '/older',
+          sessions: expect.arrayContaining([
+            expect.objectContaining({
+              sessionId: 'older-open',
+              title: 'Older Open Session',
+            }),
+          ]),
+        }),
+      ])
+    })
+  })
+
+  it('refreshes terminal directory and loaded session rows after terminal metadata invalidation', async () => {
+    const initialProjects = [{
+      projectPath: '/repo',
+      sessions: [{
+        provider: 'codex',
+        sessionId: 'codex-live-1',
+        projectPath: '/repo',
+        lastActivityAt: 1,
+        title: 'Live Codex',
+      }],
+    }]
+    const refreshedProjects = [{
+      projectPath: '/repo',
+      sessions: [{
+        provider: 'codex',
+        sessionId: 'codex-live-1',
+        projectPath: '/repo',
+        lastActivityAt: 2,
+        title: 'Live Codex',
+        isRunning: true,
+        runningTerminalId: 'term-1',
+      }],
+    }]
+    const store = createStore({
+      sessions: {
+        projects: initialProjects,
+        activeSurface: 'sidebar',
+        lastLoadedAt: Date.now(),
+        windows: {
+          sidebar: {
+            projects: initialProjects,
+            lastLoadedAt: Date.now(),
+            resultVersion: 1,
+          },
+        },
+      },
+    })
+    fetchSidebarSessionsSnapshot.mockResolvedValueOnce({
+      projects: refreshedProjects,
+      totalSessions: 1,
+      oldestIncludedTimestamp: 2,
+      oldestIncludedSessionId: 'codex:codex-live-1',
+      hasMore: false,
+    })
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(wsMocks.connect).toHaveBeenCalledTimes(1)
+    })
+
+    act(() => {
+      messageHandler?.({
+        type: 'terminal.meta.updated',
+        upsert: [{
+          terminalId: 'term-1',
+          provider: 'codex',
+          sessionId: 'codex-live-1',
+          updatedAt: 1_700,
+        }],
+        remove: [],
+      })
+      messageHandler?.({
+        type: 'terminals.changed',
+        revision: 2,
+      })
+    })
+
+    expect(store.getState().sessions.projects[0]?.sessions[0]).toMatchObject({
+      isRunning: true,
+      runningTerminalId: 'term-1',
+    })
+
+    await waitFor(() => {
+      expect(getTerminalDirectoryPage).toHaveBeenCalledTimes(1)
+      expect(fetchSidebarSessionsSnapshot).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('uses terminal inventory metadata to refresh terminal surfaces and mark loaded sessions running', async () => {
+    const initialProjects = [{
+      projectPath: '/repo',
+      sessions: [{
+        provider: 'codex',
+        sessionId: 'codex-inventory-1',
+        projectPath: '/repo',
+        lastActivityAt: 1,
+        title: 'Inventory Codex',
+      }],
+    }]
+    const refreshedProjects = [{
+      projectPath: '/repo',
+      sessions: [{
+        provider: 'codex',
+        sessionId: 'codex-inventory-1',
+        projectPath: '/repo',
+        lastActivityAt: 2,
+        title: 'Inventory Codex',
+        isRunning: true,
+        runningTerminalId: 'term-inventory-1',
+      }],
+    }]
+    const store = createStore({
+      sessions: {
+        projects: initialProjects,
+        activeSurface: 'sidebar',
+        lastLoadedAt: Date.now(),
+        windows: {
+          sidebar: {
+            projects: initialProjects,
+            lastLoadedAt: Date.now(),
+            resultVersion: 1,
+          },
+        },
+      },
+    })
+    fetchSidebarSessionsSnapshot.mockResolvedValueOnce({
+      projects: refreshedProjects,
+      totalSessions: 1,
+      oldestIncludedTimestamp: 2,
+      oldestIncludedSessionId: 'codex:codex-inventory-1',
+      hasMore: false,
+    })
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(messageHandler).toBeTypeOf('function')
+    })
+
+    getTerminalDirectoryPage.mockClear()
+    fetchSidebarSessionsSnapshot.mockClear()
+
+    act(() => {
+      messageHandler?.({
+        type: 'terminal.inventory',
+        terminals: [{
+          terminalId: 'term-inventory-1',
+          title: 'Codex',
+          mode: 'codex',
+          createdAt: 1_000,
+          lastActivityAt: 1_700,
+          status: 'running',
+        }],
+        terminalMeta: [{
+          terminalId: 'term-inventory-1',
+          provider: 'codex',
+          sessionId: 'codex-inventory-1',
+          updatedAt: 1_700,
+        }],
+      })
+    })
+
+    expect(store.getState().sessions.projects[0]?.sessions[0]).toMatchObject({
+      isRunning: true,
+      runningTerminalId: 'term-inventory-1',
+    })
+
+    await waitFor(() => {
+      expect(getTerminalDirectoryPage).toHaveBeenCalledTimes(1)
+      expect(fetchSidebarSessionsSnapshot).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('contains a failing queued session-window refresh from a sessions.changed broadcast instead of leaking an unhandled rejection', async () => {
+    // Regression: the sessions.changed handler dispatches queueActiveSessionWindowRefresh()
+    // fire-and-forget with no .catch(). fetchSessionWindow used to re-throw on API failure,
+    // so a transient refresh failure leaked an unhandled rejection that failed the whole
+    // test run even though every test "passed". fetchSessionWindow now resolves a result
+    // instead of rejecting, so containment is provided at the source — this test proves the
+    // fire-and-forget dispatch can never leak, with no inline .catch present.
+    const store = createStore()
+
+    // Reject every snapshot fetch. The bootstrap sidebar load fails but is contained by
+    // ensureSidebarSessionsWindow (so no window ever commits -> hasCommittedWindow stays
+    // false), and the queued refresh then exercises the failing fetchSessionWindow branch.
+    fetchSidebarSessionsSnapshot.mockRejectedValue(new Error('window snapshot unavailable'))
+
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      render(
+        <Provider store={store}>
+          <App />
+        </Provider>
+      )
+
+      await waitFor(() => {
+        expect(messageHandler).toBeTypeOf('function')
+      })
+
+      act(() => {
+        messageHandler?.({ type: 'sessions.changed', revision: 1 })
+      })
+
+      // The queued refresh actually ran and failed (proves the path is exercised, not vacuous).
+      await waitFor(() => {
+        expect(store.getState().sessions.windows.sidebar?.error).toBe('window snapshot unavailable')
+      })
+
+      // Give Node a chance to surface any unhandled rejection from the fire-and-forget dispatch.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(
+        unhandled.filter(
+          (reason) => reason instanceof Error && reason.message.includes('window snapshot unavailable'),
+        ),
+      ).toHaveLength(0)
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
+  it('ignores legacy sessions.patch messages when bootstrapping against an already-ready socket', async () => {
+    const baselineProjects = [
+      {
+        projectPath: '/p1',
+        sessions: [{ provider: 'claude', sessionId: 's1', projectPath: '/p1', lastActivityAt: 1 }],
+      },
+    ]
+    const store = createStore({
+      sessions: {
+        projects: baselineProjects,
+        lastLoadedAt: Date.now(),
+        activeSurface: 'sidebar',
+        windows: {
+          sidebar: {
+            projects: baselineProjects,
+            lastLoadedAt: Date.now(),
+          },
+        },
+      },
+    })
+    wsMocks.isReady = true
+    wsMocks.serverInstanceId = 'srv-preconnected'
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('ready')
+      expect(store.getState().connection.serverInstanceId).toBe('srv-preconnected')
+      expect(store.getState().sessions.wsSnapshotReceived).toBe(true)
+    })
+
+    expect(wsMocks.connect).not.toHaveBeenCalled()
+    expect(wsMocks.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'terminal.meta.list' }))
+    expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'codex.activity.list' }))
+    expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'opencode.activity.list' }))
+    expect(fetchSidebarSessionsSnapshot).not.toHaveBeenCalled()
+    expect(store.getState().sessions.projects.map((p: any) => p.projectPath)).toEqual(['/p1'])
+
+    act(() => {
+      messageHandler?.({
+        type: 'sessions.patch',
+        upsertProjects: [{ projectPath: '/p2', sessions: [{ provider: 'claude', sessionId: 's2', lastActivityAt: 2 }] }],
+        removeProjectPaths: [],
+      })
+    })
+
+    expect(store.getState().sessions.projects.map((p: any) => p.projectPath)).toEqual(['/p1'])
+  })
+
+  it('hydrates the sidebar session window even when bootstrapping against a pre-connected socket', async () => {
+    const olderOpenSessionId = 'older-open'
+    const store = createStore({
+      tabs: [{ id: 'tab-older', mode: 'codex', resumeSessionId: olderOpenSessionId }],
+      panes: {
+        layouts: {
+          'tab-older': {
+            type: 'leaf',
+            id: 'pane-older',
+            content: {
+              kind: 'terminal',
+              mode: 'codex',
+              createRequestId: 'req-older',
+              status: 'running',
+              resumeSessionId: olderOpenSessionId,
+              sessionRef: {
+                provider: 'codex',
+                sessionId: olderOpenSessionId,
+                serverInstanceId: 'srv-local',
+              },
+            },
+          },
+        },
+        activePane: {
+          'tab-older': 'pane-older',
+        },
+      },
+    })
+    wsMocks.isReady = true
+    wsMocks.serverInstanceId = 'srv-preconnected-fallback'
+    fetchSidebarSessionsSnapshot.mockResolvedValueOnce({
+      projects: [{
+        projectPath: '/older',
+        sessions: [{
+          provider: 'codex',
+          sessionId: olderOpenSessionId,
+          projectPath: '/older',
+          lastActivityAt: 1,
+          title: 'Older Open Session',
+        }],
+      }],
+      totalSessions: 1,
+      oldestIncludedTimestamp: 1,
+      oldestIncludedSessionId: `codex:${olderOpenSessionId}`,
+      hasMore: false,
+    })
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('ready')
+      expect(store.getState().connection.serverInstanceId).toBe('srv-preconnected-fallback')
+      expect(store.getState().sessions.projects).toEqual([
+        expect.objectContaining({
+          projectPath: '/older',
+          sessions: expect.arrayContaining([
+            expect.objectContaining({
+              sessionId: olderOpenSessionId,
+              title: 'Older Open Session',
+            }),
+          ]),
+        }),
+      ])
+    })
+
+    expect(fetchSidebarSessionsSnapshot).toHaveBeenCalledTimes(1)
+    expect(wsMocks.connect).not.toHaveBeenCalled()
+    expect(wsMocks.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'terminal.meta.list' }))
+    expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'codex.activity.list' }))
+    expect(wsMocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'opencode.activity.list' }))
+  })
+
+  it('keeps the active non-sidebar session surface during websocket recovery when the sidebar window is already loaded', async () => {
+    const historyProjects = [
+      {
+        projectPath: '/history',
+        sessions: [{ provider: 'claude', sessionId: 'history-1', projectPath: '/history', updatedAt: 10 }],
+      },
+    ]
+    const sidebarProjects = [
+      {
+        projectPath: '/sidebar',
+        sessions: [{ provider: 'codex', sessionId: 'sidebar-1', projectPath: '/sidebar', updatedAt: 20 }],
+      },
+    ]
+
+    const store = createStore({
+      sessions: {
+        projects: historyProjects,
+        activeSurface: 'history',
+        lastLoadedAt: Date.now(),
+        windows: {
+          history: {
+            projects: historyProjects,
+            lastLoadedAt: Date.now(),
+          },
+          sidebar: {
+            projects: sidebarProjects,
+            lastLoadedAt: Date.now(),
+          },
+        },
+      },
+    })
+    wsMocks.isReady = true
+    wsMocks.serverInstanceId = 'srv-preconnected-history'
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(store.getState().connection.status).toBe('ready')
+      expect(store.getState().connection.serverInstanceId).toBe('srv-preconnected-history')
+    })
+
+    expect(store.getState().sessions.activeSurface).toBe('history')
+    expect(store.getState().sessions.projects).toEqual(historyProjects)
+    expect(fetchSidebarSessionsSnapshot).not.toHaveBeenCalled()
+  })
+
+  it('ignores stale codex activity list responses that arrive after a newer snapshot', async () => {
+    const store = createStore()
+    wsMocks.isReady = true
+    wsMocks.serverInstanceId = 'srv-preconnected-race'
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    expect(messageHandler).toBeTypeOf('function')
+    act(() => {
+      messageHandler?.({
+        type: 'ready',
+        timestamp: new Date().toISOString(),
+        serverInstanceId: 'srv-preconnected-race',
+      })
+    })
+
+    await waitFor(() => {
+      const codexRequests = wsMocks.send.mock.calls
+        .map(([payload]) => payload)
+        .filter((payload) => payload?.type === 'codex.activity.list')
+      expect(codexRequests.length).toBeGreaterThanOrEqual(2)
+    })
+
+    const codexRequests = wsMocks.send.mock.calls
+      .map(([payload]) => payload)
+      .filter((payload) => payload?.type === 'codex.activity.list')
+    const olderRequestId = codexRequests[0]?.requestId as string
+    const newerRequestId = codexRequests.at(-1)?.requestId as string
+
+    act(() => {
+      messageHandler?.({
+        type: 'codex.activity.list.response',
+        requestId: newerRequestId,
+        terminals: [
+          {
+            terminalId: 'term-1',
+            sessionId: 'session-1',
+            phase: 'idle',
+            lastActivityAt: 200,
+          },
+        ],
+      })
+      messageHandler?.({
+        type: 'codex.activity.list.response',
+        requestId: olderRequestId,
+        terminals: [
+          {
+            terminalId: 'term-1',
+            sessionId: 'session-1',
+            phase: 'busy',
+            lastActivityAt: 100,
+          },
+        ],
+      })
+    })
+
+    expect(store.getState().codexActivity.byTerminalId['term-1']?.phase).toBe('idle')
+  })
+
+  it('ignores stale opencode activity list responses that arrive after a newer snapshot', async () => {
+    const store = createStore()
+    wsMocks.isReady = true
+    wsMocks.serverInstanceId = 'srv-preconnected-opencode-race'
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    expect(messageHandler).toBeTypeOf('function')
+    act(() => {
+      messageHandler?.({
+        type: 'ready',
+        timestamp: new Date().toISOString(),
+        serverInstanceId: 'srv-preconnected-opencode-race',
+      })
+    })
+
+    await waitFor(() => {
+      const requests = wsMocks.send.mock.calls
+        .map(([payload]) => payload)
+        .filter((payload) => payload?.type === 'opencode.activity.list')
+      expect(requests.length).toBeGreaterThanOrEqual(2)
+    })
+
+    const requests = wsMocks.send.mock.calls
+      .map(([payload]) => payload)
+      .filter((payload) => payload?.type === 'opencode.activity.list')
+    const olderRequestId = requests[0]?.requestId as string
+    const newerRequestId = requests.at(-1)?.requestId as string
+
+    act(() => {
+      messageHandler?.({
+        type: 'opencode.activity.list.response',
+        requestId: newerRequestId,
+        terminals: [
+          {
+            terminalId: 'term-1',
+            sessionId: 'session-1',
+            phase: 'busy',
+            updatedAt: 200,
+          },
+        ],
+      })
+      messageHandler?.({
+        type: 'opencode.activity.list.response',
+        requestId: olderRequestId,
+        terminals: [],
+      })
+    })
+
+    expect(store.getState().opencodeActivity.byTerminalId['term-1']?.phase).toBe('busy')
+  })
+})

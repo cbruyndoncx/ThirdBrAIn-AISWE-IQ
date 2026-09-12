@@ -1,0 +1,1606 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { KeyboardShortcutsDialog } from '@/components/KeyboardShortcutsDialog'
+import { useAppDispatch, useAppSelector, useAppStore } from '@/store/hooks'
+import { addTab, closeTab, reopenClosedTab, closePaneWithCleanup, replacePaneWithCleanup, reorderTabs, updateTab, setActiveTab, openSessionTab, requestTabRename } from '@/store/tabsSlice'
+import {
+  addPane,
+  initLayout,
+  requestPaneRefresh,
+  requestPaneRename,
+  requestTabRefresh,
+  resetSplit,
+  splitPane as splitPaneAction,
+  swapSplit,
+  updatePaneContent,
+  updatePaneTitleByTerminalId,
+} from '@/store/panesSlice'
+import { applySessionRenameCascade, clearSessionTitleOverride } from '@/store/titleSync'
+import { removeSessionFromProjects, setProjectExpanded } from '@/store/sessionsSlice'
+import { getWsClient } from '@/lib/ws-client'
+import { sendTerminalKillAndAwait, sendFreshAgentKillAndAwait } from '@/lib/kill-ack'
+import { api, setSessionMetadata } from '@/lib/api'
+import { refreshActiveSessionWindow } from '@/store/sessionsThunks'
+import { getAuthToken } from '@/lib/auth'
+import { buildShareUrl } from '@/lib/utils'
+import { copyText } from '@/lib/clipboard'
+import { openExternalUrl } from '@/lib/open-url'
+import { triggerHapticFeedback } from '@/lib/mobile-haptics'
+import { collectPaneEntries, collectTerminalIds, findPaneContent } from '@/lib/pane-utils'
+import { collectSessionRefsFromNode } from '@/lib/session-utils'
+import { getTabDisplayTitle } from '@/lib/tab-title'
+import { getBrowserActions, getEditorActions, getTerminalActions } from '@/lib/pane-action-registry'
+import { buildResumeCommand, type ResumeCommandProvider } from '@/lib/coding-cli-utils'
+import type { ClientExtensionEntry } from '@shared/extension-types'
+import { buildResumeContent } from '@/lib/session-type-utils'
+import { getFreshAgentProviderConfig } from '@/lib/fresh-agent-provider-utils'
+import { resolveFreshAgentType } from '@/lib/fresh-agent-registry'
+import { mergeSessionMetadataByKey } from '@/lib/session-metadata'
+import { deriveTabRecencyAt } from '@/lib/tab-recency'
+import { hasWaitingPrompt, resolvePaneActivity } from '@/lib/pane-activity'
+import {
+  resolveReopenPaneSessionTarget,
+  type ReopenPaneActivity,
+  type ReopenPaneSessionTarget,
+} from '@/lib/session-flavor-reopen'
+import { getFreshOpenCodeRouteCwd } from '@/lib/fresh-opencode-route'
+import { selectTabsRegistryGroups } from '@/store/selectors/tabsRegistrySelectors'
+import {
+  jumpToRecord as jumpToRecordAction,
+  openPaneInNewTab as openPaneInNewTabAction,
+  openRecordAsUnlinkedCopy as openRecordAsUnlinkedCopyAction,
+  type TabsRegistryGroups,
+} from '@/lib/tab-registry-open'
+import type { RegistryPaneSnapshot, RegistryTabRecord } from '@/store/tabRegistryTypes'
+import { createLogger } from '@/lib/client-logger'
+import { ConfirmModal } from '@/components/ui/confirm-modal'
+import type { AppView } from '@/components/Sidebar'
+import type { CodingCliProviderName, CodingCliSession, ProjectGroup } from '@/store/types'
+import type { FreshAgentSessionState } from '@/store/freshAgentTypes'
+import type { PaneRuntimeActivityRecord } from '@/store/paneRuntimeActivitySlice'
+import type { ContextId } from './context-menu-constants'
+import type { ContextTarget } from './context-menu-types'
+import { ContextMenu } from './ContextMenu'
+import { ContextIds } from './context-menu-constants'
+import { buildMenuItems } from './menu-defs'
+import { copyDataset, isTextInputLike, parseContextTarget } from './context-menu-utils'
+import {
+  copyFreshAgentCodeBlock,
+  copyFreshAgentToolInput,
+  copyFreshAgentToolOutput,
+  copyFreshAgentDiffNew,
+  copyFreshAgentDiffOld,
+  copyFreshAgentFilePath,
+} from './fresh-agent-copy'
+import { makeFreshAgentSessionKey } from '@shared/fresh-agent'
+import { nanoid } from 'nanoid'
+
+const CONTEXT_MENU_KEYS = ['ContextMenu']
+// How long after the menu opens we ignore scroll/resize events. Opening the
+// menu on mobile has mechanical side effects that fire native scroll/resize
+// shortly after open: focus scroll-into-view (next frame) and the on-screen
+// keyboard hiding as focus moves into the menu, whose scroll/resize burst
+// lands ~250-350ms after open on measured platforms — 500ms covers it with
+// margin. These are not user dismissal intent. Genuine user scrolls still
+// close the menu: on touch devices a real scroll begins with a pointerdown
+// outside the menu (which closes it instantly, grace or no grace); on
+// desktop, wheel scrolls close it once the grace window has passed.
+const MENU_OPEN_GRACE_MS = 500
+const EMPTY_EXTENSION_ENTRIES: ClientExtensionEntry[] = []
+const EMPTY_PANE_LAST_INPUT_AT: Record<string, number | undefined> = {}
+const EMPTY_FEATURE_FLAGS: Record<string, boolean> = {}
+const EMPTY_FRESH_AGENT_SESSIONS: Record<string, FreshAgentSessionState> = {}
+const EMPTY_CODEX_ACTIVITY_BY_ID = {}
+const EMPTY_CLAUDE_ACTIVITY_BY_ID = {}
+const EMPTY_AMPLIFIER_ACTIVITY_BY_ID = {}
+const EMPTY_OPENCODE_ACTIVITY_BY_ID = {}
+const EMPTY_PANE_RUNTIME_ACTIVITY_BY_ID: Record<string, PaneRuntimeActivityRecord> = {}
+const EMPTY_TAB_REGISTRY_GROUPS: TabsRegistryGroups = {
+  localOpen: [],
+  sameDeviceOpen: [],
+  remoteOpen: [],
+  closed: [],
+}
+
+const log = createLogger('ContextMenuProvider')
+const KNOWN_CONTEXT_IDS = new Set(Object.values(ContextIds) as ContextId[])
+
+
+type MenuState = {
+  position: { x: number; y: number }
+  target: ContextTarget
+  contextElement: HTMLElement | null
+  clickTarget: HTMLElement | null
+  dataset: Record<string, string | undefined>
+}
+
+type ConfirmState = {
+  title: string
+  body: React.ReactNode
+  confirmLabel: string
+  onConfirm: () => void
+  /** Set when a confirm attempt fails (e.g. the delete request rejected):
+   * ConfirmModal announces it via role="alert" and the dialog stays open
+   * instead of silently closing with the row intact. */
+  error?: string
+}
+
+type ContextMenuProviderProps = {
+  view: AppView
+  onViewChange: (view: AppView) => void
+  onToggleSidebar: () => void
+  sidebarCollapsed: boolean
+  children: React.ReactNode
+}
+
+function isKnownContextId(value: string | undefined): value is ContextId {
+  return !!value && KNOWN_CONTEXT_IDS.has(value as ContextId)
+}
+
+function findContextElement(start: HTMLElement | null): HTMLElement | null {
+  let node: HTMLElement | null = start
+  while (node) {
+    if (isKnownContextId(node.dataset?.context)) return node
+    node = node.parentElement
+  }
+  return null
+}
+
+/**
+ * True when the target sits inside a fresh-agent transcript turn article
+ * (sole producer: FreshAgentTranscript). Because the transcript installs a
+ * per-article contextmenu handler only for its touch action sheet, the
+ * provider's capture-phase listener uses this predicate for the remaining
+ * gesture-scoped carve-out: while a touch gesture is in flight on a turn, the
+ * sheet owns it and no provider menu may open.
+ */
+function isFreshAgentTurnTarget(el: HTMLElement | null): boolean {
+  return !!el?.closest?.('article[data-turn-role]')
+}
+
+/**
+ * A turn article carries data-longpress-owned="true" exactly when the
+ * transcript installed its own long-press handlers (coarse pointers). The
+ * provider's long-press carve-out keys on this attribute — NOT bare
+ * data-turn-role — so hybrid-input devices (fine primary pointer, e.g. iPad +
+ * trackpad: the transcript installs no long-press there) keep the provider's
+ * long-press fallback untouched.
+ */
+function isFreshAgentLongPressOwnedTarget(el: HTMLElement | null): boolean {
+  return !!el?.closest?.('article[data-turn-role][data-longpress-owned="true"]')
+}
+
+function resolveContextId(value: string | undefined): ContextId {
+  return isKnownContextId(value) ? value : ContextIds.Global
+}
+
+function sameReopenTargetIdentity(
+  a: ReopenPaneSessionTarget,
+  b: ReopenPaneSessionTarget,
+): boolean {
+  return a.tabId === b.tabId
+    && a.paneId === b.paneId
+    && a.sourceSessionType === b.sourceSessionType
+    && a.targetSessionType === b.targetSessionType
+    && a.provider === b.provider
+    && a.sessionId === b.sessionId
+}
+
+export function ContextMenuProvider({
+  view,
+  onViewChange,
+  onToggleSidebar,
+  sidebarCollapsed,
+  children,
+}: ContextMenuProviderProps) {
+  const dispatch = useAppDispatch()
+  const appStore = useAppStore()
+  const tabsState = useAppSelector((s) => s.tabs)
+  const panes = useAppSelector((s) => s.panes.layouts)
+  const paneTitles = useAppSelector((s) => s.panes.paneTitles)
+  const sessions = useAppSelector((s) => s.sessions.projects)
+  const sidebarSessions = useAppSelector((s) => s.sessions.windows?.sidebar?.projects ?? s.sessions.projects)
+  const historySessions = useAppSelector((s) => s.sessions.windows?.history?.projects ?? s.sessions.projects)
+  const expandedProjects = useAppSelector((s) => s.sessions.expandedProjects)
+  const platform = useAppSelector((s) => s.connection?.platform ?? null)
+  const localServerInstanceId = useAppSelector((s) => s.connection?.serverInstanceId)
+  const featureFlags = useAppSelector((s) => s.connection?.featureFlags ?? EMPTY_FEATURE_FLAGS)
+  const appSettings = useAppSelector((s) => s.settings.settings)
+  const extensionEntries = useAppSelector((s) => s.extensions?.entries ?? EMPTY_EXTENSION_ENTRIES)
+  const paneLastInputAt = useAppSelector((s) => s.tabRecency?.paneLastInputAt ?? EMPTY_PANE_LAST_INPUT_AT)
+  const freshAgentSessions = useAppSelector((s) => s.freshAgent?.sessions ?? EMPTY_FRESH_AGENT_SESSIONS)
+  const codexActivityByTerminalId = useAppSelector((s) => s.codexActivity?.byTerminalId ?? EMPTY_CODEX_ACTIVITY_BY_ID)
+  const claudeActivityByTerminalId = useAppSelector((s) => s.claudeActivity?.byTerminalId ?? EMPTY_CLAUDE_ACTIVITY_BY_ID)
+  const amplifierActivityByTerminalId = useAppSelector((s) => s.amplifierActivity?.byTerminalId ?? EMPTY_AMPLIFIER_ACTIVITY_BY_ID)
+  const opencodeActivityByTerminalId = useAppSelector((s) => s.opencodeActivity?.byTerminalId ?? EMPTY_OPENCODE_ACTIVITY_BY_ID)
+  const paneRuntimeActivityByPaneId = useAppSelector((s) => s.paneRuntimeActivity?.byPaneId ?? EMPTY_PANE_RUNTIME_ACTIVITY_BY_ID)
+  const tabRegistryGroups = useAppSelector((s) =>
+    s.tabRegistry ? selectTabsRegistryGroups(s) : EMPTY_TAB_REGISTRY_GROUPS
+  )
+  const registryDeviceId = useAppSelector((s) => s.tabRegistry?.deviceId ?? '')
+
+  const [menuState, setMenuState] = useState<MenuState | null>(null)
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const previousFocusRef = useRef<HTMLElement | null>(null)
+  const suppressNextFocusRestoreRef = useRef(false)
+  const menuOpenedAtRef = useRef(0)
+
+  const ws = useMemo(() => getWsClient(), [])
+
+  const closeMenu = useCallback(() => {
+    setMenuState(null)
+
+    if (suppressNextFocusRestoreRef.current) {
+      suppressNextFocusRestoreRef.current = false
+      // Some effects call closeMenu() in cleanup after the menu is already closed.
+      // Ensure we don't "restore focus" on a follow-up close and accidentally blur the rename input.
+      previousFocusRef.current = null
+      return
+    }
+
+    if (previousFocusRef.current) {
+      const el = previousFocusRef.current
+      previousFocusRef.current = null
+      window.setTimeout(() => el.focus(), 0)
+    }
+  }, [])
+
+  const openMenu = useCallback((state: MenuState) => {
+    previousFocusRef.current = document.activeElement as HTMLElement | null
+    // Kept in a ref (NOT in menuState): the view-change effect below runs
+    // closeMenu() in its cleanup whenever menuState identity changes, so
+    // writing a timestamp into state would self-dismiss the menu.
+    menuOpenedAtRef.current = Date.now()
+    setMenuState(state)
+  }, [])
+
+  const buildShareLink = useCallback(async (): Promise<string> => {
+    let lanIp: string | null = null
+    try {
+      const res = await api.get<{ ips: string[] }>('/api/lan-info')
+      if (res.ips.length > 0) lanIp = res.ips[0]
+    } catch {
+      // ignore
+    }
+
+    const token = getAuthToken() ?? null
+    return buildShareUrl({
+      currentUrl: window.location.href,
+      lanIp,
+      token,
+      isDev: import.meta.env.DEV,
+    })
+  }, [])
+
+  const copyShareLink = useCallback(async () => {
+    const url = await buildShareLink()
+    await copyText(url)
+  }, [buildShareLink])
+
+  const [shortcutsDialogOpen, setShortcutsDialogOpen] = useState(false)
+  const showKeyboardShortcuts = useCallback(() => setShortcutsDialogOpen(true), [])
+
+  const copyTabNames = useCallback(async () => {
+    const names = tabsState.tabs.map((tab) => getTabDisplayTitle(tab, panes[tab.id], paneTitles?.[tab.id], extensionEntries))
+    await copyText(names.join('\n'))
+  }, [tabsState.tabs, panes, paneTitles, extensionEntries])
+
+  const copyTabName = useCallback(async (tabId: string) => {
+    const tab = tabsState.tabs.find((t) => t.id === tabId)
+    if (!tab) return
+    const name = getTabDisplayTitle(tab, panes[tab.id], paneTitles?.[tab.id], extensionEntries)
+    await copyText(name)
+  }, [tabsState.tabs, panes, paneTitles, extensionEntries])
+
+  const newDefaultTab = useCallback(() => {
+    dispatch(addTab({ mode: 'shell' }))
+  }, [dispatch])
+
+  const newTabWithPane = useCallback((type: 'shell' | 'cmd' | 'powershell' | 'wsl' | 'browser' | 'editor') => {
+    if (type === 'browser') {
+      const id = nanoid()
+      dispatch(addTab({ id, mode: 'shell' }))
+      dispatch(initLayout({ tabId: id, content: { kind: 'browser', url: '', devToolsOpen: false } }))
+      return
+    }
+    if (type === 'editor') {
+      const id = nanoid()
+      dispatch(addTab({ id, mode: 'shell' }))
+      dispatch(initLayout({
+        tabId: id,
+        content: {
+          kind: 'editor',
+          filePath: null,
+          language: null,
+          readOnly: false,
+          content: '',
+          viewMode: 'source',
+          wordWrap: true,
+        },
+      }))
+      return
+    }
+    if (type === 'cmd' || type === 'powershell' || type === 'wsl') {
+      dispatch(addTab({ mode: 'shell', shell: type }))
+      return
+    }
+    dispatch(addTab({ mode: 'shell', shell: 'system' }))
+  }, [dispatch])
+
+  const renameTab = useCallback((tabId: string) => {
+    const tab = tabsState.tabs.find((t) => t.id === tabId)
+    if (!tab) return
+    // Avoid modal prompts (they break automation and are harder to use).
+    // Trigger the same inline rename UI used by TabBar double-click.
+    suppressNextFocusRestoreRef.current = true
+    dispatch(setActiveTab(tabId))
+    dispatch(requestTabRename(tabId))
+  }, [dispatch, tabsState.tabs])
+
+  const renamePane = useCallback((tabId: string, paneId: string) => {
+    suppressNextFocusRestoreRef.current = true
+    dispatch(requestPaneRename({ tabId, paneId }))
+  }, [dispatch])
+
+  const refreshPaneAction = useCallback((tabId: string, paneId: string) => {
+    dispatch(requestPaneRefresh({ tabId, paneId }))
+  }, [dispatch])
+
+  const refreshTabAction = useCallback((tabId: string) => {
+    dispatch(requestTabRefresh({ tabId }))
+  }, [dispatch])
+
+  const replacePaneAction = useCallback((tabId: string, paneId: string) => {
+    // Delta-r7-r3 (focused-episode-7 round 2, Finding F2): replace discards
+    // the pane's identity — a pane CLOSE in every respect that matters to
+    // the recovery ledger — so it routes through the acknowledged close gate
+    // (the pane becomes a picker only once the durable close evidence is
+    // confirmed; on failure the content stays and wears the error).
+    dispatch(replacePaneWithCleanup({ tabId, paneId }))
+  }, [dispatch])
+
+  const closeTabById = useCallback((tabId: string) => {
+    dispatch(closeTab(tabId))
+  }, [dispatch])
+
+  const reopenClosedTabAction = useCallback(() => {
+    dispatch(reopenClosedTab())
+  }, [dispatch])
+
+  const closeOtherTabs = useCallback((tabId: string) => {
+    setConfirmState({
+      title: 'Close all other tabs?',
+      body: 'This will close every other tab.',
+      confirmLabel: 'Close tabs',
+      onConfirm: () => {
+        const ids = tabsState.tabs.map((t) => t.id).filter((id) => id !== tabId)
+        ids.forEach(closeTabById)
+        setConfirmState(null)
+      },
+    })
+  }, [tabsState.tabs, closeTabById])
+
+  const closeTabsToRight = useCallback((tabId: string) => {
+    const index = tabsState.tabs.findIndex((t) => t.id === tabId)
+    if (index < 0) return
+    const ids = tabsState.tabs.slice(index + 1).map((t) => t.id)
+    ids.forEach(closeTabById)
+  }, [tabsState.tabs, closeTabById])
+
+  const moveTab = useCallback((tabId: string, dir: -1 | 1) => {
+    const index = tabsState.tabs.findIndex((t) => t.id === tabId)
+    if (index < 0) return
+    const next = index + dir
+    if (next < 0 || next >= tabsState.tabs.length) return
+    dispatch(reorderTabs({ fromIndex: index, toIndex: next }))
+  }, [dispatch, tabsState.tabs])
+
+  const getProjectCollections = useCallback((target?: ContextTarget | null): ProjectGroup[][] => {
+    const collections: ProjectGroup[][] = []
+    const pushCollection = (projects: ProjectGroup[]) => {
+      if (projects.length === 0) return
+      if (collections.some((existing) => existing === projects)) return
+      collections.push(projects)
+    }
+
+    if (target?.kind === 'history-project' || target?.kind === 'history-session') {
+      pushCollection(historySessions)
+      pushCollection(sidebarSessions)
+    } else if (target?.kind === 'sidebar-session') {
+      pushCollection(sidebarSessions)
+      pushCollection(historySessions)
+    } else {
+      pushCollection(sidebarSessions)
+      pushCollection(historySessions)
+    }
+    pushCollection(sessions)
+    return collections
+  }, [historySessions, sessions, sidebarSessions])
+
+  const getSessionInfo = useCallback((sessionId: string, provider?: string, target?: ContextTarget | null) => {
+    for (const projects of getProjectCollections(target)) {
+      for (const project of projects) {
+        const session = project.sessions.find((s) =>
+          s.sessionId === sessionId && (!provider || s.provider === provider)
+        )
+        if (session) return { session, project }
+      }
+    }
+    return null
+  }, [getProjectCollections])
+
+  const getProjectInfo = useCallback((projectPath: string, target?: ContextTarget | null) => {
+    for (const projects of getProjectCollections(target)) {
+      const project = projects.find((item) => item.projectPath === projectPath)
+      if (project) return project
+    }
+    return null
+  }, [getProjectCollections])
+
+  const persistSessionMetadataOnTab = useCallback((tabId: string, session: CodingCliSession, sessionType: string) => {
+    const provider = (session.provider || 'claude') as CodingCliProviderName
+    const tab = tabsState.tabs.find((item) => item.id === tabId)
+    const sessionMetadataByKey = mergeSessionMetadataByKey(
+      tab?.sessionMetadataByKey,
+      provider,
+      session.sessionId,
+      {
+        sessionType,
+        firstUserMessage: session.firstUserMessage,
+        isSubagent: session.isSubagent,
+        isNonInteractive: session.isNonInteractive,
+      },
+    )
+    if (tab && sessionMetadataByKey !== tab.sessionMetadataByKey) {
+      dispatch(updateTab({
+        id: tabId,
+        updates: { sessionMetadataByKey },
+      }))
+    }
+  }, [dispatch, tabsState.tabs])
+
+  const openSessionInNewTab = useCallback((sessionId: string, provider?: string) => {
+    const target = menuState?.target
+    const info = getSessionInfo(sessionId, provider, target)
+    if (!info) return
+    const { session } = info
+    const mode = (provider || session.provider || 'claude') as CodingCliProviderName
+    const sessionType = (target?.kind === 'sidebar-session' ? target.sessionType : undefined)
+      || session.sessionType || mode
+    const runningTerminalId =
+      target?.kind === 'sidebar-session' && target.sessionId === sessionId
+        ? target.runningTerminalId
+        : undefined
+    dispatch(openSessionTab({
+      sessionId: session.sessionId,
+      title: session.title || session.sessionId.slice(0, 8),
+      cwd: session.cwd,
+      provider: mode,
+      sessionType,
+      terminalId: runningTerminalId,
+      forceNew: true,
+      firstUserMessage: session.firstUserMessage,
+      isSubagent: session.isSubagent,
+      isNonInteractive: session.isNonInteractive,
+      hasTitle: !!session.title,
+    }))
+  }, [dispatch, getSessionInfo, menuState?.target])
+
+  const openSessionInThisTab = useCallback((sessionId: string, provider?: string) => {
+    const activeTabId = tabsState.activeTabId
+    if (!activeTabId) {
+      openSessionInNewTab(sessionId, provider)
+      return
+    }
+    const target = menuState?.target
+    const info = getSessionInfo(sessionId, provider, target)
+    if (!info) return
+    const { session } = info
+    const mode = (provider || session.provider || 'claude') as CodingCliProviderName
+    const sessionType = (target?.kind === 'sidebar-session' ? target.sessionType : undefined)
+      || session.sessionType || mode
+    const freshAgentType = resolveFreshAgentType(sessionType)
+    const freshAgentProviderConfig = getFreshAgentProviderConfig(sessionType)
+    const freshAgentProviderSettings = freshAgentType || freshAgentProviderConfig
+      ? appSettings.freshAgent?.providers?.[sessionType]
+      : undefined
+    dispatch(addPane({
+      tabId: activeTabId,
+      newContent: buildResumeContent({
+        sessionType,
+        sessionId: session.sessionId,
+        cwd: session.cwd,
+        freshAgentProviderSettings,
+      }),
+    }))
+    persistSessionMetadataOnTab(activeTabId, session, sessionType)
+  }, [tabsState.activeTabId, dispatch, getSessionInfo, openSessionInNewTab, menuState?.target, appSettings, persistSessionMetadataOnTab])
+
+  const renameSession = useCallback(async (sessionId: string, provider?: string, withSummary?: boolean) => {
+    const info = getSessionInfo(sessionId, provider, menuState?.target)
+    if (!info) return
+    const title = window.prompt('Rename session', info.session.title || '')
+    if (title === null) return
+    let summary: string | undefined
+    if (withSummary) {
+      const nextSummary = window.prompt('Update summary', info.session.summary || '')
+      if (nextSummary === null) return
+      summary = nextSummary || undefined
+    }
+    try {
+      const resolvedProvider = provider || info.session.provider || 'claude'
+      const compositeKey = `${resolvedProvider}:${sessionId}`
+      const result = await api.patch<{ cascadedTerminalId?: string | null }>(`/api/sessions/${encodeURIComponent(compositeKey)}`, {
+        titleOverride: title || undefined,
+        summaryOverride: summary,
+      })
+      if (title) {
+        applySessionRenameCascade({
+          dispatch,
+          provider: resolvedProvider,
+          sessionId,
+          title,
+          cascadedTerminalId: result.cascadedTerminalId,
+        })
+      }
+      await dispatch(refreshActiveSessionWindow() as any)
+    } catch {
+      // ignore
+    }
+  }, [dispatch, getSessionInfo, menuState?.target])
+
+  const generateSessionTitle = useCallback(async (sessionId: string, provider?: string) => {
+    const info = getSessionInfo(sessionId, provider, menuState?.target)
+    if (!info) return
+    const firstMessage = info.session.firstUserMessage || info.session.title || ''
+    if (!firstMessage) return
+    try {
+      const compositeKey = `${provider || info.session.provider || 'claude'}:${sessionId}`
+      await api.post(`/api/sessions/${encodeURIComponent(compositeKey)}/generate-title`, { firstMessage })
+      await dispatch(refreshActiveSessionWindow() as any)
+    } catch {
+      // ignore — AI may not be configured
+    }
+  }, [dispatch, getSessionInfo, menuState?.target])
+
+  const toggleArchiveSession = useCallback(async (sessionId: string, provider: string | undefined, next: boolean) => {
+    try {
+      const compositeKey = `${provider || 'claude'}:${sessionId}`
+      await api.patch(`/api/sessions/${encodeURIComponent(compositeKey)}`, { archived: next })
+      await dispatch(refreshActiveSessionWindow() as any)
+    } catch {
+      // ignore
+    }
+  }, [dispatch])
+
+  const deleteSession = useCallback((sessionId: string, provider?: string) => {
+    const info = getSessionInfo(sessionId, provider, menuState?.target)
+    if (!info) return
+    const messageCount = info.session.messageCount
+    const createdAt = info.session.createdAt
+    const lastActivityAt = info.session.lastActivityAt
+    const summary = info.session.summary
+
+    const formatDate = (value?: number) => {
+      if (!value) return 'unknown'
+      return new Date(value).toLocaleString()
+    }
+
+    setConfirmState({
+      title: 'Delete session?',
+      confirmLabel: 'Delete',
+      body: (
+        <div className="space-y-2">
+          {summary ? <div className="text-xs">{summary}</div> : null}
+          <div className="text-xs">Messages: {messageCount ?? 'unknown'}</div>
+          <div className="text-xs">Created: {formatDate(createdAt)}</div>
+          <div className="text-xs">Last used: {formatDate(lastActivityAt)}</div>
+        </div>
+      ),
+      onConfirm: async () => {
+        const compositeKey = `${provider || info.session.provider || 'claude'}:${sessionId}`
+        try {
+          await api.delete(`/api/sessions/${encodeURIComponent(compositeKey)}`)
+        } catch (err) {
+          // SESSION-03: a failed delete must not LOOK like a success — keep
+          // the dialog open and announce the failure instead of swallowing it.
+          const message = err instanceof Error ? err.message : 'Delete failed'
+          setConfirmState((prev) =>
+            prev ? { ...prev, error: `Failed to delete session: ${message}` } : prev,
+          )
+          return
+        }
+        setConfirmState(null)
+        // The depth-preserving silent refresh (see refreshVisibleSessionWindowSilently)
+        // no longer removes vanished sessions — propagate the delete
+        // explicitly and immediately.
+        dispatch(removeSessionFromProjects({ provider: provider || info.session.provider, sessionId }))
+        await dispatch(refreshActiveSessionWindow() as any)
+      },
+    })
+  }, [dispatch, getSessionInfo, menuState?.target])
+
+  const resetSessionTitle = useCallback((sessionId: string, provider?: string) => {
+    const info = getSessionInfo(sessionId, provider, menuState?.target)
+    if (!info) return
+    const resolvedProvider = provider || info.session.provider || 'claude'
+    setConfirmState({
+      title: 'Reset to provider title?',
+      confirmLabel: 'Reset title',
+      body: (
+        <div className="space-y-2">
+          <div className="text-xs">This removes the custom title override for this session only. A backup of the previous config is kept in config.backup.json.</div>
+          <div className="text-xs">Current title: {info.session.title || '(untitled)'}</div>
+          <div className="text-xs">Provider title: {info.session.providerTitle || '(none yet — the next generated title will show)'}</div>
+        </div>
+      ),
+      onConfirm: async () => {
+        try {
+          await clearSessionTitleOverride(resolvedProvider, sessionId)
+        } catch (err) {
+          // SESSION-03: failed reset must not LOOK like success — keep the
+          // dialog open and announce the failure.
+          const message = err instanceof Error ? err.message : 'Reset failed'
+          setConfirmState((prev) =>
+            prev ? { ...prev, error: `Failed to reset title: ${message}` } : prev,
+          )
+          return
+        }
+        setConfirmState(null)
+        await dispatch(refreshActiveSessionWindow() as any)
+      },
+    })
+  }, [dispatch, getSessionInfo, menuState?.target])
+
+  const copySessionId = useCallback(async (sessionId: string) => {
+    await copyText(sessionId)
+  }, [])
+
+  const copySessionCwd = useCallback(async (sessionId: string, provider?: string) => {
+    const info = getSessionInfo(sessionId, provider, menuState?.target)
+    if (info?.session.cwd) {
+      await copyText(info.session.cwd)
+    }
+  }, [getSessionInfo, menuState?.target])
+
+  const copySessionSummary = useCallback(async (sessionId: string, provider?: string) => {
+    const info = getSessionInfo(sessionId, provider, menuState?.target)
+    if (info?.session.summary) {
+      await copyText(info.session.summary)
+    }
+  }, [getSessionInfo, menuState?.target])
+
+  const copySessionMetadata = useCallback(async (sessionId: string, provider?: string) => {
+    const info = getSessionInfo(sessionId, provider, menuState?.target)
+    if (!info) return
+    const { session, project } = info
+    const keyProvider = (provider || session.provider || 'claude')
+    const relatedTabs = tabsState.tabs.filter((t) => {
+      const layout = panes[t.id]
+      if (!layout) return false
+      const refs = collectSessionRefsFromNode(layout)
+      return refs.some((ref) => ref.provider === keyProvider && ref.sessionId === sessionId)
+    })
+    const hasTab = relatedTabs.length > 0
+    const tabLastInputAt = relatedTabs.reduce((max, tab) => {
+      const layout = panes[tab.id]
+      return Math.max(max, deriveTabRecencyAt({
+        tab,
+        layout,
+        paneLastInputAt,
+      }))
+    }, 0)
+    const runningTerminalId =
+      menuState?.target.kind === 'sidebar-session' && menuState?.target.sessionId === sessionId
+        ? menuState?.target.runningTerminalId
+        : undefined
+    const metadata = {
+      title: session.title,
+      sessionId: session.sessionId,
+      provider: session.provider,
+      compositeKey: `${session.provider || 'claude'}:${session.sessionId}`,
+      projectPath: project.projectPath,
+      cwd: session.cwd,
+      createdAt: session.createdAt,
+      startDate: session.createdAt ? new Date(session.createdAt).toISOString() : null,
+      lastActivityAt: session.lastActivityAt,
+      endDate: session.lastActivityAt ? new Date(session.lastActivityAt).toISOString() : null,
+      messageCount: session.messageCount,
+      summary: session.summary,
+      archived: session.archived,
+      sourceFile: session.sourceFile,
+      hasTab,
+      tabLastInputAt: hasTab ? tabLastInputAt : undefined,
+      tabLastInputAtIso: hasTab ? new Date(tabLastInputAt).toISOString() : null,
+      isRunning: !!runningTerminalId,
+      runningTerminalId: runningTerminalId || null,
+      projectColor: project.color,
+    }
+    await copyText(JSON.stringify(metadata, null, 2))
+  }, [getSessionInfo, tabsState.tabs, panes, paneLastInputAt, menuState?.target])
+
+  const copyResumeCommand = useCallback(async (provider: ResumeCommandProvider, sessionId: string) => {
+    const command = buildResumeCommand(provider, sessionId, extensionEntries)
+    if (!command) return
+    await copyText(command)
+  }, [extensionEntries])
+
+  const setProjectColor = useCallback(async (projectPath: string) => {
+    const next = window.prompt('Project color (hex)', '#6b7280')
+    if (!next) return
+    try {
+      await api.put('/api/project-colors', { projectPath, color: next })
+      await dispatch(refreshActiveSessionWindow() as any)
+    } catch {
+      // ignore
+    }
+  }, [dispatch])
+
+  const toggleProjectExpandedAction = useCallback((projectPath: string, expanded: boolean) => {
+    dispatch(setProjectExpanded({ projectPath, expanded }))
+  }, [dispatch])
+
+  const openAllSessionsInProject = useCallback((projectPath: string) => {
+    setConfirmState({
+      title: 'Open all sessions?',
+      confirmLabel: 'Open tabs',
+      body: 'This will open every session in the project in its own tab.',
+      onConfirm: () => {
+        const project = getProjectInfo(projectPath, menuState?.target)
+        if (project) {
+          for (const session of project.sessions) {
+            const provider = (session.provider || 'claude') as CodingCliProviderName
+            dispatch(openSessionTab({
+              sessionId: session.sessionId,
+              title: session.title || session.sessionId.slice(0, 8),
+              cwd: session.cwd,
+              provider,
+              sessionType: session.sessionType || provider,
+              firstUserMessage: session.firstUserMessage,
+              isSubagent: session.isSubagent,
+              isNonInteractive: session.isNonInteractive,
+              forceNew: true,
+              hasTitle: !!session.title,
+            }))
+          }
+        }
+        setConfirmState(null)
+      },
+    })
+  }, [dispatch, getProjectInfo, menuState?.target])
+
+  const copyProjectPath = useCallback(async (projectPath: string) => {
+    await copyText(projectPath)
+  }, [])
+
+  const findTabByTerminalId = useCallback((terminalId: string) => {
+    for (const tab of tabsState.tabs) {
+      const layout = panes[tab.id]
+      if (layout && collectTerminalIds(layout).includes(terminalId)) {
+        return tab
+      }
+    }
+    return undefined
+  }, [tabsState.tabs, panes])
+
+  const openTerminal = useCallback((terminalId: string) => {
+    const existing = findTabByTerminalId(terminalId)
+    if (existing) {
+      dispatch(setActiveTab(existing.id))
+      return
+    }
+    const tabId = nanoid()
+    dispatch(addTab({ id: tabId, status: 'running', mode: 'shell' }))
+    dispatch(initLayout({
+      tabId,
+      content: { kind: 'terminal', mode: 'shell', terminalId, status: 'running' },
+    }))
+  }, [dispatch, findTabByTerminalId])
+
+  const renameTerminal = useCallback(async (terminalId: string) => {
+    let currentTitle = ''
+    let currentDesc = ''
+    try {
+      const terminals = await api.get<Array<{ terminalId: string; title?: string; description?: string }>>('/api/terminals')
+      const term = terminals.find((t) => t.terminalId === terminalId)
+      if (term) {
+        currentTitle = term.title || ''
+        currentDesc = term.description || ''
+      }
+    } catch {
+      // ignore
+    }
+    const title = window.prompt('Rename terminal', currentTitle)
+    if (title === null) return
+    const description = window.prompt('Update description', currentDesc)
+    if (description === null) return
+    try {
+      await api.patch(`/api/terminals/${encodeURIComponent(terminalId)}`, {
+        titleOverride: title || undefined,
+        descriptionOverride: description || undefined,
+      })
+      const existing = findTabByTerminalId(terminalId)
+      if (existing && title) {
+        dispatch(updateTab({ id: existing.id, updates: { title } }))
+      }
+      if (title) {
+        // D7: mirror into the pane title so the pane header and
+        // getTabDisplayTitle's pane-title preference both converge.
+        dispatch(updatePaneTitleByTerminalId({ terminalId, title, setByUser: true }))
+      }
+    } catch {
+      // ignore
+    }
+  }, [dispatch, findTabByTerminalId])
+
+  const generateTerminalSummary = useCallback(async (terminalId: string) => {
+    try {
+      const res = await api.post<{ description?: string }>(`/api/ai/terminals/${encodeURIComponent(terminalId)}/summary`, {})
+      if (res?.description) {
+        await api.patch(`/api/terminals/${encodeURIComponent(terminalId)}`, {
+          descriptionOverride: res.description,
+        })
+      }
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const deleteTerminal = useCallback(async (terminalId: string) => {
+    setConfirmState({
+      title: 'Delete terminal?',
+      confirmLabel: 'Delete',
+      body: 'This will remove the terminal from the overview list.',
+      onConfirm: async () => {
+        try {
+          await api.delete(`/api/terminals/${encodeURIComponent(terminalId)}`)
+        } catch {
+          // ignore
+        } finally {
+          setConfirmState(null)
+        }
+      },
+    })
+  }, [])
+
+  const copyTerminalCwd = useCallback(async (terminalId: string) => {
+    try {
+      const terminals = await api.get<Array<{ terminalId: string; cwd?: string }>>('/api/terminals')
+      const term = terminals.find((t) => t.terminalId === terminalId)
+      if (term?.cwd) await copyText(term.cwd)
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const copyMessageText = useCallback(async (contextEl: HTMLElement | null) => {
+    if (!contextEl) return
+    const text = contextEl.textContent?.trim()
+    if (text) await copyText(text)
+  }, [])
+
+  const copyMessageCode = useCallback(async (contextEl: HTMLElement | null) => {
+    if (!contextEl) return
+    const code = contextEl.querySelector('pre code')
+    if (code?.textContent) await copyText(code.textContent)
+  }, [])
+
+  const reopenActivityByPaneId = useMemo<Record<string, ReopenPaneActivity>>(() => {
+    const result: Record<string, ReopenPaneActivity> = {}
+
+    for (const tab of tabsState.tabs) {
+      const layout = panes[tab.id]
+      if (!layout) continue
+      const isOnlyPane = layout.type === 'leaf'
+
+      for (const entry of collectPaneEntries(layout)) {
+        const activity = resolvePaneActivity({
+          paneId: entry.paneId,
+          content: entry.content,
+          tabMode: tab.mode,
+          isOnlyPane,
+          codexActivityByTerminalId,
+          opencodeActivityByTerminalId,
+          claudeActivityByTerminalId,
+          amplifierActivityByTerminalId,
+          paneRuntimeActivityByPaneId,
+          freshAgentSessions,
+        })
+        let hasWaitingItems = false
+        if (entry.content.kind === 'fresh-agent' && entry.content.sessionId) {
+          const sessionKey = makeFreshAgentSessionKey({
+            sessionType: entry.content.sessionType,
+            provider: entry.content.provider,
+            sessionId: entry.content.sessionId,
+          })
+          hasWaitingItems = hasWaitingPrompt(freshAgentSessions[sessionKey])
+        }
+        result[entry.paneId] = {
+          isBusy: activity.isBusy,
+          ...(hasWaitingItems ? { hasWaitingItems } : {}),
+        }
+      }
+    }
+
+    return result
+  }, [
+    claudeActivityByTerminalId,
+    amplifierActivityByTerminalId,
+    codexActivityByTerminalId,
+    freshAgentSessions,
+    opencodeActivityByTerminalId,
+    paneRuntimeActivityByPaneId,
+    panes,
+    tabsState.tabs,
+  ])
+
+  const reopenPaneAsSessionTargetAction = useCallback(async (clickedTarget: ReopenPaneSessionTarget) => {
+    const resolveCurrent = () => {
+      const state = appStore.getState()
+      const tab = state.tabs.tabs.find((item) => item.id === clickedTarget.tabId)
+      const layout = state.panes.layouts[clickedTarget.tabId]
+      const content = layout ? findPaneContent(layout, clickedTarget.paneId) : null
+      if (!tab || !content) return null
+
+      const activity = resolvePaneActivity({
+        paneId: clickedTarget.paneId,
+        content,
+        tabMode: tab.mode,
+        isOnlyPane: layout.type === 'leaf',
+        codexActivityByTerminalId: state.codexActivity?.byTerminalId ?? EMPTY_CODEX_ACTIVITY_BY_ID,
+        opencodeActivityByTerminalId: state.opencodeActivity?.byTerminalId ?? EMPTY_OPENCODE_ACTIVITY_BY_ID,
+        claudeActivityByTerminalId: state.claudeActivity?.byTerminalId ?? EMPTY_CLAUDE_ACTIVITY_BY_ID,
+        amplifierActivityByTerminalId: state.amplifierActivity?.byTerminalId ?? EMPTY_AMPLIFIER_ACTIVITY_BY_ID,
+        paneRuntimeActivityByPaneId: state.paneRuntimeActivity?.byPaneId ?? EMPTY_PANE_RUNTIME_ACTIVITY_BY_ID,
+        freshAgentSessions: state.freshAgent?.sessions ?? EMPTY_FRESH_AGENT_SESSIONS,
+      })
+      let hasWaitingItems = false
+      if (content.kind === 'fresh-agent' && content.sessionId) {
+        const sessionKey = makeFreshAgentSessionKey({
+          sessionType: content.sessionType,
+          provider: content.provider,
+          sessionId: content.sessionId,
+        })
+        hasWaitingItems = hasWaitingPrompt((state.freshAgent?.sessions ?? EMPTY_FRESH_AGENT_SESSIONS)[sessionKey])
+      }
+
+      const target = resolveReopenPaneSessionTarget({
+        tabId: clickedTarget.tabId,
+        paneId: clickedTarget.paneId,
+        content,
+        tab,
+        activity: {
+          isBusy: activity.isBusy,
+          ...(hasWaitingItems ? { hasWaitingItems } : {}),
+        },
+      })
+
+      if (!target) return null
+      return {
+        tab,
+        content,
+        target,
+        freshAgentSessions: state.freshAgent?.sessions ?? EMPTY_FRESH_AGENT_SESSIONS,
+        providerSettings: state.settings.settings.freshAgent?.providers?.[target.targetSessionType],
+      }
+    }
+
+    const current = resolveCurrent()
+    if (
+      !current
+      || current.target.disabled
+      || !sameReopenTargetIdentity(current.target, clickedTarget)
+    ) {
+      return
+    }
+
+    try {
+      await setSessionMetadata(
+        current.target.provider,
+        current.target.sessionId,
+        current.target.targetSessionType,
+        { sessionTypeSource: 'explicit' },
+      )
+    } catch (err) {
+      log.warn({
+        event: 'reopen_session_flavor_metadata_persist_failed',
+        provider: current.target.provider,
+        sessionId: current.target.sessionId,
+        targetSessionType: current.target.targetSessionType,
+        tabId: current.target.tabId,
+        paneId: current.target.paneId,
+        err,
+      })
+      return
+    }
+
+    const latest = resolveCurrent()
+    if (
+      !latest
+      || latest.target.disabled
+      || !sameReopenTargetIdentity(latest.target, clickedTarget)
+    ) {
+      return
+    }
+
+    const resolvedCwd = latest.target.cwd ?? getFreshOpenCodeRouteCwd(
+      latest.content,
+      {
+        freshAgentSessions: latest.freshAgentSessions,
+        sessionId: latest.target.sessionId,
+      },
+    )
+
+    // Focused-episode-6 round 2 (Findings 6+7): AWAIT the old session's
+    // durable close before starting its replacement conversation — a close
+    // the server cannot record durably is not a close, and swapping the pane
+    // content anyway would leave a live server session open on no tab. On
+    // failure the pane keeps its current conversation (the terminal pane's
+    // xterm notice / the fresh-agent session-error banner carries the reason).
+    if (latest.content.kind === 'terminal' && latest.content.terminalId) {
+      const ack = await sendTerminalKillAndAwait(latest.content.terminalId, {
+        createRequestId: latest.content.createRequestId ?? null,
+      })
+      if (!ack.ok) return
+    } else if (latest.content.kind === 'fresh-agent' && latest.content.sessionId) {
+      const cwd = getFreshOpenCodeRouteCwd(
+        latest.content,
+        {
+          freshAgentSessions: latest.freshAgentSessions,
+          sessionId: latest.content.sessionId,
+          fallbackCwd: resolvedCwd,
+        },
+      )
+      const ack = await sendFreshAgentKillAndAwait({
+        sessionId: latest.content.sessionId,
+        sessionType: latest.content.sessionType,
+        provider: latest.content.provider,
+        ...(cwd ? { cwd } : {}),
+      })
+      if (!ack.ok) return
+    }
+
+    dispatch(updatePaneContent({
+      tabId: latest.target.tabId,
+      paneId: latest.target.paneId,
+      content: buildResumeContent({
+        sessionType: latest.target.targetSessionType,
+        sessionId: latest.target.sessionId,
+        cwd: resolvedCwd,
+        freshAgentProviderSettings: latest.providerSettings,
+      }),
+    }))
+
+    const sessionMetadataByKey = mergeSessionMetadataByKey(
+      latest.tab.sessionMetadataByKey,
+      latest.target.provider,
+      latest.target.sessionId,
+      { sessionType: latest.target.targetSessionType },
+    )
+    if (sessionMetadataByKey !== latest.tab.sessionMetadataByKey) {
+      dispatch(updateTab({
+        id: latest.tab.id,
+        updates: { sessionMetadataByKey },
+      }))
+    }
+  }, [
+    appStore,
+    dispatch,
+  ])
+
+  const shouldUseNativeMenu = useCallback((targetEl: HTMLElement | null, contextId: string, contextEl: HTMLElement | null, evt: MouseEvent | KeyboardEvent) => {
+    if (evt.type === 'contextmenu' && (evt as MouseEvent).shiftKey) return true
+    if (contextEl?.dataset.nativeContext === 'true') return true
+    if (targetEl?.closest?.('[data-native-context="true"]')) return true
+    if (targetEl?.tagName === 'IFRAME') return true
+
+    const inputLike = isTextInputLike(targetEl)
+    if (inputLike && ![ContextIds.Editor, ContextIds.Terminal].includes(contextId as any)) return true
+
+    const link = targetEl?.closest?.('a[href]')
+    if (link) return true
+
+    return false
+  }, [])
+
+  useEffect(() => {
+    // --- Long-press (touch hold) state ---
+    // Shared by BOTH open paths: the custom 500ms timer below AND the native
+    // `contextmenu` event Android fires mid-gesture. Declared before the
+    // handlers so handleContextMenu can coordinate with the touch session.
+    let longPressTimer: ReturnType<typeof setTimeout> | null = null
+    let touchStartPos: { x: number; y: number } | null = null
+    // The gesture's original touchstart target, persisted for the WHOLE
+    // in-flight gesture on the touchStartPos clearing discipline. A LATE
+    // native Android contextmenu can arrive after the transcript's sheet has
+    // opened; Chromium's fresh hit test then targets the sheet/backdrop, so
+    // handleContextMenu resolves turn ownership against this target instead
+    // (see its carve-out).
+    let touchGestureTarget: HTMLElement | null = null
+    let suppressNextTouchEnd = false
+
+    const handleContextMenu = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      // One menu system owns every fresh-agent right-click: fine-pointer
+      // turns, specialized sub-regions, and pane background all flow through
+      // the fresh-agent menu builder below (it selects region- and turn-aware
+      // items). The transcript's bubble-phase article handler installs no
+      // handler at all on fine pointers. The carve-out that remains is
+      // gesture-scoped: while a touch gesture is in flight on a turn article,
+      // the transcript's long-press action sheet owns the whole turn, and we
+      // must not stack a menu on it. We still cancel the event on the early
+      // return: for an article-targeted event the transcript's bubble-phase
+      // handler cancels it too (a harmless double cancel), while a late
+      // sheet-targeted event has no transcript handler at all — without a
+      // cancel here the browser shows its native context menu over the sheet.
+      // Since a late native contextmenu can arrive retargeted onto the
+      // just-opened sheet (Android-race case B below), ownership resolves
+      // against the gesture's ORIGINAL target, not e.target. For non-turn
+      // gestures the recorded target fails the predicate identically to
+      // e.target, so their behavior is unchanged.
+      const gestureInFlight = touchStartPos !== null || longPressTimer !== null
+      const ownershipTarget = gestureInFlight ? touchGestureTarget : target
+      if (gestureInFlight && isFreshAgentTurnTarget(ownershipTarget)) {
+        if (e.cancelable) e.preventDefault()
+        return
+      }
+      const contextEl = findContextElement(target)
+      const contextId = resolveContextId(contextEl?.dataset.context)
+      if (shouldUseNativeMenu(target, contextId, contextEl, e)) return
+
+      e.preventDefault()
+
+      // Android race, case A: our long-press timer already opened the menu
+      // for this gesture (suppressNextTouchEnd is armed until touchend).
+      // Swallow the OS contextmenu -- re-opening would jump the menu and
+      // corrupt focus restoration.
+      if (suppressNextTouchEnd) return
+
+      // Android race, case B: a touch gesture is still in flight and the
+      // native contextmenu won the race. Cancel our timer so it cannot
+      // re-fire into the just-opened menu (its elementFromPoint probe would
+      // hit the menu and replace it with the Global fallback), and arm
+      // release suppression for engines that DO synthesize a click from
+      // this gesture (iOS-like; Chromium-Android does not). Prefer the
+      // touch-session start position over the event coords — identical on
+      // Chromium, and it hardens against engines reporting drifted or
+      // degenerate contextmenu coordinates.
+      let position = { x: e.clientX, y: e.clientY }
+      if (gestureInFlight) {
+        if (touchStartPos) {
+          position = { x: touchStartPos.x, y: touchStartPos.y }
+        }
+        if (longPressTimer) {
+          clearTimeout(longPressTimer)
+          longPressTimer = null
+        }
+        touchStartPos = null
+        touchGestureTarget = null
+        suppressNextTouchEnd = true
+      }
+
+      const dataset = contextEl?.dataset ? copyDataset(contextEl.dataset) : {}
+      const parsed = parseContextTarget(contextId as any, dataset)
+      const targetObj = parsed || { kind: 'global' as const }
+
+      openMenu({
+        position,
+        target: targetObj,
+        contextElement: contextEl,
+        clickTarget: target,
+        dataset,
+      })
+    }
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const isContextKey = CONTEXT_MENU_KEYS.includes(e.key) || (e.shiftKey && e.key === 'F10')
+      if (!isContextKey) return
+
+      const target = document.activeElement as HTMLElement | null
+      const contextEl = findContextElement(target)
+      const contextId = resolveContextId(contextEl?.dataset.context)
+      if (shouldUseNativeMenu(target, contextId, contextEl, e)) return
+
+      e.preventDefault()
+      const dataset = contextEl?.dataset ? copyDataset(contextEl.dataset) : {}
+      const parsed = parseContextTarget(contextId as any, dataset)
+      const targetObj = parsed || { kind: 'global' as const }
+
+      const rect = contextEl?.getBoundingClientRect() || { left: 0, bottom: 0 }
+      openMenu({
+        position: { x: rect.left + 8, y: rect.bottom + 4 },
+        target: targetObj,
+        contextElement: contextEl,
+        clickTarget: target,
+        dataset,
+      })
+    }
+
+    const handleTouchStart = (e: TouchEvent) => {
+      const touch = e.touches[0]
+      if (!touch) return
+      suppressNextTouchEnd = false
+      touchStartPos = { x: touch.clientX, y: touch.clientY }
+      // Capture the gesture target ONCE here: by the time the 500ms timer
+      // fires, a transcript-owned long-press (450ms) has already opened the
+      // action sheet, so a live elementFromPoint probe would hit the sheet.
+      // The same target also carries turn ownership for handleContextMenu
+      // across a late, retargeted native contextmenu (see its carve-out).
+      const gestureTarget = e.target as HTMLElement | null
+      touchGestureTarget = gestureTarget
+
+      longPressTimer = setTimeout(() => {
+        longPressTimer = null
+        // The transcript's own long-press owns this gesture entirely: no
+        // probe, no haptic, no openMenu, and no suppressNextTouchEnd arming
+        // (the transcript's touch handlers own release suppression). Hybrid-
+        // input devices never set data-longpress-owned, so they keep the
+        // provider fallback below, which stays byte-identical.
+        //
+        // The gesture bookkeeping deliberately SURVIVES this exit (cleared
+        // only on touchend/touchcancel): a LATE native contextmenu can still
+        // arrive while the finger stays down, retargeted onto the just-opened
+        // sheet, and handleContextMenu must still observe this gesture as in
+        // flight so ownership resolves to the gesture's original target.
+        if (isFreshAgentLongPressOwnedTarget(gestureTarget)) {
+          return
+        }
+        const startPos = touchStartPos
+        if (!startPos) return
+        const target = document.elementFromPoint(startPos.x, startPos.y) as HTMLElement | null
+        if (!target) return
+
+        const contextEl = findContextElement(target)
+        const contextId = resolveContextId(contextEl?.dataset.context)
+        if (!contextId) return
+
+        // Respect native context menu for inputs, links, iframes, etc.
+        if (contextEl?.dataset.nativeContext === 'true') { touchStartPos = null; touchGestureTarget = null; return }
+        if (target.closest?.('[data-native-context="true"]')) { touchStartPos = null; touchGestureTarget = null; return }
+        if (target.tagName === 'IFRAME') { touchStartPos = null; touchGestureTarget = null; return }
+        if (isTextInputLike(target) && ![ContextIds.Editor, ContextIds.Terminal].includes(contextId as any)) { touchStartPos = null; touchGestureTarget = null; return }
+        if (target.closest?.('a[href]')) { touchStartPos = null; touchGestureTarget = null; return }
+
+        const dataset = contextEl?.dataset ? copyDataset(contextEl.dataset) : {}
+        const parsed = parseContextTarget(contextId as any, dataset)
+        const targetObj = parsed || { kind: 'global' as const }
+
+        triggerHapticFeedback()
+        suppressNextTouchEnd = true
+        openMenu({
+          position: { x: startPos.x, y: startPos.y },
+          target: targetObj,
+          contextElement: contextEl,
+          clickTarget: target,
+          dataset,
+        })
+        touchStartPos = null
+        touchGestureTarget = null
+      }, 500)
+    }
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (!touchStartPos || !longPressTimer) return
+      const touch = e.touches[0]
+      if (!touch) return
+      const dx = Math.abs(touch.clientX - touchStartPos.x)
+      const dy = Math.abs(touch.clientY - touchStartPos.y)
+      if (dx > 10 || dy > 10) {
+        clearTimeout(longPressTimer)
+        longPressTimer = null
+        touchStartPos = null
+        touchGestureTarget = null
+        suppressNextTouchEnd = false
+      }
+    }
+
+    const handleTouchEnd = (e: TouchEvent) => {
+      const shouldSuppressRelease = suppressNextTouchEnd && e.type === 'touchend'
+      if (longPressTimer) {
+        clearTimeout(longPressTimer)
+        longPressTimer = null
+      }
+      touchStartPos = null
+      touchGestureTarget = null
+      suppressNextTouchEnd = false
+      if (shouldSuppressRelease) {
+        if (e.cancelable) e.preventDefault()
+      }
+    }
+
+    document.addEventListener('contextmenu', handleContextMenu, true)
+    document.addEventListener('keydown', handleKeyDown, true)
+    document.addEventListener('touchstart', handleTouchStart, { passive: true })
+    document.addEventListener('touchmove', handleTouchMove, { passive: true })
+    document.addEventListener('touchend', handleTouchEnd)
+    document.addEventListener('touchcancel', handleTouchEnd)
+
+    return () => {
+      document.removeEventListener('contextmenu', handleContextMenu, true)
+      document.removeEventListener('keydown', handleKeyDown, true)
+      document.removeEventListener('touchstart', handleTouchStart)
+      document.removeEventListener('touchmove', handleTouchMove)
+      document.removeEventListener('touchend', handleTouchEnd)
+      document.removeEventListener('touchcancel', handleTouchEnd)
+      if (longPressTimer) clearTimeout(longPressTimer)
+    }
+  }, [openMenu, shouldUseNativeMenu])
+
+  useEffect(() => {
+    if (!menuState) return
+
+    const handlePointerDown = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (menuRef.current && menuRef.current.contains(target)) return
+      closeMenu()
+    }
+
+    const handleScroll = (e: Event) => {
+      // Scrolls that originate inside the menu (e.g. an overflowing item
+      // list) are interactions with the menu, not dismissal intent.
+      if (e.target instanceof Node && menuRef.current?.contains(e.target)) return
+      // Mechanical scrolls right after open are side effects of opening
+      // (see MENU_OPEN_GRACE_MS). Genuine user scrolls still dismiss.
+      if (Date.now() - menuOpenedAtRef.current < MENU_OPEN_GRACE_MS) return
+      closeMenu()
+    }
+    const handleResize = () => {
+      // Keyboard show/hide can resize the window (older Android WebViews)
+      // right as the menu opens; give resize the same post-open grace.
+      if (Date.now() - menuOpenedAtRef.current < MENU_OPEN_GRACE_MS) return
+      closeMenu()
+    }
+    const handleBlur = () => closeMenu()
+
+    document.addEventListener('pointerdown', handlePointerDown, true)
+    window.addEventListener('scroll', handleScroll, true)
+    window.addEventListener('resize', handleResize)
+    window.addEventListener('blur', handleBlur)
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown, true)
+      window.removeEventListener('scroll', handleScroll, true)
+      window.removeEventListener('resize', handleResize)
+      window.removeEventListener('blur', handleBlur)
+    }
+  }, [menuState, closeMenu])
+
+  useEffect(() => {
+    if (!menuState) return
+    const cleanup = () => closeMenu()
+    return cleanup
+  }, [view, closeMenu, menuState])
+
+  const openUrlInPane = useCallback((tabId: string, paneId: string, url: string) => {
+    dispatch(splitPaneAction({
+      tabId,
+      paneId,
+      direction: 'horizontal',
+      newContent: { kind: 'browser', url, devToolsOpen: false },
+    }))
+  }, [dispatch])
+
+  const openUrlInTab = useCallback((url: string) => {
+    const id = nanoid()
+    dispatch(addTab({ id, mode: 'shell' }))
+    dispatch(initLayout({ tabId: id, content: { kind: 'browser', url, devToolsOpen: false } }))
+  }, [dispatch])
+
+  const openUrlInBrowser = useCallback((url: string) => {
+    openExternalUrl(url)
+  }, [])
+
+  const copyUrlAction = useCallback(async (url: string) => {
+    await copyText(url)
+  }, [])
+
+  const jumpToTabRecord = useCallback((record: RegistryTabRecord) => {
+    jumpToRecordAction(record, {
+      dispatch,
+      localServerInstanceId,
+      onOpened: () => onViewChange('terminal'),
+      hasLocalTab: (tabId) => appStore.getState().tabs.tabs.some((tab) => tab.id === tabId),
+    })
+  }, [dispatch, localServerInstanceId, onViewChange, appStore])
+
+  const openTabRecordCopy = useCallback((record: RegistryTabRecord) => {
+    openRecordAsUnlinkedCopyAction(record, {
+      dispatch,
+      localServerInstanceId,
+      onOpened: () => onViewChange('terminal'),
+    })
+  }, [dispatch, localServerInstanceId, onViewChange])
+
+  const openTabRecordPaneInNewTab = useCallback((record: RegistryTabRecord, pane: RegistryPaneSnapshot) => {
+    openPaneInNewTabAction(record, pane, {
+      dispatch,
+      localServerInstanceId,
+      onOpened: () => onViewChange('terminal'),
+    })
+  }, [dispatch, localServerInstanceId, onViewChange])
+
+  const copyTabRecordName = useCallback(async (record: RegistryTabRecord) => {
+    await copyText(record.tabName)
+  }, [])
+
+  const menuItems = useMemo(() => {
+    if (!menuState) return []
+    return buildMenuItems(menuState.target, {
+      view,
+      sidebarCollapsed,
+      tabs: tabsState.tabs,
+      paneLayouts: panes,
+      sessions,
+      expandedProjects,
+      contextElement: menuState.contextElement,
+      clickTarget: menuState.clickTarget,
+      aiEnabled: Boolean(appSettings.ai?.geminiApiKey) || Boolean(featureFlags.aiEnabled),
+      platform,
+      extensions: extensionEntries,
+      reopenActivityByPaneId,
+      tabRegistryGroups,
+      registryDeviceId,
+      actions: {
+        newDefaultTab,
+        newTabWithPane,
+        copyTabNames,
+        toggleSidebar: onToggleSidebar,
+        copyShareLink,
+        showKeyboardShortcuts,
+        openView: onViewChange,
+        copyTabName,
+        refreshTab: refreshTabAction,
+        renameTab,
+        closeTab: closeTabById,
+        reopenClosedTab: reopenClosedTabAction,
+        closeOtherTabs,
+        closeTabsToRight,
+        moveTab,
+        renamePane,
+        refreshPane: refreshPaneAction,
+        replacePane: replacePaneAction,
+        splitPane: (tabId: string, paneId: string, direction: 'horizontal' | 'vertical') => {
+          dispatch(splitPaneAction({ tabId, paneId, direction, newContent: { kind: 'picker' } }))
+        },
+        resetSplit: (tabId, splitId) => dispatch(resetSplit({ tabId, splitId })),
+        swapSplit: (tabId, splitId) => dispatch(swapSplit({ tabId, splitId })),
+        closePane: (tabId, paneId) => {
+          dispatch(closePaneWithCleanup({ tabId, paneId }))
+        },
+        getTerminalActions: getTerminalActions,
+        getEditorActions: getEditorActions,
+        getBrowserActions: getBrowserActions,
+        openSessionInNewTab,
+        openSessionInThisTab,
+        renameSession,
+        resetSessionTitle,
+        generateSessionTitle,
+        toggleArchiveSession,
+        deleteSession,
+        copySessionId,
+        copySessionCwd,
+        copySessionSummary,
+        copySessionMetadata,
+        copyResumeCommand,
+        reopenPaneAsSessionTarget: reopenPaneAsSessionTargetAction,
+        setProjectColor,
+        toggleProjectExpanded: toggleProjectExpandedAction,
+        openAllSessionsInProject,
+        copyProjectPath,
+        openTerminal,
+        renameTerminal,
+        generateTerminalSummary,
+        deleteTerminal,
+        copyTerminalCwd,
+        copyMessageText,
+        copyMessageCode,
+        copyFreshAgentCodeBlock,
+        copyFreshAgentToolInput,
+        copyFreshAgentToolOutput,
+        copyFreshAgentDiffNew,
+        copyFreshAgentDiffOld,
+        copyFreshAgentFilePath,
+        openUrlInPane,
+        openUrlInTab,
+        openUrlInBrowser,
+        copyUrl: copyUrlAction,
+        jumpToTabRecord,
+        openTabRecordCopy,
+        openTabRecordPaneInNewTab,
+        copyTabRecordName,
+      },
+    })
+  }, [
+    menuState,
+    view,
+    sidebarCollapsed,
+    tabsState.tabs,
+    panes,
+    sessions,
+    expandedProjects,
+    platform,
+    extensionEntries,
+    appSettings.ai?.geminiApiKey,
+    featureFlags.aiEnabled,
+    reopenActivityByPaneId,
+    newDefaultTab,
+    newTabWithPane,
+    copyTabNames,
+    onToggleSidebar,
+    copyShareLink,
+    showKeyboardShortcuts,
+    onViewChange,
+    copyTabName,
+    refreshTabAction,
+    renameTab,
+    closeTabById,
+    reopenClosedTabAction,
+    closeOtherTabs,
+    closeTabsToRight,
+    moveTab,
+    renamePane,
+    refreshPaneAction,
+    replacePaneAction,
+    ws,
+    dispatch,
+    openSessionInNewTab,
+    openSessionInThisTab,
+    renameSession,
+    resetSessionTitle,
+    toggleArchiveSession,
+    deleteSession,
+    copySessionId,
+    copySessionCwd,
+    copySessionSummary,
+    copySessionMetadata,
+    copyResumeCommand,
+    reopenPaneAsSessionTargetAction,
+    setProjectColor,
+    toggleProjectExpandedAction,
+    openAllSessionsInProject,
+    copyProjectPath,
+    openTerminal,
+    renameTerminal,
+    generateTerminalSummary,
+    deleteTerminal,
+    copyTerminalCwd,
+    copyMessageText,
+    copyMessageCode,
+    openUrlInPane,
+    openUrlInTab,
+    openUrlInBrowser,
+    copyUrlAction,
+    tabRegistryGroups,
+    registryDeviceId,
+    jumpToTabRecord,
+    openTabRecordCopy,
+    openTabRecordPaneInNewTab,
+    copyTabRecordName,
+  ])
+
+  return (
+    <>
+      {children}
+      <ContextMenu
+        ref={menuRef}
+        open={!!menuState && menuItems.length > 0}
+        items={menuItems}
+        position={menuState?.position || { x: 0, y: 0 }}
+        onClose={closeMenu}
+      />
+      <ConfirmModal
+        open={!!confirmState}
+        title={confirmState?.title || ''}
+        body={confirmState?.body || null}
+        confirmLabel={confirmState?.confirmLabel || 'Confirm'}
+        error={confirmState?.error}
+        onConfirm={() => confirmState?.onConfirm()}
+        onCancel={() => setConfirmState(null)}
+      />
+      <KeyboardShortcutsDialog
+        open={shortcutsDialogOpen}
+        onClose={() => setShortcutsDialogOpen(false)}
+      />
+    </>
+  )
+}

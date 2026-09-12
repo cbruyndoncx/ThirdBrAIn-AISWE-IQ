@@ -1,0 +1,910 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { configureStore } from '@reduxjs/toolkit'
+import freshAgentReducer, { materializeSession } from '@/store/freshAgentSlice'
+import panesReducer, { initLayout, materializeFreshAgentSession, type PanesState } from '@/store/panesSlice'
+import turnCompletionReducer, { markPaneAttention, markTabAttention } from '@/store/turnCompletionSlice'
+import { handleFreshAgentMessage, registerFreshAgentCreate } from '@/lib/fresh-agent-ws'
+import { cancelCreate, _resetCancelledCreates } from '@/lib/create-cancellation'
+import { flushPersistedLayoutNow } from '@/store/persistControl'
+import { normalizeFreshAgentProviderEvent } from '../../../../server/fresh-agent/sdk-events'
+import { parseServeEvent, serveEventToSdk } from '../../../../server/fresh-agent/adapters/opencode/serve-events'
+
+function createFreshAgentStore() {
+  return configureStore({
+    reducer: {
+      freshAgent: freshAgentReducer,
+    },
+  })
+}
+
+function emptyPanesState(): PanesState {
+  return {
+    layouts: {},
+    activePane: {},
+    paneTitles: {},
+    paneTitleSetByUser: {},
+    renameRequestTabId: null,
+    renameRequestPaneId: null,
+    zoomedPane: {},
+    refreshRequestsByPane: {},
+    restoreFallbackAttemptsByPane: {},
+  }
+}
+
+function createFreshAgentPaneStore(seenActionTypes: string[] = []) {
+  const actionRecorder = () => (next: (action: unknown) => unknown) => (action: { type?: string }) => {
+    if (typeof action.type === 'string') seenActionTypes.push(action.type)
+    return next(action)
+  }
+
+  return configureStore({
+    reducer: {
+      freshAgent: freshAgentReducer,
+      panes: panesReducer,
+    },
+    preloadedState: {
+      panes: emptyPanesState(),
+    },
+    middleware: (getDefault) => getDefault().prepend(actionRecorder),
+  })
+}
+
+describe('fresh-agent-ws', () => {
+  beforeEach(() => {
+    _resetCancelledCreates()
+  })
+
+  it('registers resumed creates with history hydration and handles freshAgent.created', () => {
+    const store = createFreshAgentStore()
+
+    registerFreshAgentCreate(store.dispatch, 'req-1', {
+      resumeSessionId: 'thread-1',
+      sessionType: 'freshcodex',
+      provider: 'codex',
+    })
+    const handled = handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.created',
+      requestId: 'req-1',
+      sessionId: 'thread-1',
+      sessionType: 'freshcodex',
+      provider: 'codex',
+    })
+
+    expect(handled).toBe(true)
+    expect(store.getState().freshAgent.pendingCreates['req-1']).toMatchObject({
+      sessionId: 'thread-1',
+      expectsHistoryHydration: true,
+    })
+  })
+
+  it('kills a late freshAgent.created session when its create request was cancelled', () => {
+    const store = createFreshAgentStore()
+    const ws = { send: vi.fn() }
+
+    registerFreshAgentCreate(store.dispatch, 'req-orphan', {
+      sessionType: 'freshcodex',
+      provider: 'codex',
+    })
+    cancelCreate('req-orphan')
+
+    const handled = handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.created',
+      requestId: 'req-orphan',
+      sessionId: 'thread-orphan',
+      sessionType: 'freshcodex',
+      provider: 'codex',
+    }, ws)
+
+    expect(handled).toBe(true)
+    expect(ws.send).toHaveBeenCalledWith({
+      type: 'freshAgent.kill',
+      sessionId: 'thread-orphan',
+      sessionType: 'freshcodex',
+      provider: 'codex',
+    })
+    expect(store.getState().freshAgent.sessions['freshcodex:codex:thread-orphan']).toBeUndefined()
+  })
+
+  it('routes a cancelled late FreshOpenCode create cleanup through the original cwd', () => {
+    const store = createFreshAgentStore()
+    const ws = { send: vi.fn() }
+
+    registerFreshAgentCreate(store.dispatch, 'req-opencode-orphan', {
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      cwd: '/repo/route-aware',
+    })
+    cancelCreate('req-opencode-orphan')
+
+    const handled = handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.created',
+      requestId: 'req-opencode-orphan',
+      sessionId: 'ses_orphan',
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+    }, ws)
+
+    expect(handled).toBe(true)
+    expect(ws.send).toHaveBeenCalledWith({
+      type: 'freshAgent.kill',
+      sessionId: 'ses_orphan',
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      cwd: '/repo/route-aware',
+    })
+    expect(store.getState().freshAgent.sessions['freshopencode:opencode:ses_orphan']).toBeUndefined()
+  })
+
+  it('handles freshAgent.create.failed', () => {
+    const store = createFreshAgentStore()
+
+    const handled = handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.create.failed',
+      requestId: 'req-2',
+      code: 'NOPE',
+      message: 'No provider',
+      retryable: false,
+    })
+
+    expect(handled).toBe(true)
+    expect(store.getState().freshAgent.pendingCreateFailures['req-2']).toEqual({
+      code: 'NOPE',
+      message: 'No provider',
+      retryable: false,
+    })
+  })
+
+  it('create.failed SESSION_RESERVED (retryable) is not projected into pendingCreateFailures and keeps the create route alive', () => {
+    // Task 14: a transient reservation must never mint an error-card entry
+    // (no Retry button racing the same-requestId re-drive) AND must not
+    // consume the create route -- the re-driven create's eventual
+    // created/failed still has to route to this pane.
+    const store = createFreshAgentStore()
+    const ws = { send: vi.fn() }
+
+    registerFreshAgentCreate(store.dispatch, 'req-reserved-1', {
+      sessionType: 'freshclaude',
+      provider: 'claude',
+      cwd: '/repo/reserved-route',
+    })
+
+    const handled = handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.create.failed',
+      requestId: 'req-reserved-1',
+      code: 'SESSION_RESERVED',
+      message: 'Another resume for this session is in flight',
+      retryable: true,
+    })
+    expect(handled).toBe(true)
+    expect(store.getState().freshAgent.pendingCreateFailures['req-reserved-1']).toBeUndefined()
+
+    // Route NOT consumed: a later cancelled created still routes its cleanup
+    // kill through the ORIGINAL cwd (the observable the route carries).
+    cancelCreate('req-reserved-1')
+    handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.created',
+      requestId: 'req-reserved-1',
+      sessionId: 'ses_reserved_late',
+      sessionType: 'freshclaude',
+      provider: 'claude',
+    }, ws)
+    expect(ws.send).toHaveBeenCalledWith({
+      type: 'freshAgent.kill',
+      sessionId: 'ses_reserved_late',
+      sessionType: 'freshclaude',
+      provider: 'claude',
+      cwd: '/repo/reserved-route',
+    })
+  })
+
+  it('non-reserved create.failed still projects into pendingCreateFailures (regression)', () => {
+    const store = createFreshAgentStore()
+    handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.create.failed',
+      requestId: 'req-hard-1',
+      code: 'SPAWN_FAILED',
+      message: 'x',
+      retryable: false,
+    })
+    expect(store.getState().freshAgent.pendingCreateFailures['req-hard-1']).toEqual({
+      code: 'SPAWN_FAILED',
+      message: 'x',
+      retryable: false,
+    })
+  })
+
+  it('materializes FreshOpenCode pane and live session state from the global websocket handler', () => {
+    const actionTypes: string[] = []
+    const store = createFreshAgentPaneStore(actionTypes)
+    const placeholderId = 'freshopencode-req-placeholder'
+    const durableId = 'ses_real_1'
+
+    store.dispatch(initLayout({
+      tabId: 'tab-1',
+      paneId: 'pane-1',
+      content: {
+        kind: 'fresh-agent',
+        sessionType: 'freshopencode',
+        provider: 'opencode',
+        sessionId: placeholderId,
+        createRequestId: 'req-placeholder',
+        status: 'running',
+        resumeSessionId: placeholderId,
+        sessionRef: { provider: 'opencode', sessionId: placeholderId },
+        restoreError: {
+          reason: 'fresh_agent_lost_session',
+          message: 'stale placeholder',
+        },
+      },
+    }))
+
+    registerFreshAgentCreate(store.dispatch, 'req-placeholder', {
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+    })
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.created',
+      requestId: 'req-placeholder',
+      sessionId: placeholderId,
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+    })).toBe(true)
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId: placeholderId,
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      event: {
+        type: 'freshAgent.session.snapshot',
+        sessionId: placeholderId,
+        latestTurnId: null,
+        status: 'running',
+      },
+    })).toBe(true)
+
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.session.materialized',
+      previousSessionId: placeholderId,
+      sessionId: durableId,
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      sessionRef: { provider: 'opencode', sessionId: durableId },
+    })).toBe(true)
+
+    const layout = store.getState().panes.layouts['tab-1']
+    expect(layout.type).toBe('leaf')
+    if (layout.type !== 'leaf') throw new Error('expected leaf layout')
+    expect(layout.content).toMatchObject({
+      kind: 'fresh-agent',
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      sessionId: durableId,
+      resumeSessionId: durableId,
+      sessionRef: { provider: 'opencode', sessionId: durableId },
+      status: 'running',
+    })
+    expect(layout.content.kind === 'fresh-agent' ? layout.content.restoreError : undefined).toBeUndefined()
+
+    expect(store.getState().freshAgent.sessions[`freshopencode:opencode:${placeholderId}`]).toBeUndefined()
+    expect(store.getState().freshAgent.sessions[`freshopencode:opencode:${durableId}`]).toMatchObject({
+      sessionId: durableId,
+      sessionKey: `freshopencode:opencode:${durableId}`,
+      threadId: durableId,
+      status: 'running',
+      lost: false,
+    })
+    expect(store.getState().freshAgent.pendingCreates['req-placeholder']).toMatchObject({
+      sessionId: durableId,
+      sessionKey: `freshopencode:opencode:${durableId}`,
+    })
+    expect(actionTypes).toContain(flushPersistedLayoutNow.type)
+  })
+
+  it('folds an attach-path freshAgent.session.materialized into BOTH slice and pane re-keys for a placeholder-keyed pane (Task 5 reconnect pin)', () => {
+    // The pane exactly as a reconnect restores it: keyed by the PLACEHOLDER id, with
+    // NO create handshake anywhere in this connection (the original create happened
+    // pre-disconnect; only the persisted layout survives). The Task 5 server emit on
+    // the tracked attach arm must therefore need no client change — this fold pin
+    // proves the existing materialized fold already covers the attach path.
+    const actionTypes: string[] = []
+    const store = createFreshAgentPaneStore(actionTypes)
+    const placeholderId = 'freshopencode-req-reconnect'
+    const durableId = 'ses_reconnect_1'
+
+    store.dispatch(initLayout({
+      tabId: 'tab-reconnect',
+      paneId: 'pane-reconnect',
+      content: {
+        kind: 'fresh-agent',
+        sessionType: 'freshopencode',
+        provider: 'opencode',
+        sessionId: placeholderId,
+        createRequestId: 'req-reconnect',
+        status: 'running',
+        resumeSessionId: placeholderId,
+        sessionRef: { provider: 'opencode', sessionId: placeholderId },
+      },
+    }))
+
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.session.materialized',
+      previousSessionId: placeholderId,
+      sessionId: durableId,
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      sessionRef: { provider: 'opencode', sessionId: durableId },
+    })).toBe(true)
+
+    expect(actionTypes).toContain(materializeSession.type)
+    expect(actionTypes).toContain(materializeFreshAgentSession.type)
+
+    const layout = store.getState().panes.layouts['tab-reconnect']
+    if (layout.type !== 'leaf') throw new Error('expected leaf layout')
+    expect(layout.content).toMatchObject({
+      kind: 'fresh-agent',
+      sessionId: durableId,
+      resumeSessionId: durableId,
+      sessionRef: { provider: 'opencode', sessionId: durableId },
+    })
+    expect(store.getState().freshAgent.sessions[`freshopencode:opencode:${placeholderId}`]).toBeUndefined()
+    expect(store.getState().freshAgent.sessions[`freshopencode:opencode:${durableId}`]).toBeDefined()
+    expect(actionTypes).toContain(flushPersistedLayoutNow.type)
+  })
+
+  it('projects Claude freshAgent.event snapshot and lost-session transport updates into fresh-agent session state', () => {
+    const store = createFreshAgentStore()
+
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId: 'claude-thread-1',
+      sessionType: 'freshclaude',
+      provider: 'claude',
+      event: {
+        type: 'freshAgent.session.snapshot',
+        sessionId: 'claude-thread-1',
+        latestTurnId: 'turn-1',
+        status: 'idle',
+        timelineSessionId: 'cli-session-1',
+        revision: 7,
+      },
+    })).toBe(true)
+
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId: 'claude-thread-1',
+      sessionType: 'freshclaude',
+      provider: 'claude',
+      event: {
+        type: 'freshAgent.error',
+        sessionId: 'claude-thread-1',
+        code: 'INVALID_SESSION_ID',
+        message: 'Session missing on server',
+      },
+    })).toBe(true)
+
+    expect(store.getState().freshAgent.sessions['freshclaude:claude:claude-thread-1']).toEqual(expect.objectContaining({
+      latestTurnId: 'turn-1',
+      historySessionId: 'cli-session-1',
+      historyRevision: 7,
+      lost: true,
+      historyLoaded: false,
+    }))
+  })
+
+  it('does not handle top-level legacy SDK websocket messages', () => {
+    const store = createFreshAgentStore()
+
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'sdk.session.snapshot',
+      sessionId: 'stale-thread-1',
+      latestTurnId: 'turn-stale',
+      status: 'idle',
+      timelineSessionId: '00000000-0000-4000-8000-000000000001',
+      revision: 3,
+    })).toBe(false)
+
+    expect(store.getState().freshAgent.sessions['freshclaude:claude:stale-thread-1']).toBeUndefined()
+  })
+
+  it('projects every fresh-agent provider event carried by freshAgent.event into fresh-agent state', () => {
+    const store = createFreshAgentStore()
+    const sessionId = 'claude-thread-parity'
+    const key = `freshclaude:claude:${sessionId}`
+    const sendEvent = (event: Record<string, unknown>) => handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshclaude',
+      provider: 'claude',
+      event: { sessionId, ...event },
+    })
+
+    expect(sendEvent({ type: 'freshAgent.session.snapshot', latestTurnId: null, status: 'idle', revision: 1 })).toBe(true)
+    expect(sendEvent({ type: 'freshAgent.session.init', cliSessionId: 'cli-1', model: 'claude-opus-4-6', cwd: '/repo' })).toBe(true)
+    expect(sendEvent({ type: 'freshAgent.session.metadata', cliSessionId: 'cli-2', model: 'claude-sonnet-4-6', tools: [{ name: 'Bash' }] })).toBe(true)
+    expect(sendEvent({ type: 'freshAgent.status', status: 'running' })).toBe(true)
+    expect(sendEvent({ type: 'freshAgent.stream', event: { type: 'content_block_start' } })).toBe(true)
+    expect(sendEvent({ type: 'freshAgent.stream', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'partial' } } })).toBe(true)
+    expect(sendEvent({ type: 'freshAgent.stream', event: { type: 'content_block_stop' } })).toBe(true)
+    expect(sendEvent({
+      type: 'freshAgent.assistant',
+      model: 'claude-sonnet-4-6',
+      content: [{ type: 'text', text: 'final answer' }],
+    })).toBe(true)
+    expect(sendEvent({ type: 'freshAgent.result', costUsd: 0.02, usage: { input_tokens: 10, output_tokens: 5 } })).toBe(true)
+    expect(sendEvent({
+      type: 'freshAgent.permission.request',
+      requestId: 'perm-1',
+      subtype: 'tool',
+      tool: { name: 'Bash', input: { command: 'npm test' } },
+    })).toBe(true)
+    expect(store.getState().freshAgent.sessions[key].pendingPermissions['perm-1']).toMatchObject({
+      toolName: 'Bash',
+      input: { command: 'npm test' },
+    })
+    expect(sendEvent({ type: 'freshAgent.permission.cancelled', requestId: 'perm-1' })).toBe(true)
+    expect(sendEvent({
+      type: 'freshAgent.question.request',
+      requestId: 'question-1',
+      questions: [{ question: 'Continue?', options: [{ label: 'Yes', description: 'Proceed' }] }],
+    })).toBe(true)
+    expect(sendEvent({ type: 'freshAgent.error', code: 'SDK_WARNING', message: 'recoverable' })).toBe(true)
+
+    const session = store.getState().freshAgent.sessions[key]
+    expect(session).toMatchObject({
+      cliSessionId: 'cli-2',
+      model: 'claude-sonnet-4-6',
+      streamingText: '',
+      streamingActive: false,
+      totalCostUsd: 0.02,
+      totalInputTokens: 10,
+      totalOutputTokens: 5,
+      lastError: 'recoverable',
+    })
+    expect(session.turns.at(-1)).toMatchObject({
+      role: 'assistant',
+      model: 'claude-sonnet-4-6',
+      summary: '',
+    })
+    expect(session.pendingPermissions).toEqual({})
+    expect(session.pendingQuestions['question-1']).toMatchObject({
+      questions: [{ question: 'Continue?' }],
+    })
+
+    expect(sendEvent({ type: 'freshAgent.exit', exitCode: 0 })).toBe(true)
+    expect(store.getState().freshAgent.sessions[key].status).toBe('exited')
+    expect(sendEvent({ type: 'freshAgent.killed' })).toBe(true)
+    expect(store.getState().freshAgent.sessions[key]).toBeUndefined()
+  })
+
+  it('folds freshAgent.status(stuck) into the store and dispatches no turn-completion action', () => {
+    // Wedged-sidecar deadman fold: the status must land (and stop the
+    // busy-driving streaming flag) WITHOUT fabricating a completion edge —
+    // the deadman never fabricates a `freshAgent.turn.complete`, so no
+    // turnCompletion/* action may be dispatched, ever. The pane layout below
+    // is seeded so a (hypothetical, forbidden) completion thunk would resolve
+    // its target and dispatch turnCompletion/recordTurnComplete — the pin
+    // would catch it.
+    const actionTypes: string[] = []
+    const store = createFreshAgentPaneStore(actionTypes)
+    const sessionId = 'thread-stuck-1'
+
+    store.dispatch(initLayout({
+      tabId: 'tab-stuck',
+      paneId: 'pane-stuck',
+      content: {
+        kind: 'fresh-agent',
+        sessionType: 'freshcodex',
+        provider: 'codex',
+        sessionId,
+        createRequestId: 'req-stuck',
+        status: 'running',
+      },
+    }))
+
+    // Mid-turn shape: running + streaming, exactly what the deadman fires into.
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshcodex',
+      provider: 'codex',
+      event: {
+        type: 'freshAgent.session.snapshot',
+        sessionId,
+        latestTurnId: null,
+        status: 'running',
+        streamingActive: true,
+        revision: 1,
+      },
+    })).toBe(true)
+    expect(store.getState().freshAgent.sessions[`freshcodex:codex:${sessionId}`].streamingActive).toBe(true)
+
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshcodex',
+      provider: 'codex',
+      event: { type: 'freshAgent.status', sessionId, status: 'stuck' },
+    })).toBe(true)
+
+    const session = store.getState().freshAgent.sessions[`freshcodex:codex:${sessionId}`]
+    expect(session.status).toBe('stuck')
+    expect(session.streamingActive).toBe(false)
+    expect(actionTypes.filter((type) => type.startsWith('turnCompletion/'))).toHaveLength(0)
+  })
+
+  it('keeps the session and surfaces an error when an event-wrapped killed reports success:false', () => {
+    const store = createFreshAgentStore()
+    const sessionId = 'claude-thread-kill-fails'
+    const key = `freshclaude:claude:${sessionId}`
+    const sendEvent = (event: Record<string, unknown>) => handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshclaude',
+      provider: 'claude',
+      event: { sessionId, ...event },
+    })
+
+    expect(sendEvent({ type: 'freshAgent.session.snapshot', latestTurnId: null, status: 'idle' })).toBe(true)
+    expect(store.getState().freshAgent.sessions[key]).toBeDefined()
+
+    // The server's durable close FAILED (delta-r6-r2 Finding 5): the session
+    // was not killed server-side, so the client must not proceed as though
+    // it was — keep the record and surface the failure, like any other
+    // session-scoped error frame.
+    expect(sendEvent({ type: 'freshAgent.killed', success: false })).toBe(true)
+    const session = store.getState().freshAgent.sessions[key]
+    expect(session).toBeDefined()
+    expect(session.lastErrorCode).toBe('KILL_FAILED')
+    expect(session.lastError).toContain('still be running')
+
+    // A follow-up SUCCESS still folds to removal (idempotent close).
+    expect(sendEvent({ type: 'freshAgent.killed', success: true })).toBe(true)
+    expect(store.getState().freshAgent.sessions[key]).toBeUndefined()
+  })
+
+  it('folds freshAgent.question.cancelled into removeQuestion and sits in the snapshot-invalidating set', async () => {
+    const store = createFreshAgentStore()
+    const sessionId = 'claude-thread-question-cancel'
+    const key = `freshclaude:claude:${sessionId}`
+    const sendEvent = (event: Record<string, unknown>) => handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshclaude',
+      provider: 'claude',
+      event: { sessionId, ...event },
+    })
+
+    expect(sendEvent({ type: 'freshAgent.session.snapshot', latestTurnId: null, status: 'running' })).toBe(true)
+    expect(sendEvent({
+      type: 'freshAgent.question.request',
+      requestId: 'question-7',
+      questions: [{ question: 'Continue?', options: [{ label: 'Yes', description: 'Proceed' }] }],
+    })).toBe(true)
+    expect(store.getState().freshAgent.sessions[key].pendingQuestions['question-7']).toBeDefined()
+
+    // A provider-cancelled question must clear its card (the removeQuestion reducer
+    // otherwise has zero dispatch sites and the card stays actionable forever).
+    expect(sendEvent({ type: 'freshAgent.question.cancelled', requestId: 'question-7' })).toBe(true)
+    expect(store.getState().freshAgent.sessions[key].pendingQuestions['question-7']).toBeUndefined()
+
+    // The snapshot-driven self-heal path must treat the cancel as invalidating too, so
+    // the card clears even if the fold races (FreshAgentView.tsx's subscription re-query).
+    const { SNAPSHOT_INVALIDATING_FRESH_AGENT_EVENTS } = await import('@/components/fresh-agent/FreshAgentView')
+    expect(SNAPSHOT_INVALIDATING_FRESH_AGENT_EVENTS?.has('freshAgent.question.cancelled') ?? false).toBe(true)
+  })
+
+  it('handles freshAgent.session.changed without mutating idle status', () => {
+    const store = createFreshAgentStore()
+    const sessionId = 'ses_opencode_idle'
+    const key = `freshopencode:opencode:${sessionId}`
+
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      event: {
+        type: 'freshAgent.session.snapshot',
+        sessionId,
+        latestTurnId: 'msg_assistant_1',
+        status: 'idle',
+        revision: 11,
+      },
+    })).toBe(true)
+
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      event: {
+        type: 'freshAgent.session.changed',
+        sessionId,
+        reason: 'opencode-message',
+      },
+    })).toBe(true)
+
+    expect(store.getState().freshAgent.sessions[key]).toMatchObject({
+      status: 'idle',
+      latestTurnId: 'msg_assistant_1',
+      historyRevision: 11,
+    })
+  })
+
+  it('bubbles OpenCode APIError data.message into FreshOpenCode UI-facing state', () => {
+    const store = createFreshAgentStore()
+    const sessionId = 'ses_opencode_billing'
+    const key = `freshopencode:opencode:${sessionId}`
+    const billingMessage = 'Insufficient balance. Manage your billing here: https://opencode.ai/workspace/wrk_01K7GPZSP6NGNSHF5ZHKBTVHVF/billing'
+    const sendEvent = (event: Record<string, unknown>) => handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      event: { sessionId, ...event },
+    })
+
+    expect(sendEvent({ type: 'freshAgent.session.snapshot', latestTurnId: null, status: 'running', revision: 1 })).toBe(true)
+
+    const parsed = parseServeEvent({
+      type: 'session.error',
+      properties: {
+        sessionID: sessionId,
+        error: {
+          name: 'APIError',
+          data: {
+            message: billingMessage,
+            statusCode: 402,
+            isRetryable: false,
+          },
+        },
+      },
+    })
+    if (!parsed) throw new Error('expected parsed OpenCode session.error')
+
+    const sdkEvent = serveEventToSdk(parsed, sessionId)
+    expect(sdkEvent).toEqual({ type: 'sdk.error', sessionId, message: billingMessage })
+    const normalized = normalizeFreshAgentProviderEvent(sdkEvent)
+    expect(normalized).toEqual({ type: 'freshAgent.error', sessionId, message: billingMessage })
+
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      event: normalized as Record<string, unknown>,
+    })).toBe(true)
+
+    expect(store.getState().freshAgent.sessions[key]).toMatchObject({
+      status: 'idle',
+      streamingActive: false,
+      lastError: billingMessage,
+    })
+  })
+
+  it('does not let delayed metadata downgrade newer snapshot identity', () => {
+    const store = createFreshAgentStore()
+    const sessionId = 'claude-thread-metadata-order'
+    const key = `freshclaude:claude:${sessionId}`
+    const sendEvent = (event: Record<string, unknown>) => handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshclaude',
+      provider: 'claude',
+      event: { sessionId, ...event },
+    })
+
+    expect(sendEvent({
+      type: 'freshAgent.session.snapshot',
+      latestTurnId: 'turn-new',
+      status: 'idle',
+      timelineSessionId: 'cli-new',
+      revision: 5,
+    })).toBe(true)
+    expect(sendEvent({
+      type: 'freshAgent.session.metadata',
+      cliSessionId: 'cli-old',
+      model: 'claude-sonnet-4-6',
+      cwd: '/repo',
+    })).toBe(true)
+
+    const session = store.getState().freshAgent.sessions[key]
+    expect(session.cliSessionId).toBeUndefined()
+    expect(session).toMatchObject({
+      historySessionId: 'cli-new',
+      historyRevision: 5,
+      model: 'claude-sonnet-4-6',
+      cwd: '/repo',
+    })
+  })
+
+  it('deduplicates repeated permission and question requests by request id', () => {
+    const store = createFreshAgentStore()
+    const sessionId = 'claude-thread-interactive-dedupe'
+    const key = `freshclaude:claude:${sessionId}`
+    const sendEvent = (event: Record<string, unknown>) => handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshclaude',
+      provider: 'claude',
+      event: { sessionId, ...event },
+    })
+
+    expect(sendEvent({ type: 'freshAgent.session.snapshot', latestTurnId: null, status: 'idle', revision: 1 })).toBe(true)
+    expect(sendEvent({
+      type: 'freshAgent.permission.request',
+      requestId: 'perm-repeat',
+      subtype: 'tool',
+      tool: { name: 'Bash', input: { command: 'pwd' } },
+    })).toBe(true)
+    expect(sendEvent({
+      type: 'freshAgent.permission.request',
+      requestId: 'perm-repeat',
+      subtype: 'tool',
+      tool: { name: 'Bash', input: { command: 'ls' } },
+    })).toBe(true)
+    expect(sendEvent({
+      type: 'freshAgent.question.request',
+      requestId: 'question-repeat',
+      questions: [{ question: 'Continue?', header: 'Confirm', options: [], multiSelect: false }],
+    })).toBe(true)
+    expect(sendEvent({
+      type: 'freshAgent.question.request',
+      requestId: 'question-repeat',
+      questions: [{ question: 'Proceed?', header: 'Confirm', options: [], multiSelect: false }],
+    })).toBe(true)
+
+    const session = store.getState().freshAgent.sessions[key]
+    expect(Object.keys(session.pendingPermissions)).toEqual(['perm-repeat'])
+    expect(session.pendingPermissions['perm-repeat']).toMatchObject({
+      input: { command: 'ls' },
+    })
+    expect(Object.keys(session.pendingQuestions)).toEqual(['question-repeat'])
+    expect(session.pendingQuestions['question-repeat'].questions[0].question).toBe('Proceed?')
+  })
+})
+
+describe('rollback folds (kata 1wxv)', () => {
+  it('freshAgent.session.rolledBack revokes attention for the owning pane', () => {
+    const store = configureStore({
+      reducer: {
+        freshAgent: freshAgentReducer,
+        panes: panesReducer,
+        turnCompletion: turnCompletionReducer,
+      },
+      preloadedState: {
+        panes: emptyPanesState(),
+      },
+    })
+    store.dispatch(initLayout({
+      tabId: 'tab-rb',
+      paneId: 'pane-rb',
+      content: {
+        kind: 'fresh-agent',
+        sessionType: 'freshopencode',
+        provider: 'opencode',
+        createRequestId: 'req-rb',
+        sessionId: 'ses_rb_1',
+        sessionRef: { provider: 'opencode', sessionId: 'ses_rb_1' },
+        status: 'idle',
+      },
+    }))
+    store.dispatch(markTabAttention({ tabId: 'tab-rb' }))
+    store.dispatch(markPaneAttention({ paneId: 'pane-rb' }))
+
+    // Decision 10: an undone done is not done — the broadcast revokes green/attention
+    // on every device, initiating pane included. The pane-scoped thunk handles the
+    // tab-level OR re-derivation (covered in turnCompletionAttention.test.ts).
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId: 'ses_rb_1',
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      event: {
+        type: 'freshAgent.session.rolledBack',
+        sessionId: 'ses_rb_1',
+        removedTurnIds: ['msg_u2'],
+        canRedo: true,
+        revokeAttention: true,
+      },
+    })).toBe(true)
+
+    expect(store.getState().turnCompletion.attentionByPane['pane-rb']).toBeUndefined()
+    expect(store.getState().turnCompletion.attentionByTab['tab-rb']).toBeUndefined()
+  })
+
+  it('rollback-flagged errors do not hit the pane error surface, but INVALID_SESSION_ID still marks lost', () => {
+    const store = createFreshAgentStore()
+    const sessionId = 'ses_rb_err'
+    const key = `freshopencode:opencode:${sessionId}`
+
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      event: {
+        type: 'freshAgent.session.snapshot',
+        sessionId,
+        latestTurnId: null,
+        status: 'idle',
+        revision: 1,
+      },
+    })).toBe(true)
+
+    // A rollback-flagged refusal is routed to the initiating pane's own notice banner
+    // (matched on requestId in the view) — NEVER the pane error surface.
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      event: {
+        type: 'freshAgent.error',
+        sessionId,
+        code: 'BUSY_TURN',
+        rollback: true,
+        requestId: 'rb-req-1',
+        message: 'Rollback is not supported while a turn is running — queue a steer message or wait for the turn to finish.',
+      },
+    })).toBe(true)
+    expect(store.getState().freshAgent.sessions[key].lastError).toBeUndefined()
+    expect(store.getState().freshAgent.sessions[key].lost ?? false).toBe(false)
+
+    // …while a rollback-flagged INVALID_SESSION_ID still engages client recovery.
+    expect(handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      event: {
+        type: 'freshAgent.error',
+        sessionId,
+        code: 'INVALID_SESSION_ID',
+        rollback: true,
+        requestId: 'rb-req-2',
+        message: 'Session missing on server',
+      },
+    })).toBe(true)
+    expect(store.getState().freshAgent.sessions[key].lost).toBe(true)
+  })
+
+  it('acks + session.redone are consumed without redux writes', () => {
+    const actionTypes: string[] = []
+    const store = createFreshAgentPaneStore(actionTypes)
+    const sessionId = 'ses_rb_quiet'
+    const sendEvent = (event: Record<string, unknown>) => handleFreshAgentMessage(store.dispatch, {
+      type: 'freshAgent.event',
+      sessionId,
+      sessionType: 'freshopencode',
+      provider: 'opencode',
+      event: { sessionId, ...event },
+    })
+
+    // Requesting-sink acks are consumed by the initiating pane's own ws subscriber
+    // (composer refill); snapshot invalidation rehydrates redux — no direct writes.
+    expect(sendEvent({
+      type: 'freshAgent.rolledBack',
+      requestId: 'rb-a1',
+      direction: 'undo',
+      mode: 'step',
+      removedPromptText: 'prompt',
+      removedTurnIds: ['msg_u1'],
+      canRedo: true,
+    })).toBe(true)
+    expect(sendEvent({
+      type: 'freshAgent.redone',
+      requestId: 'rb-a2',
+      direction: 'redo',
+      restoredThroughTurnId: 'msg_u2',
+      canRedo: false,
+    })).toBe(true)
+    expect(sendEvent({
+      type: 'freshAgent.session.redone',
+      restoredThroughTurnId: 'msg_u2',
+      canRedo: false,
+    })).toBe(true)
+
+    expect(actionTypes).toEqual([])
+  })
+})

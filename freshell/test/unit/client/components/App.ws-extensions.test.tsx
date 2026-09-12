@@ -1,0 +1,402 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, cleanup, waitFor, act } from '@testing-library/react'
+import { Provider } from 'react-redux'
+import { configureStore } from '@reduxjs/toolkit'
+import App from '@/App'
+import settingsReducer, { defaultSettings } from '@/store/settingsSlice'
+import tabsReducer from '@/store/tabsSlice'
+import connectionReducer from '@/store/connectionSlice'
+import sessionsReducer from '@/store/sessionsSlice'
+import panesReducer from '@/store/panesSlice'
+import tabRegistryReducer from '@/store/tabRegistrySlice'
+import terminalMetaReducer from '@/store/terminalMetaSlice'
+import extensionsReducer from '@/store/extensionsSlice'
+import { networkReducer } from '@/store/networkSlice'
+import { getCurrentTabRegistryClientInstanceId } from '@/store/tabRegistrySync'
+import type { ClientExtensionEntry } from '@shared/extension-types'
+import {
+  composeResolvedSettings,
+  createDefaultServerSettings,
+  resolveLocalSettings,
+} from '@shared/settings'
+
+// Mock heavy child components to avoid xterm/canvas issues
+vi.mock('@/components/TabContent', () => ({
+  default: () => <div data-testid="mock-tab-content">Tab Content</div>,
+}))
+vi.mock('@/components/Sidebar', () => ({
+  default: () => <div data-testid="mock-sidebar">Sidebar</div>,
+  AppView: {} as any,
+}))
+vi.mock('@/components/HistoryView', () => ({
+  default: () => <div data-testid="mock-history-view">History View</div>,
+}))
+vi.mock('@/components/SettingsView', () => ({
+  default: () => <div data-testid="mock-settings-view">Settings View</div>,
+}))
+vi.mock('@/components/OverviewView', () => ({
+  default: () => <div data-testid="mock-overview-view">Overview View</div>,
+}))
+vi.mock('@/hooks/useTheme', () => ({
+  useThemeEffect: () => {},
+}))
+vi.mock('@/components/SetupWizard', () => ({
+  SetupWizard: () => <div data-testid="mock-setup-wizard">Setup Wizard</div>,
+}))
+
+const wsMocks = vi.hoisted(() => ({
+  send: vi.fn(),
+  connect: vi.fn(),
+  onMessage: vi.fn(),
+  // Interest is transient and negotiated; this suite does not exercise it.
+  sendTerminalInterest: vi.fn(() => false),
+  onReconnect: vi.fn().mockReturnValue(() => {}),
+  setHelloExtensionProvider: vi.fn(),
+  isReady: false,
+  serverInstanceId: undefined as string | undefined,
+}))
+
+const messageHandlers = new Set<(msg: any) => void>()
+
+function broadcastWs(msg: any) {
+  for (const handler of Array.from(messageHandlers)) {
+    handler(msg)
+  }
+}
+
+vi.mock('@/lib/ws-client', () => ({
+  getWsClient: () => ({
+    send: wsMocks.send,
+    connect: wsMocks.connect,
+    sendTerminalInterest: wsMocks.sendTerminalInterest,
+    onMessage: wsMocks.onMessage,
+    onReconnect: wsMocks.onReconnect,
+    setHelloExtensionProvider: wsMocks.setHelloExtensionProvider,
+    cancelCreate: vi.fn(),
+    setReconcilePendingCreates: vi.fn(),
+    clearReconcileCreateHold: vi.fn(),
+    get isReady() {
+      return wsMocks.isReady
+    },
+    get serverInstanceId() {
+      return wsMocks.serverInstanceId
+    },
+  }),
+}))
+
+const apiGet = vi.hoisted(() => vi.fn())
+const fetchSidebarSessionsSnapshot = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/api', () => ({
+  getRecoveryInventory: async () => ({ recoverable: false, contentId: 'test', device: null, otherDevices: [], ledgerOnly: [] }),
+  api: {
+    get: (url: string) => apiGet(url),
+    patch: vi.fn().mockResolvedValue({}),
+    post: vi.fn().mockResolvedValue({}),
+  },
+  fetchSidebarSessionsSnapshot: (options?: unknown) => fetchSidebarSessionsSnapshot(options),
+  isApiUnauthorizedError: (err: any) => !!err && typeof err === 'object' && err.status === 401,
+}))
+
+function createStore() {
+  const serverSettings = createDefaultServerSettings({
+    loggingDebug: defaultSettings.logging.debug,
+  })
+  const localSettings = resolveLocalSettings()
+
+  return configureStore({
+    reducer: {
+      settings: settingsReducer,
+      tabs: tabsReducer,
+      connection: connectionReducer,
+      sessions: sessionsReducer,
+      panes: panesReducer,
+      tabRegistry: tabRegistryReducer,
+      terminalMeta: terminalMetaReducer,
+      network: networkReducer,
+      extensions: extensionsReducer,
+    },
+    middleware: (getDefault) =>
+      getDefault({
+        serializableCheck: { ignoredPaths: ['sessions.expandedProjects'] },
+      }),
+    preloadedState: {
+      settings: {
+        serverSettings,
+        localSettings,
+        settings: composeResolvedSettings(serverSettings, localSettings),
+        loaded: true,
+        lastSavedAt: undefined,
+      },
+      tabs: { tabs: [{ id: 'tab-1', mode: 'shell' as const }], activeTabId: 'tab-1' },
+      connection: {
+        status: 'disconnected' as const,
+        lastError: undefined,
+        platform: null,
+        availableClis: {},
+      },
+      sessions: { projects: [], expandedProjects: new Set<string>(), wsSnapshotReceived: false, isLoading: false, error: null },
+      panes: {
+        layouts: {},
+        activePane: {},
+        paneTitles: {},
+        paneTitleSetByUser: {},
+        renameRequestTabId: null,
+        renameRequestPaneId: null,
+        zoomedPane: {},
+      },
+      tabRegistry: {
+        deviceId: 'device-test',
+        deviceLabel: 'device-test',
+        deviceAliases: {},
+        localOpen: [],
+        remoteOpen: [],
+        closed: [],
+        localClosed: {},
+        searchRangeDays: 30,
+        loading: false,
+      },
+      terminalMeta: { byTerminalId: {} },
+      network: { status: null, loading: false, configuring: false, error: null },
+      extensions: { entries: [] },
+    },
+  })
+}
+
+describe('App WS extension messages', () => {
+  beforeEach(() => {
+    cleanup()
+    vi.resetAllMocks()
+    wsMocks.onReconnect.mockReturnValue(() => {})
+    wsMocks.isReady = false
+    wsMocks.serverInstanceId = undefined
+    messageHandlers.clear()
+
+    wsMocks.onMessage.mockImplementation((cb: (msg: any) => void) => {
+      messageHandlers.add(cb)
+      return () => { messageHandlers.delete(cb) }
+    })
+
+    wsMocks.connect.mockResolvedValue(undefined)
+    fetchSidebarSessionsSnapshot.mockReset()
+    fetchSidebarSessionsSnapshot.mockResolvedValue([])
+
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/bootstrap') {
+        return Promise.resolve({
+          settings: createDefaultServerSettings({
+            loggingDebug: defaultSettings.logging.debug,
+          }),
+          platform: { platform: 'linux', availableClis: {}, featureFlags: {} },
+        })
+      }
+      return Promise.resolve({})
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('stamps the hello extension with the connection provenance identity (D8)', async () => {
+    const store = createStore()
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(wsMocks.setHelloExtensionProvider).toHaveBeenCalled()
+    })
+
+    // The provider is re-invoked per (re)connect; its return rides the hello
+    // frame. The pinned fields are what the server's D8 recovery judgment
+    // stamps onto connection-scoped ledger bind rows. The bootstrap's device
+    // meta load may rotate the preloaded id, so pin the LOAD-BEARING link:
+    // the hello's deviceId must equal the registry's (the id the snapshot
+    // pushes persist under).
+    const provider = wsMocks.setHelloExtensionProvider.mock.calls.at(-1)?.[0] as () => Record<string, unknown>
+    const ext = provider()
+    expect(ext.deviceId).toBe(store.getState().tabRegistry.deviceId)
+    expect(typeof ext.deviceId).toBe('string')
+    expect((ext.deviceId as string).length).toBeGreaterThan(0)
+    // MUST equal the id tabs.sync.push frames carry — the tabRegistrySync getter.
+    expect(ext.clientInstanceId).toBe(getCurrentTabRegistryClientInstanceId())
+    expect(typeof ext.clientInstanceId).toBe('string')
+    expect((ext.clientInstanceId as string).length).toBeGreaterThan(0)
+  })
+
+  it('dispatches setRegistry when receiving extensions.registry WS message', async () => {
+    const store = createStore()
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    // Wait for bootstrap to register the message handler
+    await waitFor(() => {
+      expect(messageHandlers.size).toBeGreaterThan(0)
+    })
+
+    const extensions: ClientExtensionEntry[] = [
+      {
+        name: 'test-ext',
+        version: '1.0.0',
+        label: 'Test Extension',
+        description: 'A test extension',
+        category: 'client',
+      },
+      {
+        name: 'server-ext',
+        version: '2.0.0',
+        label: 'Server Extension',
+        description: 'A server extension',
+        category: 'server',
+        serverRunning: true,
+        serverPort: 9100,
+      },
+    ]
+
+    act(() => {
+      broadcastWs({ type: 'extensions.registry', extensions })
+    })
+
+    expect(store.getState().extensions.entries).toEqual(extensions)
+  })
+
+  it('dispatches updateServerStatus when receiving extension.server.ready WS message', async () => {
+    const store = createStore()
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(messageHandlers.size).toBeGreaterThan(0)
+    })
+
+    // Pre-populate the registry so updateServerStatus has an entry to update
+    const extensions: ClientExtensionEntry[] = [
+      {
+        name: 'my-ext',
+        version: '1.0.0',
+        label: 'My Extension',
+        description: 'Testing server ready',
+        category: 'server',
+        serverRunning: false,
+      },
+    ]
+
+    act(() => {
+      broadcastWs({ type: 'extensions.registry', extensions })
+    })
+
+    expect(store.getState().extensions.entries[0].serverRunning).toBe(false)
+
+    act(() => {
+      broadcastWs({ type: 'extension.server.ready', name: 'my-ext', port: 9200 })
+    })
+
+    expect(store.getState().extensions.entries[0].serverRunning).toBe(true)
+    expect(store.getState().extensions.entries[0].serverPort).toBe(9200)
+  })
+
+  it('dispatches updateServerStatus when receiving extension.server.stopped WS message', async () => {
+    const store = createStore()
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(messageHandlers.size).toBeGreaterThan(0)
+    })
+
+    // Pre-populate with a running server extension
+    const extensions: ClientExtensionEntry[] = [
+      {
+        name: 'my-ext',
+        version: '1.0.0',
+        label: 'My Extension',
+        description: 'Testing server stopped',
+        category: 'server',
+        serverRunning: true,
+        serverPort: 9200,
+      },
+    ]
+
+    act(() => {
+      broadcastWs({ type: 'extensions.registry', extensions })
+    })
+
+    expect(store.getState().extensions.entries[0].serverRunning).toBe(true)
+    expect(store.getState().extensions.entries[0].serverPort).toBe(9200)
+
+    act(() => {
+      broadcastWs({ type: 'extension.server.stopped', name: 'my-ext' })
+    })
+
+    expect(store.getState().extensions.entries[0].serverRunning).toBe(false)
+    expect(store.getState().extensions.entries[0].serverPort).toBeUndefined()
+  })
+
+  it('keeps extension metadata usable when ready reports a new server instance', async () => {
+    const store = createStore()
+
+    render(
+      <Provider store={store}>
+        <App />
+      </Provider>
+    )
+
+    await waitFor(() => {
+      expect(messageHandlers.size).toBeGreaterThan(0)
+    })
+
+    act(() => {
+      broadcastWs({
+        type: 'ready',
+        timestamp: new Date().toISOString(),
+        serverInstanceId: 'srv-old',
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().connection.serverInstanceId).toBe('srv-old')
+    })
+
+    const extensions: ClientExtensionEntry[] = [{
+      name: 'test-ext',
+      version: '1.0.0',
+      label: 'Test Extension',
+      description: 'A test extension',
+      category: 'client',
+    }]
+
+    act(() => {
+      broadcastWs({ type: 'extensions.registry', extensions })
+    })
+
+    expect(store.getState().extensions.entries).toEqual(extensions)
+
+    act(() => {
+      broadcastWs({
+        type: 'ready',
+        timestamp: new Date().toISOString(),
+        serverInstanceId: 'srv-new',
+      })
+    })
+
+    await waitFor(() => {
+      expect(store.getState().connection.serverInstanceId).toBe('srv-new')
+      expect(store.getState().extensions.entries).toEqual(extensions)
+    })
+  })
+})

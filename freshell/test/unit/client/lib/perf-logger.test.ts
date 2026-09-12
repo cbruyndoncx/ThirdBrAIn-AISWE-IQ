@@ -1,0 +1,126 @@
+import { describe, it, expect, vi } from 'vitest'
+
+async function loadPerfLoggerModule() {
+  vi.resetModules()
+  return import('@/lib/perf-logger')
+}
+
+describe('client perf logger config', () => {
+  it('defaults to disabled', async () => {
+    const { resolveClientPerfConfig } = await loadPerfLoggerModule()
+    const cfg = resolveClientPerfConfig(undefined)
+    expect(cfg.enabled).toBe(false)
+  })
+
+  it('enables when flag is set', async () => {
+    const { resolveClientPerfConfig } = await loadPerfLoggerModule()
+    const cfg = resolveClientPerfConfig('true')
+    expect(cfg.enabled).toBe(true)
+  })
+
+  it('can toggle at runtime', async () => {
+    const { getClientPerfConfig, setClientPerfEnabled } = await loadPerfLoggerModule()
+    const cfg = getClientPerfConfig()
+    setClientPerfEnabled(true, 'test')
+    expect(cfg.enabled).toBe(true)
+    setClientPerfEnabled(false, 'test')
+    expect(cfg.enabled).toBe(false)
+  })
+
+  it('ignores /api/logs/client resource entries in perf.resource_slow warnings', async () => {
+    const { setClientPerfEnabled } = await loadPerfLoggerModule()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const originalObserver = (globalThis as { PerformanceObserver?: unknown }).PerformanceObserver
+    const resourceCallbacks: Array<(entries: PerformanceResourceTiming[]) => void> = []
+
+    class MockPerformanceObserver {
+      private callback: (list: { getEntries: () => PerformanceEntry[] }) => void
+
+      constructor(callback: (list: { getEntries: () => PerformanceEntry[] }) => void) {
+        this.callback = callback
+      }
+
+      observe(options: { entryTypes?: string[] }) {
+        if (options.entryTypes?.includes('resource')) {
+          resourceCallbacks.push((entries) => {
+            this.callback({
+              getEntries: () => entries as unknown as PerformanceEntry[],
+            })
+          })
+        }
+      }
+    }
+
+    ;(globalThis as { PerformanceObserver?: unknown }).PerformanceObserver = MockPerformanceObserver as unknown
+    setClientPerfEnabled(true, 'test')
+    expect(resourceCallbacks).toHaveLength(1)
+
+    resourceCallbacks[0]([
+      {
+        name: 'http://localhost:3001/api/logs/client',
+        initiatorType: 'fetch',
+        duration: 1900,
+        transferSize: 0,
+        encodedBodySize: 0,
+        decodedBodySize: 0,
+      } as PerformanceResourceTiming,
+      {
+        name: 'http://localhost:3001/api/sessions',
+        initiatorType: 'fetch',
+        duration: 2100,
+        transferSize: 0,
+        encodedBodySize: 0,
+        decodedBodySize: 0,
+      } as PerformanceResourceTiming,
+    ])
+
+    const resourceWarnPayloads = warnSpy.mock.calls
+      .map((call) => call[0] as { event?: string; name?: string })
+      .filter((payload) => payload?.event === 'perf.resource_slow')
+    expect(resourceWarnPayloads).toHaveLength(1)
+    expect(resourceWarnPayloads[0].name).toContain('/api/sessions')
+
+    setClientPerfEnabled(false, 'test')
+    ;(globalThis as { PerformanceObserver?: unknown }).PerformanceObserver = originalObserver
+    warnSpy.mockRestore()
+  })
+
+  it('logs terminal input-to-first-output latency samples with percentiles', async () => {
+    const { setClientPerfEnabled, markTerminalInputSent, markTerminalOutputSeen } = await loadPerfLoggerModule()
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {})
+
+    setClientPerfEnabled(true, 'test')
+    markTerminalInputSent('term-1', 100)
+    markTerminalOutputSeen('term-1', 145)
+
+    const latencyPayload = infoSpy.mock.calls
+      .map((call) => call[0] as { event?: string; latencyMs?: number; p50Ms?: number; p90Ms?: number; p99Ms?: number })
+      .find((payload) => payload?.event === 'perf.terminal_input_to_output')
+
+    expect(latencyPayload).toBeDefined()
+    expect(latencyPayload?.latencyMs).toBe(45)
+    expect(latencyPayload?.p50Ms).toBe(45)
+    expect(latencyPayload?.p90Ms).toBe(45)
+    expect(latencyPayload?.p99Ms).toBe(45)
+
+    setClientPerfEnabled(false, 'test')
+    infoSpy.mockRestore()
+  })
+
+  it('forwards perf entries to an installed audit sink without changing console behavior', async () => {
+    const { installClientPerfAuditSink, logClientPerf, setClientPerfEnabled } = await loadPerfLoggerModule()
+    const seen: unknown[] = []
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {})
+
+    setClientPerfEnabled(true, 'test')
+    installClientPerfAuditSink((entry) => seen.push(entry))
+    logClientPerf('perf.paint', { name: 'first-contentful-paint' })
+
+    expect(seen).toHaveLength(1)
+    expect(infoSpy.mock.calls.some((call) => call[0]?.event === 'perf.paint')).toBe(true)
+
+    installClientPerfAuditSink(null)
+    setClientPerfEnabled(false, 'test')
+    infoSpy.mockRestore()
+  })
+})

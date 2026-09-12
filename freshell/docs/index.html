@@ -1,0 +1,1820 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>freshell — Browser Terminal Multiplexer for Coding CLIs</title>
+<meta name="description" content="Self-hosted browser terminal multiplexer for Claude Code, Codex, Kimi, OpenCode, and more.">
+<link rel="icon" type="image/x-icon" href="favicon.ico">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js"></script>
+<style>
+/* ========== Theme Variables ========== */
+:root {
+  --background: 0 0% 100%; --foreground: 240 10% 10%;
+  --card: 0 0% 98%; --card-foreground: 240 10% 10%;
+  --muted: 240 5% 96%; --muted-foreground: 240 4% 46%;
+  --border: 240 6% 92%; --success: 142 71% 45%;
+  --destructive: 0 72% 51%; --warning: 38 92% 50%;
+  /* Terminal (One Light) */
+  --t-bg: #fafafa; --t-fg: #383a42; --t-green: #50a14f; --t-red: #e45649;
+  --t-yellow: #986801; --t-blue: #4078f2; --t-magenta: #a626a4;
+  --t-cyan: #0184bc; --t-dim: #a0a1a7; --t-bold: #2a2a2a; --t-success: #26a941;
+  --t-cursor: #383a42;
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.04); --shadow-md: 0 2px 8px rgba(0,0,0,.06);
+}
+:root.dark {
+  --background: 240 10% 4%; --foreground: 0 0% 98%;
+  --card: 240 6% 10%; --card-foreground: 0 0% 98%;
+  --muted: 240 4% 16%; --muted-foreground: 240 5% 65%;
+  --border: 240 4% 16%; --success: 142 71% 45%;
+  --destructive: 0 62% 50%; --warning: 38 92% 50%;
+  /* Terminal (One Dark) */
+  --t-bg: #12131a; --t-fg: #abb2bf; --t-green: #98c379; --t-red: #e06c75;
+  --t-yellow: #e5c07b; --t-blue: #61afef; --t-magenta: #c678dd;
+  --t-cyan: #56b6c2; --t-dim: #5c6370; --t-bold: #ddd; --t-success: #26a941;
+  --t-cursor: #abb2bf;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.2); --shadow-md: 0 2px 8px rgba(0,0,0,.3);
+}
+
+/* ========== Reset & Base ========== */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; font-size: 13px; overflow: hidden; -webkit-font-smoothing: antialiased; }
+body { background: hsl(var(--background)); color: hsl(var(--foreground)); transition: background-color .2s, color .2s; }
+::selection { background: hsl(var(--foreground) / .1); }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: hsl(var(--muted-foreground) / .3); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / .5); }
+
+/* ========== App Shell ========== */
+.app { display: flex; flex-direction: column; height: 100vh; }
+.icon { width: 14px; height: 14px; stroke-width: 2; flex-shrink: 0; }
+.icon-xs { width: 12px; height: 12px; stroke-width: 2; flex-shrink: 0; }
+.icon-md { width: 16px; height: 16px; stroke-width: 2; flex-shrink: 0; }
+
+/* ========== Snark Overlay ========== */
+.snark-overlay {
+  position: fixed; inset: 0; z-index: 200; display: flex; align-items: center;
+  justify-content: center; pointer-events: none; opacity: 0; transition: opacity .25s;
+  background: rgba(0,0,0,.4); backdrop-filter: blur(2px);
+}
+.snark-overlay.show { opacity: 1; pointer-events: auto; }
+.snark-overlay .snark-dismiss { position: absolute; inset: 0; cursor: default; }
+.snark-box {
+  position: relative; z-index: 1; max-width: 520px; width: 90%;
+  font-family: 'JetBrains Mono', monospace; cursor: pointer;
+  border: 1px solid var(--t-green); border-radius: 2px;
+  background: var(--t-bg); padding: 20px 24px;
+  box-shadow: 0 0 30px rgba(152,195,121,.12), 0 0 80px rgba(152,195,121,.05), inset 0 0 60px rgba(0,0,0,.2);
+  transform: scale(.92); opacity: 0;
+  transition: transform .25s cubic-bezier(.34,1.4,.64,1), opacity .2s;
+}
+.snark-overlay.show .snark-box { transform: scale(1); opacity: 1; }
+:root:not(.dark) .snark-box {
+  border-color: var(--t-blue);
+  box-shadow: 0 0 30px rgba(64,120,242,.1), 0 0 80px rgba(64,120,242,.04), inset 0 0 60px rgba(0,0,0,.03);
+}
+.snark-msg {
+  color: var(--t-fg); font-size: 26px; line-height: 1.55; text-align: center;
+}
+.snark-msg a { color: var(--t-cyan); text-decoration: none; }
+.snark-msg a:hover { text-decoration: underline; }
+
+/* ========== Mobile Responsive ========== */
+/* On mobile (<768px): tab bar is replaced by MobileTabStrip (centered tab name
+   with chevrons + tab switcher grid overlay). At the right edge, the chevron
+   becomes a + action on the last tab to create a new tab. Touch targets are 44px min.
+   Sidebar opens/closes via swipe gesture and uses full-width drawer mode.
+   Pull-to-refresh is disabled, safe-area insets are respected, and fullscreen/landscape
+   mode minimizes chrome for terminal-focused use. */
+
+/* ========== Tab Bar ========== */
+.tabbar {
+  height: 40px; display: flex; align-items: flex-end; padding: 0 8px;
+  background: hsl(var(--background)); flex-shrink: 0; position: relative; z-index: 20;
+  transition: background-color .2s; gap: 2px;
+}
+.tabbar.multirow {
+  height: auto; max-height: 128px; flex-wrap: wrap; overflow-y: auto;
+}
+.tabbar::after {
+  content: ''; position: absolute; inset: auto 0 0 0; height: 1px;
+  background: hsl(var(--muted-foreground) / .45); z-index: 0;
+}
+.tab {
+  height: 32px; padding: 0 12px; display: flex; align-items: center; gap: 8px;
+  border: 1px solid hsl(var(--muted-foreground) / .45); border-bottom: 1px solid hsl(var(--muted-foreground) / .45);
+  border-radius: 6px 6px 0 0; cursor: pointer; white-space: nowrap;
+  font-size: 14px; color: hsl(var(--muted-foreground)); background: hsl(var(--muted));
+  transition: all .15s; user-select: none; position: relative; z-index: 1; margin-top: 4px;
+}
+.tab:hover { color: hsl(var(--foreground)); background: hsl(var(--muted) / .9); }
+.tab.active {
+  color: hsl(var(--foreground)); background: hsl(var(--background));
+  border-color: hsl(var(--muted-foreground) / .45);
+  border-bottom-color: hsl(var(--background)); z-index: 30; margin-top: 0; margin-bottom: -1px;
+}
+.tab.active::after {
+  content: ''; position: absolute; bottom: -1px; left: 0; right: 0;
+  height: 2px; background: hsl(var(--background));
+}
+.tab-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.tab-dot.busy, .tab-dot.running { background: var(--t-blue); }
+.tab-dot.attention { background: hsl(var(--success)); }
+.tab-dot.idle { background: hsl(var(--muted-foreground) / .4); }
+.tab-icons { display: flex; gap: 2px; align-items: center; }
+.tab-icons .icon-xs { width: 12px; height: 12px; color: hsl(var(--muted-foreground)); }
+.tab.active .tab-icons .icon-xs { color: hsl(var(--success)); }
+.tab-label { max-width: 5rem; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
+.tab.active .tab-label { max-width: 10rem; }
+.tab-close {
+  padding: 2px; border-radius: 3px; line-height: 0;
+  opacity: 0; transition: opacity .1s, background .1s; margin-left: 2px;
+}
+.tab-close .icon-xs { width: 12px; height: 12px; }
+.tab-close:hover { background: hsl(var(--foreground) / .1); }
+.tab:hover .tab-close, .tab.active .tab-close { opacity: .6; }
+.tab-close:hover { opacity: 1 !important; }
+.tab-add {
+  height: 26px; width: 28px; margin: 0 0 7px 4px; display: flex; align-items: center;
+  justify-content: center; border: 1px dashed hsl(var(--muted-foreground) / .4);
+  border-radius: 6px; color: hsl(var(--muted-foreground)); cursor: pointer; transition: all .15s;
+}
+.tab-add:hover {
+  color: hsl(var(--foreground)); border-color: hsl(var(--foreground) / .5);
+  background: hsl(var(--muted) / .3);
+}
+/* Overflow arrow buttons (appear when tabs exceed tab bar width) */
+.tab-arrow {
+  width: 24px; height: 32px; display: flex; align-items: center;
+  justify-content: center; flex-shrink: 0; color: hsl(var(--muted-foreground));
+  cursor: pointer; transition: color .15s;
+}
+.tab-arrow:hover { color: hsl(var(--foreground));
+}
+
+/* ========== Sidebar ========== */
+.sidebar {
+  width: 288px; background: hsl(var(--card)); border-right: 1px solid hsl(var(--border));
+  display: flex; flex-direction: column; flex-shrink: 0; transition: background-color .2s, border-color .2s;
+}
+.sb-header { padding: 12px; display: flex; align-items: center; gap: 8px; }
+.sb-collapse {
+  border: none; background: none; color: hsl(var(--muted-foreground)); border-radius: 6px;
+  width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+  cursor: pointer; transition: all .15s;
+}
+.sb-collapse:hover { color: hsl(var(--foreground)); background: hsl(var(--muted)); }
+.sb-logo { font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 600; letter-spacing: -0.02em; }
+.sb-search { padding: 0 12px 12px; }
+.sb-search-wrap { position: relative; }
+.sb-search-wrap .icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: hsl(var(--muted-foreground)); opacity: .6; }
+.sb-search input {
+  width: 100%; height: 32px; padding: 0 12px 0 32px;
+  background: hsl(var(--muted) / .5); border: none; border-radius: 6px;
+  color: hsl(var(--foreground)); font-size: 13px; outline: none; transition: background-color .2s;
+}
+.sb-search input::placeholder { color: hsl(var(--muted-foreground) / .6); }
+.sb-search input:focus { outline: 1px solid hsl(var(--border)); background: hsl(var(--muted) / .8); }
+.sb-nav { display: flex; gap: 4px; padding: 0 12px 12px; }
+.sb-nav-btn {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px;
+  padding: 6px 0; border-radius: 6px; font-size: 11px; cursor: pointer;
+  border: none; transition: all .12s; color: hsl(var(--muted-foreground)); background: none;
+}
+.sb-nav-btn:hover { color: hsl(var(--foreground)); background: hsl(var(--muted) / .5); }
+.sb-nav-btn.active { color: hsl(var(--background)); background: hsl(var(--foreground)); font-weight: 500; }
+.sb-nav-btn .icon { pointer-events: none; }
+.sb-list { flex: 1; overflow-y: auto; padding: 0 8px; }
+.sb-item {
+  width: 100%; padding: 8px 10px; border-radius: 6px; display: flex; gap: 10px;
+  cursor: pointer; transition: background .1s, border-color .15s; align-items: flex-start;
+  border-left: 3px solid transparent;
+}
+.sb-item:hover { background: hsl(var(--muted) / .5); }
+.sb-item.open { border-left-color: hsl(142 71% 45%); background: hsl(142 71% 45% / .08); }
+.sb-item.open:hover { background: hsl(142 71% 45% / .12); }
+.dark .sb-item.open { background: hsl(142 71% 45% / .15); }
+.dark .sb-item.open:hover { background: hsl(142 71% 45% / .2); }
+.sb-item-repo-icon { display: inline-block; width: 14px; height: 14px; border-radius: 2px; background: hsl(210 60% 55%); margin-right: 6px; flex-shrink: 0; }
+.sb-item-icon {
+  width: 14px; height: 14px; flex-shrink: 0; margin-top: 3px; color: hsl(var(--muted-foreground));
+}
+.sb-item-icon svg { width: 14px; height: 14px; fill: currentColor; }
+.sb-item-body { flex: 1; min-width: 0; }
+.sb-item-title {
+  font-size: 13px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; line-height: 1.4;
+}
+.sb-item-meta { font-size: 11px; color: hsl(var(--muted-foreground)); margin-top: 1px; display: flex; gap: 6px; }
+.sb-resume { padding: 8px; border-top: 1px solid hsl(var(--border)); }
+.sb-resume-btn { width: 100%; display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: none; background: none; border-radius: 6px; cursor: pointer; transition: all .12s; color: hsl(var(--muted-foreground)); font: inherit; font-size: 13px; }
+.sb-resume-btn:hover { color: hsl(var(--foreground)); background: hsl(var(--muted) / .5); }
+.sb-footer { padding: 12px 16px; border-top: 1px solid hsl(var(--border)); transition: border-color .2s; }
+.sb-footer a {
+  color: hsl(var(--muted-foreground)); text-decoration: none; font-size: 12px;
+  display: flex; align-items: center; gap: 6px; transition: color .15s;
+}
+.sb-footer a:hover { color: hsl(var(--foreground)); }
+
+/* ========== Main Layout ========== */
+.main { display: flex; flex: 1; min-height: 0; position: relative; }
+.sb-open-btn {
+  position: absolute; top: 8px; left: 8px; z-index: 30;
+  border: 1px solid hsl(var(--border) / .6); background: hsl(var(--card) / .95);
+  color: hsl(var(--muted-foreground)); border-radius: 8px; width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+  transition: all .15s;
+}
+.sb-open-btn:hover { color: hsl(var(--foreground)); background: hsl(var(--muted)); }
+
+/* ========== Content ========== */
+.content { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+.tab-panel { display: none; flex: 1; min-height: 0; }
+.tab-panel.active { display: flex; }
+
+/* ========== Panes ========== */
+.pane { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.pane-header {
+  height: 28px; padding: 0 8px; display: flex; align-items: center; gap: 6px;
+  border-bottom: 1px solid hsl(var(--border)); flex-shrink: 0;
+  font-size: 13px; color: hsl(var(--muted-foreground)); transition: background-color .2s, border-color .2s;
+}
+.pane-header.active { background: hsl(var(--muted)); }
+.pane-header.inactive { background: hsl(var(--muted) / .5); opacity: .85; }
+.pane-header .icon { opacity: .6; }
+.pane-header-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pane-header-meta { font-size: 11px; color: hsl(var(--muted-foreground)); max-width: 14rem; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-btns { display: flex; gap: 1px; align-items: center; }
+.pane-btn {
+  padding: 2px; border-radius: 3px; opacity: .5; cursor: pointer;
+  transition: opacity .1s, background .1s; display: flex; line-height: 0;
+}
+.pane-btn:hover { opacity: 1; background: hsl(var(--foreground) / .08); }
+.split-h { display: flex; flex: 1; min-height: 0; }
+.split-v { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+.divider-v {
+  width: 12px; flex-shrink: 0; cursor: col-resize; position: relative;
+  display: flex; align-items: center; justify-content: center;
+}
+.divider-v::before {
+  content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px;
+  background: hsl(var(--border)); transform: translateX(-50%); transition: all .15s;
+}
+.divider-v:hover::before { width: 3px; background: hsl(var(--muted-foreground) / .5); }
+.divider-v .dots { display: flex; flex-direction: column; gap: 3px; opacity: 0; transition: opacity .15s; z-index: 1; }
+.divider-v:hover .dots { opacity: .5; }
+.divider-v .dots span { width: 3px; height: 3px; border-radius: 50%; background: hsl(var(--muted-foreground)); }
+.divider-h {
+  height: 12px; flex-shrink: 0; cursor: row-resize; position: relative;
+  display: flex; align-items: center; justify-content: center;
+}
+.divider-h::before {
+  content: ''; position: absolute; top: 50%; left: 0; right: 0; height: 1px;
+  background: hsl(var(--border)); transform: translateY(-50%); transition: all .15s;
+}
+.divider-h:hover::before { height: 3px; background: hsl(var(--muted-foreground) / .5); }
+.divider-h .dots { display: flex; gap: 3px; opacity: 0; transition: opacity .15s; z-index: 1; }
+.divider-h:hover .dots { opacity: .5; }
+.divider-h .dots span { width: 3px; height: 3px; border-radius: 50%; background: hsl(var(--muted-foreground)); }
+
+/* ========== Terminal ========== */
+.terminal {
+  flex: 1; background: var(--t-bg); padding: 10px 14px;
+  font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.55;
+  color: var(--t-fg); overflow-y: auto; overflow-x: hidden;
+  white-space: pre-wrap; word-break: break-word; transition: background-color .2s;
+}
+.terminal-inline-status {
+  margin: 8px 12px 0;
+  align-self: flex-start;
+  border: 1px solid hsl(var(--border) / .8);
+  background: hsl(var(--background) / .9);
+  color: hsl(var(--muted-foreground));
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+}
+.term-line { min-height: 1.55em; }
+.term-cursor {
+  display: inline-block; width: 7.5px; height: 16px;
+  background: var(--t-cursor); animation: blink 1s step-end infinite;
+  vertical-align: text-bottom; margin-left: 1px;
+}
+@keyframes blink { 50% { opacity: 0; } }
+.t-green { color: var(--t-green); } .t-red { color: var(--t-red); }
+.t-yellow { color: var(--t-yellow); } .t-blue { color: var(--t-blue); }
+.t-magenta { color: var(--t-magenta); } .t-cyan { color: var(--t-cyan); }
+.t-dim { color: var(--t-dim); } .t-bold { font-weight: 600; color: var(--t-bold); }
+.term a, .pane-body a { color: inherit; text-decoration: none; }
+.term a:hover, .pane-body a:hover { text-decoration: underline; }
+.t-success { color: var(--t-success); }
+
+/* ========== Browser Pane ========== */
+.browser-pane { flex: 1; display: flex; flex-direction: column; background: var(--t-bg); transition: background-color .2s; }
+.browser-bar {
+  height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 10px;
+  background: hsl(var(--muted)); border-bottom: 1px solid hsl(var(--border));
+  flex-shrink: 0; transition: background-color .2s, border-color .2s;
+}
+.browser-dots { display: flex; gap: 6px; }
+.browser-dots span { width: 10px; height: 10px; border-radius: 50%; }
+.browser-dots .rd { background: #ec6a5e; } .browser-dots .yw { background: #f4bf4f; } .browser-dots .gn { background: #62c554; }
+.browser-url {
+  flex: 1; height: 22px; background: hsl(var(--background) / .5);
+  border: 1px solid hsl(var(--border)); border-radius: 4px; padding: 0 8px;
+  font-size: 12px; color: hsl(var(--muted-foreground)); display: flex; align-items: center;
+  transition: background-color .2s, border-color .2s;
+}
+.browser-body { flex: 1; padding: 24px; overflow: auto; }
+.sim-app { max-width: 480px; }
+.sim-app h2 { font-size: 18px; font-weight: 600; color: var(--t-bold); margin-bottom: 4px; }
+.sim-app .subtitle { font-size: 12px; color: var(--t-dim); margin-bottom: 16px; }
+.sim-card {
+  background: hsl(var(--muted) / .4); border: 1px solid hsl(var(--border) / .6);
+  border-radius: 8px; padding: 12px 14px; margin-bottom: 8px; transition: background-color .2s, border-color .2s;
+}
+.sim-card-title { font-size: 13px; color: var(--t-fg); font-weight: 500; }
+.sim-card-meta { font-size: 11px; color: var(--t-dim); margin-top: 4px; }
+.sim-badge { display: inline-block; padding: 2px 8px; border-radius: 9px; font-size: 10px; font-weight: 500; }
+.sim-badge.done { background: hsl(var(--success) / .15); color: hsl(var(--success)); }
+.sim-badge.prog { background: hsl(207 82% 66% / .12); color: #61afef; }
+.sim-badge.todo { background: hsl(var(--muted-foreground) / .1); color: hsl(var(--muted-foreground)); }
+
+/* ========== Pane Picker ========== */
+.pane-picker {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  background: hsl(var(--background)); transition: background-color .2s;
+}
+.picker-grid {
+  display: flex; flex-direction: column; align-items: center; gap: 24px;
+}
+.picker-row { display: flex; justify-content: center; gap: 24px; }
+.picker-option {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  width: 96px; height: 96px; padding: 0; border-radius: 8px; border: none; background: none;
+  color: hsl(var(--foreground)); cursor: pointer; opacity: .5;
+  transition: all .15s;
+}
+.picker-option:hover { opacity: 1; transform: scale(1.05); }
+.picker-icon { width: 40px; height: 40px; }
+.picker-lucide { width: 40px; height: 40px; stroke-width: 1.5; }
+.picker-label { font-size: 14px; font-weight: 500; }
+.picker-shortcut {
+  font-size: 12px; opacity: 0; transition: opacity .15s;
+  color: hsl(var(--muted-foreground));
+}
+.picker-option:hover .picker-shortcut { opacity: .4; }
+.picker-note {
+  margin-top: 20px; padding: 14px 16px; max-width: 420px;
+  border: 1px solid hsl(var(--border) / .6); border-radius: 10px;
+  background: hsl(var(--muted) / .35); color: hsl(var(--foreground));
+}
+.picker-note-title {
+  font-size: 12px; font-weight: 600; letter-spacing: .02em;
+  text-transform: uppercase; color: hsl(var(--muted-foreground));
+  margin-bottom: 8px;
+}
+.picker-note-line {
+  font-size: 13px; line-height: 1.5; color: hsl(var(--foreground));
+}
+
+/* ========== Projects View ========== */
+.sessions-view { flex: 1; overflow-y: auto; background: hsl(var(--background)); transition: background-color .2s; }
+.sv-header {
+  padding: 20px 24px 16px; border-bottom: 1px solid hsl(var(--border) / .3);
+  display: flex; align-items: center; gap: 12px; transition: border-color .2s;
+}
+.sv-title { font-size: 18px; font-weight: 600; letter-spacing: -0.02em; }
+.sv-count { font-size: 13px; color: hsl(var(--muted-foreground)); }
+.sv-refresh {
+  margin-left: auto; padding: 6px; border-radius: 6px; border: none; background: none;
+  color: hsl(var(--muted-foreground)); cursor: pointer; display: flex; transition: all .15s;
+}
+.sv-refresh:hover { color: hsl(var(--foreground)); background: hsl(var(--muted)); }
+.sv-search { padding: 12px 24px; }
+.sv-search-wrap { position: relative; display: inline-block; width: 100%; max-width: 400px; }
+.sv-search-wrap .icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: hsl(var(--muted-foreground)); opacity: .5; }
+.sv-search input {
+  width: 100%; height: 40px; padding: 0 16px 0 38px;
+  background: hsl(var(--muted) / .5); border: none; border-radius: 8px;
+  color: hsl(var(--foreground)); font-size: 13px; outline: none; transition: background-color .2s;
+}
+.sv-search input:focus { outline: 2px solid hsl(var(--border)); }
+.sv-body { padding: 8px 24px 24px; }
+.sv-project {
+  border: 1px solid hsl(var(--border) / .5); border-radius: 8px;
+  background: hsl(var(--card)); margin-bottom: 8px; overflow: hidden; transition: background-color .2s, border-color .2s;
+}
+.sv-project-header { padding: 12px 16px; display: flex; align-items: center; gap: 12px; cursor: pointer; transition: background-color .15s; }
+.sv-project-header:hover { background: hsl(var(--muted) / .5); }
+.sv-project-dot { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+.sv-project-name { font-size: 13px; font-weight: 500; flex: 1; }
+.sv-project-count { font-size: 12px; color: hsl(var(--muted-foreground)); }
+.sv-project-chevron { transition: transform .2s; color: hsl(var(--muted-foreground)); }
+.sv-project.open .sv-project-chevron { transform: rotate(90deg); }
+.sv-sessions { border-top: 1px solid hsl(var(--border)); display: none; }
+.sv-project.open .sv-sessions { display: block; }
+.sv-session { padding: 12px 16px 12px 40px; border-bottom: 1px solid hsl(var(--border) / .3); transition: background-color .15s; }
+.sv-session:last-child { border-bottom: none; }
+.sv-session:hover { background: hsl(var(--muted) / .3); }
+.sv-session-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sv-session-title { font-size: 13px; font-weight: 500; }
+.sv-session-provider { font-size: 10px; padding: 1px 7px; border-radius: 9px; font-weight: 600; }
+.sv-session-provider.claude { background: hsl(271 91% 65% / .15); color: #a78bfa; }
+.sv-session-provider.codex { background: hsl(217 91% 60% / .12); color: #60a5fa; }
+.sv-session-provider.kimi { background: hsl(142 71% 45% / .14); color: #4ade80; }
+.sv-session-provider.opencode { background: hsl(24 95% 60% / .15); color: #fb923c; }
+.sv-session-time { font-size: 12px; color: hsl(var(--muted-foreground)); margin-left: auto; }
+.sv-session-summary { font-size: 12px; color: hsl(var(--muted-foreground)); margin-top: 4px; line-height: 1.5; }
+.sv-session-cwd { font-size: 11px; color: var(--t-dim); margin-top: 3px; font-family: 'JetBrains Mono', monospace; }
+.sv-footnote { padding: 10px 16px; font-size: 11px; color: hsl(var(--muted-foreground)); border-top: 1px solid hsl(var(--border) / .5); }
+
+/* ========== Fresh Agent Mock ========== */
+.fresh-mock { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 260px); overflow: hidden; background: hsl(var(--background)); }
+.fresh-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.fresh-summary, .fresh-diffs {
+  margin: 12px 12px 0; border: 1px solid hsl(var(--border) / .65); border-radius: 6px;
+  background: hsl(var(--background) / .85); color: hsl(var(--muted-foreground)); font-size: 13px; padding: 10px 12px;
+}
+.fresh-diffs { color: hsl(var(--foreground)); font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+.fresh-diffs-title, .fresh-rail-title { font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: hsl(var(--muted-foreground)); margin-bottom: 8px; font-family: inherit; }
+.fresh-transcript { min-height: 0; flex: 1; overflow-x: hidden; overflow-y: auto; padding: 14px 12px; }
+.fresh-turn { border-left: 2px solid hsl(var(--border)); padding-left: 10px; margin-bottom: 14px; }
+.fresh-turn.user { border-left-color: hsl(var(--foreground)); }
+.fresh-role { font-size: 11px; text-transform: uppercase; color: hsl(var(--muted-foreground)); margin-bottom: 6px; }
+.fresh-copy { font-size: 16px; line-height: 1.25; color: hsl(var(--foreground)); }
+.fresh-activity { font: 11px 'JetBrains Mono', monospace; color: hsl(var(--muted-foreground)); margin-bottom: 6px; }
+/* Session status strip: owns the bottom-chrome divider (composer has no border-top) */
+.fresh-strip { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 5px 12px; border-top: 1px solid hsl(var(--border) / .6); font-size: 12px; color: hsl(var(--muted-foreground)); }
+.fresh-strip-chip { display: inline-flex; align-items: center; gap: 4px; min-width: 0; border: 0; border-radius: 4px; padding: 2px 4px; background: transparent; color: inherit; font: inherit; font-weight: 500; white-space: nowrap; cursor: pointer; }
+.fresh-strip-chip:hover { background: hsl(var(--foreground) / .06); }
+.fresh-strip-ctx { flex: none; display: inline-flex; align-items: center; gap: 8px; }
+.fresh-strip-meter { width: 96px; height: 4px; border-radius: 999px; background: hsl(var(--muted)); overflow: hidden; }
+.fresh-strip-meter i { display: block; height: 100%; border-radius: 999px; background: hsl(var(--muted-foreground)); }
+.fresh-strip-pct { font-variant-numeric: tabular-nums; }
+.fresh-composer { padding: 10px 12px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+/* Fresh-agent pane header: repo + agent icons replace the session-type label */
+.pane-header--fresh-agent .pane-header-icon { display: inline-flex; align-items: center; flex-shrink: 0; line-height: 0; }
+.pane-header--fresh-agent .pane-btns { margin-left: auto; }
+.fresh-thinking { grid-column: 1 / -1; height: 7px; width: 80%; justify-self: center; border-radius: 2px; overflow: hidden; background: hsl(var(--muted)); }
+.fresh-thinking span { display: block; height: 100%; width: 40%; background: linear-gradient(90deg, transparent, hsl(var(--foreground) / .22), transparent); }
+.fresh-input { min-height: 38px; border: 1px solid hsl(var(--border)); border-radius: 6px; display: flex; align-items: center; padding: 0 12px; color: hsl(var(--muted-foreground)); font-size: 13px; }
+.fresh-actions { display: flex; gap: 8px; }
+.fresh-action { width: 38px; height: 38px; border: 1px solid hsl(var(--border)); border-radius: 6px; display: flex; align-items: center; justify-content: center; color: hsl(var(--foreground)); }
+.fresh-action.send { background: hsl(var(--foreground)); color: hsl(var(--background)); border-color: hsl(var(--foreground)); }
+.fresh-rail { min-width: 0; border-left: 1px solid hsl(var(--border) / .6); background: hsl(var(--muted) / .2); padding: 12px; overflow: auto; }
+.fresh-rail-section + .fresh-rail-section { margin-top: 14px; }
+.fresh-rail-line { font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; color: hsl(var(--foreground)); }
+.fresh-style-control { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid hsl(var(--border)); border-radius: 6px; background: hsl(var(--background) / .78); padding: 6px 8px; }
+.fresh-style-control span { color: hsl(var(--muted-foreground)); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+.fresh-style-control strong { color: hsl(var(--foreground)); font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 13px; font-weight: 650; }
+
+@media (max-width: 768px) {
+  .fresh-mock { display: flex; flex-direction: column; }
+  .fresh-rail { order: -1; max-height: 120px; border-left: 0; border-bottom: 1px solid hsl(var(--border) / .6); display: flex; gap: 10px; padding: 10px 12px; }
+  .fresh-rail-section { min-width: 170px; border: 1px solid hsl(var(--border) / .55); border-radius: 6px; padding: 8px; }
+  .fresh-composer { grid-template-columns: minmax(0, 1fr); padding-right: 76px; }
+  .fresh-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .fresh-action { width: 100%; }
+}
+
+/* ========== Settings View ========== */
+.settings-view {
+  display: none; flex: 1; min-height: 0; overflow-y: auto;
+  background: hsl(var(--background)); color: hsl(var(--foreground));
+}
+.settings-view.active { display: block; }
+.settings-shell { max-width: 720px; margin: 0 auto; padding: 24px; }
+.settings-page-header {
+  padding: 20px 24px; border-bottom: 1px solid hsl(var(--border) / .3);
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+}
+.settings-page-header h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; }
+.settings-page-header p { margin-top: 4px; color: hsl(var(--muted-foreground)); font-size: 13px; }
+.settings-tabs {
+  display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid hsl(var(--border) / .35);
+  overflow: visible;
+}
+.settings-tab {
+  padding: 9px 12px; margin-bottom: -1px; border: none; border-bottom: 2px solid transparent;
+  border-radius: 6px 6px 0 0; background: transparent; color: hsl(var(--muted-foreground));
+  font-size: 13px; cursor: pointer; white-space: nowrap;
+}
+.settings-tab:hover { color: hsl(var(--foreground)); background: hsl(var(--muted) / .35); }
+.settings-tab.active {
+  color: hsl(var(--foreground)); border-bottom-color: hsl(var(--foreground)); font-weight: 500;
+}
+.settings-panel { display: none; padding: 22px 8px 0 0; }
+.settings-panel.active { display: block; }
+.settings-section { margin-top: 24px; }
+.settings-section:first-child { margin-top: 0; }
+.settings-section h2 { font-size: 14px; font-weight: 500; }
+.settings-section-desc { margin-top: 3px; color: hsl(var(--muted-foreground)); font-size: 12px; }
+.settings-list { margin-top: 16px; display: flex; flex-direction: column; gap: 15px; }
+.settings-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+}
+.settings-row.stack { align-items: stretch; flex-direction: column; gap: 8px; }
+.settings-label { min-width: 0; }
+.settings-label-title { color: hsl(var(--muted-foreground)); font-size: 13px; }
+.settings-label-desc { margin-top: 3px; color: hsl(var(--muted-foreground) / .65); font-size: 12px; line-height: 1.45; }
+.settings-control { flex: 0 0 auto; width: 248px; max-width: 100%; }
+.settings-control.wide { width: 100%; }
+.settings-select,
+.settings-input,
+.settings-textarea {
+  width: 100%; min-height: 32px; padding: 0 10px; border: none; border-radius: 6px;
+  background: hsl(var(--muted)); color: hsl(var(--foreground)); font: inherit; font-size: 13px;
+}
+.settings-select { padding-right: 32px; }
+.settings-textarea { min-height: 76px; padding: 9px 10px; resize: vertical; font-family: inherit; }
+.settings-segmented {
+  display: flex; width: 100%; gap: 2px; padding: 2px; border-radius: 7px; background: hsl(var(--muted));
+}
+.settings-segment {
+  flex: 1; min-height: 28px; padding: 4px 10px; border: none; border-radius: 5px;
+  background: transparent; color: hsl(var(--muted-foreground)); font-size: 12px; cursor: pointer;
+}
+.settings-segment.active { background: hsl(var(--background)); color: hsl(var(--foreground)); box-shadow: var(--shadow-sm); }
+.settings-switch {
+  position: relative; width: 36px; height: 20px; border: none; border-radius: 999px;
+  display: block; flex: 0 0 auto; padding: 0;
+  background: hsl(var(--muted)); cursor: pointer; transition: background .15s;
+}
+.settings-switch-wrap {
+  width: auto; min-height: 32px; display: flex; align-items: center; justify-content: flex-end;
+}
+.settings-switch::after {
+  content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+  border-radius: 50%; background: hsl(var(--muted-foreground)); transition: transform .15s, background .15s;
+}
+.settings-switch.on { background: hsl(var(--foreground)); }
+.settings-switch.on::after { transform: translateX(16px); background: hsl(var(--background)); }
+.settings-range { display: flex; align-items: center; gap: 10px; }
+.settings-range input { width: 145px; accent-color: hsl(var(--foreground)); }
+.settings-range span { width: 68px; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; }
+.settings-preview-title {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;
+  color: hsl(var(--muted-foreground)); font-size: 12px;
+}
+.settings-terminal-preview {
+  width: min(100%, 40ch); height: 12.4em; overflow: hidden;
+  border: 1px solid hsl(var(--border) / .45); border-radius: 8px;
+  background: var(--t-bg); color: var(--t-fg); padding: 10px 12px;
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px; line-height: 1.55; white-space: pre; box-shadow: var(--shadow-sm);
+}
+.settings-shortcuts { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+.settings-shortcut-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.settings-shortcut-keys { white-space: nowrap; }
+.settings-shortcut-keys kbd {
+  display: inline-block; padding: 2px 6px; border-radius: 4px;
+  background: hsl(var(--muted)); font-family: 'JetBrains Mono', monospace; font-size: 11px;
+}
+.settings-note {
+  margin-top: 12px; padding: 10px 12px; border: 1px solid hsl(var(--border) / .45);
+  border-radius: 8px; color: hsl(var(--muted-foreground)); background: hsl(var(--muted) / .35);
+  font-size: 12px; line-height: 1.5;
+}
+.settings-empty-state {
+  margin-top: 16px; min-height: 88px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  border: 1px solid hsl(var(--border) / .35); border-radius: 8px; background: hsl(var(--muted) / .22);
+  color: hsl(var(--muted-foreground)); font-size: 13px;
+}
+.settings-agent-list { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+.settings-agent-item {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px;
+  min-height: 56px; padding: 10px 12px; border: 1px solid hsl(var(--border) / .42);
+  border-radius: 8px; background: hsl(var(--card));
+}
+.settings-agent-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.settings-agent-icon {
+  width: 32px; height: 32px; border-radius: 7px; display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; background: hsl(var(--muted)); color: hsl(var(--foreground));
+}
+.settings-agent-icon svg { width: 18px; height: 18px; }
+.settings-agent-name { min-width: 0; color: hsl(var(--foreground)); font-size: 14px; font-weight: 500; }
+@media (max-width: 767px) {
+  .sidebar {
+    position: fixed; inset: 0 auto 0 0; z-index: 60;
+    width: min(85vw, 288px); box-shadow: var(--shadow-md);
+  }
+  .content { width: 100%; }
+  .settings-shell { padding: 16px; }
+  .settings-page-header { padding: 16px 16px 16px 48px; }
+  .settings-row { align-items: stretch; flex-direction: column; gap: 8px; }
+  .settings-row:has(.settings-switch-wrap) { align-items: center; flex-direction: row; }
+  .settings-row:has(.settings-switch-wrap) .settings-label { flex: 1; }
+  .settings-row:has(.settings-switch-wrap) .settings-switch-wrap { width: auto; min-width: 36px; }
+  .settings-control { width: 100%; }
+  .settings-range input { width: 100%; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="main">
+    <button class="sb-open-btn" title="Show sidebar" id="sidebar-open" style="display:none">
+      <i data-lucide="panel-left" class="icon"></i>
+    </button>
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sb-header">
+        <button class="sb-collapse" title="Hide sidebar" id="sidebar-toggle"><i data-lucide="panel-left-close" class="icon"></i></button>
+        <span class="sb-logo">🐚🔥freshell</span>
+      </div>
+      <div class="sb-search">
+        <div class="sb-search-wrap">
+          <i data-lucide="search" class="icon"></i>
+          <input type="text" placeholder="Search coding agents, tabs, projects…" readonly>
+        </div>
+        <select aria-label="Repo filter" disabled style="width:100%;margin-top:6px;height:24px;font-size:11px;background:hsl(0 0% 14%);color:hsl(0 0% 60%);border:0;border-radius:6px;padding:0 6px">
+          <option>All repos</option>
+          <option>freshell</option>
+          <option>api-server</option>
+          <option>freshell-web</option>
+        </select>
+        <select aria-label="Agent filter" disabled style="width:100%;margin-top:6px;height:24px;font-size:11px;background:hsl(0 0% 14%);color:hsl(0 0% 60%);border:0;border-radius:6px;padding:0 6px">
+          <option>All agents</option>
+          <option>Claude</option>
+          <option>Codex</option>
+          <option>Opencode</option>
+        </select>
+      </div>
+      <div class="sb-nav">
+        <button class="sb-nav-btn active" title="Coding Agents"><i data-lucide="terminal" class="icon"></i></button>
+        <button class="sb-nav-btn" title="Tabs"><i data-lucide="rows-3" class="icon"></i></button>
+        <button class="sb-nav-btn" title="Panes"><i data-lucide="layout-grid" class="icon"></i></button>
+        <button class="sb-nav-btn" title="Projects"><i data-lucide="folder" class="icon"></i></button>
+        <button class="sb-nav-btn" title="Settings"><i data-lucide="settings" class="icon"></i></button>
+      </div>
+      <div class="sb-list">
+        <div class="sb-item open"><span class="sb-item-repo-icon"></span><div class="sb-item-icon"><svg viewBox="75.73 64.08 872.25 872.25"><path d="M616.9,649.5h-209.7c0,0,0,104.7,0,104.7h-56.6c0,0,.2-104.5.2-104.5h-48.6s.2,104.5.2,104.5h-56.7c0,0,.2-104.4.2-104.4l-48.6-.7v-96.4c.1,0-104.8,0-104.8,0v-104.9s104.9,0,104.9,0v-201.6c0,0,628.9,0,628.9,0v201.6c0,0,104.9,0,104.9,0v104.9s-104.9,0-104.9,0v96.6c.1,0-56.5.4-56.5.4l.2,104.5h-48.6s.2-104.6.2-104.6h-56.6s.2,104.6.2,104.6h-48.6s.2-104.6.2-104.6ZM351.1,447.5l-.5-96.4h-48.4c0,0,0,96.6,0,96.6l48.8-.2ZM722,447.7l-.4-96.7h-56.5c0,0,0,96.8,0,96.8h56.9Z"/></svg></div><div class="sb-item-body"><div class="sb-item-title">Add dark mode toggle</div><div class="sb-item-meta"><span>freshell</span><span>2m</span></div></div></div>
+        <div class="sb-item open"><span class="sb-item-repo-icon"></span><div class="sb-item-icon"><svg viewBox="75.73 64.08 872.25 872.25"><path d="M616.9,649.5h-209.7c0,0,0,104.7,0,104.7h-56.6c0,0,.2-104.5.2-104.5h-48.6s.2,104.5.2,104.5h-56.7c0,0,.2-104.4.2-104.4l-48.6-.7v-96.4c.1,0-104.8,0-104.8,0v-104.9s104.9,0,104.9,0v-201.6c0,0,628.9,0,628.9,0v201.6c0,0,104.9,0,104.9,0v104.9s-104.9,0-104.9,0v96.6c.1,0-56.5.4-56.5.4l.2,104.5h-48.6s.2-104.6.2-104.6h-56.6s.2,104.6.2,104.6h-48.6s.2-104.6.2-104.6ZM351.1,447.5l-.5-96.4h-48.4c0,0,0,96.6,0,96.6l48.8-.2ZM722,447.7l-.4-96.7h-56.5c0,0,0,96.8,0,96.8h56.9Z"/></svg></div><div class="sb-item-body"><div class="sb-item-title">Fix WebSocket reconnection</div><div class="sb-item-meta"><span>freshell</span><span>1h</span></div></div></div>
+        <div class="sb-item"><div class="sb-item-icon"><svg viewBox="-0.27 -0.23 16.55 16.55"><path d="M14.949 6.547a3.94 3.94 0 0 0-.348-3.273 4.11 4.11 0 0 0-4.4-1.934A4.1 4.1 0 0 0 8.423.2 4.15 4.15 0 0 0 6.305.086a4.1 4.1 0 0 0-1.891.948 4.04 4.04 0 0 0-1.158 1.753 4.1 4.1 0 0 0-1.563.679A4 4 0 0 0 .554 4.72a3.99 3.99 0 0 0 .502 4.731 3.94 3.94 0 0 0 .346 3.274 4.11 4.11 0 0 0 4.402 1.933c.382.425.852.764 1.377.995.526.231 1.095.35 1.67.346 1.78.002 3.358-1.132 3.901-2.804a4.1 4.1 0 0 0 1.563-.68 4 4 0 0 0 1.14-1.253 3.99 3.99 0 0 0-.506-4.716m-6.097 8.406a3.05 3.05 0 0 1-1.945-.694l.096-.054 3.23-1.838a.53.53 0 0 0 .265-.455v-4.49l1.366.778q.02.011.025.035v3.722c-.003 1.653-1.361 2.992-3.037 2.996m-6.53-2.75a2.95 2.95 0 0 1-.36-2.01l.095.057L5.29 12.09a.53.53 0 0 0 .527 0l3.949-2.246v1.555a.05.05 0 0 1-.022.041L6.473 13.3c-1.454.826-3.311.335-4.15-1.098m-.85-6.94A3.02 3.02 0 0 1 3.07 3.949v3.785a.51.51 0 0 0 .262.451l3.93 2.237-1.366.779a.05.05 0 0 1-.048 0L2.585 9.342a2.98 2.98 0 0 1-1.113-4.094zm11.216 2.571L8.747 5.576l1.362-.776a.05.05 0 0 1 .048 0l3.265 1.86a3 3 0 0 1 1.173 1.207 2.96 2.96 0 0 1-.27 3.2 3.05 3.05 0 0 1-1.36.997V8.279a.52.52 0 0 0-.276-.445m1.36-2.015-.097-.057-3.226-1.855a.53.53 0 0 0-.53 0L6.249 6.153V4.598a.04.04 0 0 1 .019-.04L9.533 2.7a3.07 3.07 0 0 1 3.257.139c.474.325.843.778 1.066 1.303.223.526.289 1.103.191 1.664zM5.503 8.575 4.139 7.8a.05.05 0 0 1-.026-.037V4.049c0-.57.166-1.127.476-1.607s.752-.864 1.275-1.105a3.08 3.08 0 0 1 3.234.41l-.096.054-3.23 1.838a.53.53 0 0 0-.265.455zm.742-1.577 1.758-1 1.762 1v2l-1.755 1-1.762-1z"/></svg></div><div class="sb-item-body"><div class="sb-item-title">Refactor auth middleware</div><div class="sb-item-meta"><span>api-server</span><span>3h</span></div></div></div>
+        <div class="sb-item"><div class="sb-item-icon"><svg viewBox="75.73 64.08 872.25 872.25"><path d="M616.9,649.5h-209.7c0,0,0,104.7,0,104.7h-56.6c0,0,.2-104.5.2-104.5h-48.6s.2,104.5.2,104.5h-56.7c0,0,.2-104.4.2-104.4l-48.6-.7v-96.4c.1,0-104.8,0-104.8,0v-104.9s104.9,0,104.9,0v-201.6c0,0,628.9,0,628.9,0v201.6c0,0,104.9,0,104.9,0v104.9s-104.9,0-104.9,0v96.6c.1,0-56.5.4-56.5.4l.2,104.5h-48.6s.2-104.6.2-104.6h-56.6s.2,104.6.2,104.6h-48.6s.2-104.6.2-104.6ZM351.1,447.5l-.5-96.4h-48.4c0,0,0,96.6,0,96.6l48.8-.2ZM722,447.7l-.4-96.7h-56.5c0,0,0,96.8,0,96.8h56.9Z"/></svg></div><div class="sb-item-body"><div class="sb-item-title">Build landing page</div><div class="sb-item-meta"><span>freshell-web</span><span>5h</span></div></div></div>
+        <div class="sb-item"><div class="sb-item-icon"><svg viewBox="75.73 64.08 872.25 872.25"><path d="M616.9,649.5h-209.7c0,0,0,104.7,0,104.7h-56.6c0,0,.2-104.5.2-104.5h-48.6s.2,104.5.2,104.5h-56.7c0,0,.2-104.4.2-104.4l-48.6-.7v-96.4c.1,0-104.8,0-104.8,0v-104.9s104.9,0,104.9,0v-201.6c0,0,628.9,0,628.9,0v201.6c0,0,104.9,0,104.9,0v104.9s-104.9,0-104.9,0v96.6c.1,0-56.5.4-56.5.4l.2,104.5h-48.6s.2-104.6.2-104.6h-56.6s.2,104.6.2,104.6h-48.6s.2-104.6.2-104.6ZM351.1,447.5l-.5-96.4h-48.4c0,0,0,96.6,0,96.6l48.8-.2ZM722,447.7l-.4-96.7h-56.5c0,0,0,96.8,0,96.8h56.9Z"/></svg></div><div class="sb-item-body"><div class="sb-item-title">Update test coverage</div><div class="sb-item-meta"><span>freshell</span><span>1d</span></div></div></div>
+        <div class="sb-item"><div class="sb-item-icon"><svg viewBox="-0.27 -0.23 16.55 16.55"><path d="M14.949 6.547a3.94 3.94 0 0 0-.348-3.273 4.11 4.11 0 0 0-4.4-1.934A4.1 4.1 0 0 0 8.423.2 4.15 4.15 0 0 0 6.305.086a4.1 4.1 0 0 0-1.891.948 4.04 4.04 0 0 0-1.158 1.753 4.1 4.1 0 0 0-1.563.679A4 4 0 0 0 .554 4.72a3.99 3.99 0 0 0 .502 4.731 3.94 3.94 0 0 0 .346 3.274 4.11 4.11 0 0 0 4.402 1.933c.382.425.852.764 1.377.995.526.231 1.095.35 1.67.346 1.78.002 3.358-1.132 3.901-2.804a4.1 4.1 0 0 0 1.563-.68 4 4 0 0 0 1.14-1.253 3.99 3.99 0 0 0-.506-4.716m-6.097 8.406a3.05 3.05 0 0 1-1.945-.694l.096-.054 3.23-1.838a.53.53 0 0 0 .265-.455v-4.49l1.366.778q.02.011.025.035v3.722c-.003 1.653-1.361 2.992-3.037 2.996m-6.53-2.75a2.95 2.95 0 0 1-.36-2.01l.095.057L5.29 12.09a.53.53 0 0 0 .527 0l3.949-2.246v1.555a.05.05 0 0 1-.022.041L6.473 13.3c-1.454.826-3.311.335-4.15-1.098m-.85-6.94A3.02 3.02 0 0 1 3.07 3.949v3.785a.51.51 0 0 0 .262.451l3.93 2.237-1.366.779a.05.05 0 0 1-.048 0L2.585 9.342a2.98 2.98 0 0 1-1.113-4.094zm11.216 2.571L8.747 5.576l1.362-.776a.05.05 0 0 1 .048 0l3.265 1.86a3 3 0 0 1 1.173 1.207 2.96 2.96 0 0 1-.27 3.2 3.05 3.05 0 0 1-1.36.997V8.279a.52.52 0 0 0-.276-.445m1.36-2.015-.097-.057-3.226-1.855a.53.53 0 0 0-.53 0L6.249 6.153V4.598a.04.04 0 0 1 .019-.04L9.533 2.7a3.07 3.07 0 0 1 3.257.139c.474.325.843.778 1.066 1.303.223.526.289 1.103.191 1.664zM5.503 8.575 4.139 7.8a.05.05 0 0 1-.026-.037V4.049c0-.57.166-1.127.476-1.607s.752-.864 1.275-1.105a3.08 3.08 0 0 1 3.234.41l-.096.054-3.23 1.838a.53.53 0 0 0-.265.455zm.742-1.577 1.758-1 1.762 1v2l-1.755 1-1.762-1z"/></svg></div><div class="sb-item-body"><div class="sb-item-title">Setup CI pipeline</div><div class="sb-item-meta"><span>freshell</span><span>2d</span></div></div></div>
+        <div class="sb-item"><div class="sb-item-icon"><svg viewBox="75.73 64.08 872.25 872.25"><path d="M616.9,649.5h-209.7c0,0,0,104.7,0,104.7h-56.6c0,0,.2-104.5.2-104.5h-48.6s.2,104.5.2,104.5h-56.7c0,0,.2-104.4.2-104.4l-48.6-.7v-96.4c.1,0-104.8,0-104.8,0v-104.9s104.9,0,104.9,0v-201.6c0,0,628.9,0,628.9,0v201.6c0,0,104.9,0,104.9,0v104.9s-104.9,0-104.9,0v96.6c.1,0-56.5.4-56.5.4l.2,104.5h-48.6s.2-104.6.2-104.6h-56.6s.2,104.6.2,104.6h-48.6s.2-104.6.2-104.6ZM351.1,447.5l-.5-96.4h-48.4c0,0,0,96.6,0,96.6l48.8-.2ZM722,447.7l-.4-96.7h-56.5c0,0,0,96.8,0,96.8h56.9Z"/></svg></div><div class="sb-item-body"><div class="sb-item-title">Add pane resize shortcuts</div><div class="sb-item-meta"><span>freshell</span><span>3d</span></div></div></div>
+      </div>
+      <div class="sb-resume"><button class="sb-resume-btn"><i data-lucide="rotate-ccw" class="icon"></i> Resume session…</button></div>
+      <div class="sb-footer"><a href="https://github.com/danshapiro/freshell" target="_blank"><span style="color:hsl(39 92% 50%)">★</span> Star on GitHub</a></div>
+    </aside>
+
+    <!-- Content (TabBar + Panels) -->
+    <div class="content">
+      <!-- Tab Bar -->
+      <div class="tabbar">
+        <div class="tab active" data-tab="welcome">
+          <span class="tab-icons">
+            <i data-lucide="terminal" class="icon-xs"></i>
+            <i data-lucide="plus" class="icon-xs"></i>
+          </span>
+          <span class="tab-label">freshell</span>
+          <span class="tab-close"><i data-lucide="x" class="icon-xs"></i></span>
+        </div>
+        <div class="tab" data-tab="claude">
+          <span class="tab-dot busy"></span>
+          <span class="tab-label">Claude Code</span>
+          <span class="tab-close"><i data-lucide="x" class="icon-xs"></i></span>
+        </div>
+        <div class="tab" data-tab="workspace">
+          <span class="tab-icons">
+            <i data-lucide="terminal" class="icon-xs"></i>
+            <i data-lucide="terminal" class="icon-xs"></i>
+            <i data-lucide="globe" class="icon-xs"></i>
+          </span>
+          <span class="tab-label">workspace</span>
+          <span class="tab-close"><i data-lucide="x" class="icon-xs"></i></span>
+        </div>
+        <div class="tab" data-tab="sessions">
+          <span class="tab-dot idle"></span>
+          <span class="tab-label">Projects</span>
+          <span class="tab-close"><i data-lucide="x" class="icon-xs"></i></span>
+        </div>
+        <div class="tab" data-tab="start">
+          <span class="tab-dot attention"></span>
+          <span class="tab-label">Fresh Agent</span>
+          <span class="tab-close"><i data-lucide="x" class="icon-xs"></i></span>
+        </div>
+        <!-- Arrow buttons (< >) appear at edges when tabs overflow. Not shown in this mock since tabs fit. -->
+        <div class="tab-add" title="New shell tab"><i data-lucide="plus" class="icon"></i></div>
+      </div>
+      <!-- Welcome -->
+      <div class="tab-panel active" id="panel-welcome">
+        <div class="split-h">
+          <div class="pane" style="flex:.48">
+            <div class="pane-header active"><i data-lucide="terminal" class="icon"></i><span class="pane-header-title">Terminal — zsh</span><span class="pane-header-meta">~/code/freshell</span><div class="pane-btns"><span class="pane-btn"><i data-lucide="maximize-2" class="icon-xs"></i></span><span class="pane-btn"><i data-lucide="x" class="icon-xs"></i></span></div></div>
+            <div class="terminal-inline-status">Codex reconnecting... typed input is buffered until ready.</div>
+            <div class="terminal" id="term-welcome"></div>
+          </div>
+          <div class="divider-v"><div class="dots"><span></span><span></span><span></span></div></div>
+          <div class="pane" style="flex:.52">
+            <div class="pane-header inactive"><i data-lucide="plus" class="icon"></i><span class="pane-header-title">New Pane</span><div class="pane-btns"><span class="pane-btn"><i data-lucide="maximize-2" class="icon-xs"></i></span><span class="pane-btn"><i data-lucide="x" class="icon-xs"></i></span></div></div>
+	            <div class="pane-picker">
+	              <div>
+	                <div class="picker-grid">
+	                  <div class="picker-row">
+	                  <button class="picker-option">
+	                  <svg class="picker-icon" viewBox="75.73 64.08 872.25 872.25" fill="currentColor"><path d="M616.9,649.5h-209.7c0,0,0,104.7,0,104.7h-56.6c0,0,.2-104.5.2-104.5h-48.6s.2,104.5.2,104.5h-56.7c0,0,.2-104.4.2-104.4l-48.6-.7v-96.4c.1,0-104.8,0-104.8,0v-104.9s104.9,0,104.9,0v-201.6c0,0,628.9,0,628.9,0v201.6c0,0,104.9,0,104.9,0v104.9s-104.9,0-104.9,0v96.6c.1,0-56.5.4-56.5.4l.2,104.5h-48.6s.2-104.6.2-104.6h-56.6s.2,104.6.2,104.6h-48.6s.2-104.6.2-104.6ZM351.1,447.5l-.5-96.4h-48.4c0,0,0,96.6,0,96.6l48.8-.2ZM722,447.7l-.4-96.7h-56.5c0,0,0,96.8,0,96.8h56.9Z"/></svg>
+	                  <span class="picker-label">Claude</span>
+	                  <span class="picker-shortcut">L</span>
+                </button>
+                <button class="picker-option">
+                  <svg class="picker-icon" viewBox="-0.27 -0.23 16.55 16.55" fill="currentColor"><path d="M14.949 6.547a3.94 3.94 0 0 0-.348-3.273 4.11 4.11 0 0 0-4.4-1.934A4.1 4.1 0 0 0 8.423.2 4.15 4.15 0 0 0 6.305.086a4.1 4.1 0 0 0-1.891.948 4.04 4.04 0 0 0-1.158 1.753 4.1 4.1 0 0 0-1.563.679A4 4 0 0 0 .554 4.72a3.99 3.99 0 0 0 .502 4.731 3.94 3.94 0 0 0 .346 3.274 4.11 4.11 0 0 0 4.402 1.933c.382.425.852.764 1.377.995.526.231 1.095.35 1.67.346 1.78.002 3.358-1.132 3.901-2.804a4.1 4.1 0 0 0 1.563-.68 4 4 0 0 0 1.14-1.253 3.99 3.99 0 0 0-.506-4.716m-6.097 8.406a3.05 3.05 0 0 1-1.945-.694l.096-.054 3.23-1.838a.53.53 0 0 0 .265-.455v-4.49l1.366.778q.02.011.025.035v3.722c-.003 1.653-1.361 2.992-3.037 2.996m-6.53-2.75a2.95 2.95 0 0 1-.36-2.01l.095.057L5.29 12.09a.53.53 0 0 0 .527 0l3.949-2.246v1.555a.05.05 0 0 1-.022.041L6.473 13.3c-1.454.826-3.311.335-4.15-1.098m-.85-6.94A3.02 3.02 0 0 1 3.07 3.949v3.785a.51.51 0 0 0 .262.451l3.93 2.237-1.366.779a.05.05 0 0 1-.048 0L2.585 9.342a2.98 2.98 0 0 1-1.113-4.094zm11.216 2.571L8.747 5.576l1.362-.776a.05.05 0 0 1 .048 0l3.265 1.86a3 3 0 0 1 1.173 1.207 2.96 2.96 0 0 1-.27 3.2 3.05 3.05 0 0 1-1.36.997V8.279a.52.52 0 0 0-.276-.445m1.36-2.015-.097-.057-3.226-1.855a.53.53 0 0 0-.53 0L6.249 6.153V4.598a.04.04 0 0 1 .019-.04L9.533 2.7a3.07 3.07 0 0 1 3.257.139c.474.325.843.778 1.066 1.303.223.526.289 1.103.191 1.664zM5.503 8.575 4.139 7.8a.05.05 0 0 1-.026-.037V4.049c0-.57.166-1.127.476-1.607s.752-.864 1.275-1.105a3.08 3.08 0 0 1 3.234.41l-.096.054-3.23 1.838a.53.53 0 0 0-.265.455zm.742-1.577 1.758-1 1.762 1v2l-1.755 1-1.762-1z"/></svg>
+                  <span class="picker-label">Codex</span>
+                  <span class="picker-shortcut">X</span>
+                </button>
+                </div>
+                <div class="picker-row">
+                <button class="picker-option">
+                  <i data-lucide="sparkles" class="picker-lucide"></i>
+                  <span class="picker-label">OpenCode</span>
+                  <span class="picker-shortcut">O</span>
+                </button>
+                <button class="picker-option">
+                  <i data-lucide="bot" class="picker-lucide"></i>
+                  <span class="picker-label">Kimi</span>
+                  <span class="picker-shortcut">K</span>
+                </button>
+                <button class="picker-option">
+                  <i data-lucide="file-text" class="picker-lucide"></i>
+                  <span class="picker-label">Editor</span>
+                  <span class="picker-shortcut">E</span>
+                </button>
+                </div>
+                <div class="picker-row">
+                <button class="picker-option">
+                  <i data-lucide="globe" class="picker-lucide"></i>
+                  <span class="picker-label">Browser</span>
+                  <span class="picker-shortcut">B</span>
+                </button>
+                <button class="picker-option">
+                  <i data-lucide="terminal" class="picker-lucide"></i>
+                  <span class="picker-label">Shell</span>
+                  <span class="picker-shortcut">S</span>
+                </button>
+                </div>
+                <div class="picker-row">
+                <button class="picker-option">
+                  <i data-lucide="gauge" class="picker-lucide"></i>
+                  <span class="picker-label">System Status</span>
+                  <span class="picker-shortcut">H</span>
+                </button>
+                </div>
+	                </div>
+	              </div>
+	            </div>
+	          </div>
+        </div>
+      </div>
+
+      <!-- Claude Code -->
+      <div class="tab-panel" id="panel-claude">
+        <div class="pane">
+          <div class="pane-header active"><i data-lucide="terminal" class="icon"></i><span class="pane-header-title">Terminal — Claude Code</span><span class="pane-header-meta">~/code/freshell</span><div class="pane-btns"><span class="pane-btn"><i data-lucide="maximize-2" class="icon-xs"></i></span><span class="pane-btn"><i data-lucide="x" class="icon-xs"></i></span></div></div>
+          <div class="terminal" id="term-claude"></div>
+        </div>
+      </div>
+
+      <!-- Workspace (3 panes) -->
+      <div class="tab-panel" id="panel-workspace">
+        <div class="split-h">
+          <div class="split-v" style="flex:.52">
+            <div class="pane" style="flex:.55">
+              <div class="pane-header active"><i data-lucide="terminal" class="icon"></i><span class="pane-header-title">Terminal — Claude Code</span><span class="pane-header-meta">~/code/freshell</span><div class="pane-btns"><span class="pane-btn"><i data-lucide="maximize-2" class="icon-xs"></i></span><span class="pane-btn"><i data-lucide="x" class="icon-xs"></i></span></div></div>
+              <div class="terminal" id="term-ws-top"></div>
+            </div>
+            <div class="divider-h"><div class="dots"><span></span><span></span><span></span></div></div>
+            <div class="pane" style="flex:.45">
+              <div class="pane-header inactive"><i data-lucide="terminal" class="icon"></i><span class="pane-header-title">Terminal — vitest</span><span class="pane-header-meta">~/code/freshell</span><div class="pane-btns"><span class="pane-btn"><i data-lucide="maximize-2" class="icon-xs"></i></span><span class="pane-btn"><i data-lucide="x" class="icon-xs"></i></span></div></div>
+              <div class="terminal" id="term-ws-bottom"></div>
+            </div>
+          </div>
+          <div class="divider-v"><div class="dots"><span></span><span></span><span></span></div></div>
+          <div class="pane" style="flex:.48">
+            <div class="pane-header inactive"><i data-lucide="globe" class="icon"></i><span class="pane-header-title">Browser — localhost:5173</span><div class="pane-btns"><span class="pane-btn"><i data-lucide="maximize-2" class="icon-xs"></i></span><span class="pane-btn"><i data-lucide="x" class="icon-xs"></i></span></div></div>
+            <div class="browser-pane">
+              <div class="browser-bar">
+                <div class="browser-dots"><span class="rd"></span><span class="yw"></span><span class="gn"></span></div>
+                <div class="browser-url">http://localhost:5173</div>
+              </div>
+              <div class="browser-body">
+                <div class="sim-app">
+                  <h2>Task Board</h2>
+                  <div class="subtitle">3 active · 5 completed</div>
+                  <div class="sim-card"><div style="display:flex;justify-content:space-between;align-items:center"><span class="sim-card-title">Fix auth test</span><span class="sim-badge done">Done</span></div><div class="sim-card-meta">Server → Auth · just now</div></div>
+                  <div class="sim-card"><div style="display:flex;justify-content:space-between;align-items:center"><span class="sim-card-title">Dark mode toggle</span><span class="sim-badge prog">In Progress</span></div><div class="sim-card-meta">Settings → Appearance · @dan</div></div>
+                  <div class="sim-card"><div style="display:flex;justify-content:space-between;align-items:center"><span class="sim-card-title">WebSocket reconnect</span><span class="sim-badge prog">In Progress</span></div><div class="sim-card-meta">Core → Networking · @dan</div></div>
+                  <div class="sim-card"><div style="display:flex;justify-content:space-between;align-items:center"><span class="sim-card-title">Rate limiting</span><span class="sim-badge todo">To Do</span></div><div class="sim-card-meta">Server → API · unassigned</div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Projects -->
+      <div class="tab-panel" id="panel-sessions">
+        <div class="sessions-view">
+          <div class="sv-header">
+            <span class="sv-title">Projects</span>
+            <span class="sv-count">12 sessions across 3 projects</span>
+            <button class="sv-refresh"><i data-lucide="refresh-cw" class="icon"></i></button>
+          </div>
+          <div class="sv-search"><div class="sv-search-wrap"><i data-lucide="search" class="icon-md"></i><input type="text" placeholder="Search sessions, projects…" readonly></div></div>
+          <div class="sv-body">
+            <div class="sv-project open">
+              <div class="sv-project-header">
+                <div class="sv-project-dot" style="background:#34d399"></div>
+                <span class="sv-project-name">freshell</span>
+                <span class="sv-project-count">4 sessions</span>
+                <i data-lucide="chevron-right" class="icon sv-project-chevron"></i>
+              </div>
+              <div class="sv-sessions">
+                <div class="sv-session"><div class="sv-session-body"><div class="sv-session-top"><span class="sv-session-title">Add dark mode toggle</span><span class="sv-session-provider claude">Claude Code</span><span class="sv-session-time">2 min ago</span></div><div class="sv-session-summary">Added ThemeSelector with system/light/dark options. CSS variables switch themes. Persists to localStorage, respects OS preference via media query listener.</div><div class="sv-session-cwd">~/code/freshell</div></div></div>
+                <div class="sv-session"><div class="sv-session-body"><div class="sv-session-top"><span class="sv-session-title">Fix WebSocket reconnection</span><span class="sv-session-provider claude">Claude Code</span><span class="sv-session-time">1 hour ago</span></div><div class="sv-session-summary">Fixed race condition in reconnect logic — multiple simultaneous reconnect attempts caused duplicate sessions. Added exponential backoff with jitter, max 5 retries.</div><div class="sv-session-cwd">~/code/freshell</div></div></div>
+                <div class="sv-session"><div class="sv-session-body"><div class="sv-session-top"><span class="sv-session-title">Pane resize keyboard shortcuts</span><span class="sv-session-provider codex">Codex CLI</span><span class="sv-session-time">yesterday</span></div><div class="sv-session-summary">Added arrow key support for pane resizing. 10px increments with Shift modifier for 50px jumps. Respects min pane width/height constraints.</div><div class="sv-session-cwd">~/code/freshell</div></div></div>
+                <div class="sv-session"><div class="sv-session-body"><div class="sv-session-top"><span class="sv-session-title">Restore Kimi sidebar session after restart</span><span class="sv-session-provider kimi">Kimi</span><span class="sv-session-time">2 days ago</span></div><div class="sv-session-summary">Recovered the saved Kimi session from disk metadata, restored the original working directory, and reattached the sidebar row instead of spawning an orphaned terminal.</div><div class="sv-session-cwd">~/code/freshell</div></div></div>
+              </div>
+            </div>
+            <div class="sv-project">
+              <div class="sv-project-header"><div class="sv-project-dot" style="background:#60a5fa"></div><span class="sv-project-name">api-server</span><span class="sv-project-count">2 sessions</span><i data-lucide="chevron-right" class="icon sv-project-chevron"></i></div>
+            </div>
+            <div class="sv-project">
+              <div class="sv-project-header"><div class="sv-project-dot" style="background:#f97316"></div><span class="sv-project-name">freshell-web</span><span class="sv-project-count">1 session</span><i data-lucide="chevron-right" class="icon sv-project-chevron"></i></div>
+            </div>
+          </div>
+          </div>
+          <div class="sv-footnote">Restoring a session from history uses the current session identity (sessionRef) — requests carrying the deprecated resumeSessionId field are refused with a clear error instead of being silently ignored.</div>
+        </div>
+      <div class="tab-panel" id="panel-start">
+        <div class="pane">
+          <div class="pane-header pane-header--fresh-agent active"><span class="pane-header-icon" title="Repo: freshell"><i data-lucide="git-branch" class="icon"></i></span><span class="pane-header-icon" title="Codex (freshcodex pane)"><svg class="icon" viewBox="-0.27 -0.23 16.55 16.55" fill="currentColor"><path d="M14.949 6.547a3.94 3.94 0 0 0-.348-3.273 4.11 4.11 0 0 0-4.4-1.934A4.1 4.1 0 0 0 8.423.2 4.15 4.15 0 0 0 6.305.086a4.1 4.1 0 0 0-1.891.948 4.04 4.04 0 0 0-1.158 1.753 4.1 4.1 0 0 0-1.563.679A4 4 0 0 0 .554 4.72a3.99 3.99 0 0 0 .502 4.731 3.94 3.94 0 0 0 .346 3.274 4.11 4.11 0 0 0 4.402 1.933c.382.425.852.764 1.377.995.526.231 1.095.35 1.67.346 1.78.002 3.358-1.132 3.901-2.804a4.1 4.1 0 0 0 1.563-.68 4 4 0 0 0 1.14-1.253 3.99 3.99 0 0 0-.506-4.716m-6.097 8.406a3.05 3.05 0 0 1-1.945-.694l.096-.054 3.23-1.838a.53.53 0 0 0 .265-.455v-4.49l1.366.778q.02.011.025.035v3.722c-.003 1.653-1.361 2.992-3.037 2.996m-6.53-2.75a2.95 2.95 0 0 1-.36-2.01l.095.057L5.29 12.09a.53.53 0 0 0 .527 0l3.949-2.246v1.555a.05.05 0 0 1-.022.041L6.473 13.3c-1.454.826-3.311.335-4.15-1.098m-.85-6.94A3.02 3.02 0 0 1 3.07 3.949v3.785a.51.51 0 0 0 .262.451l3.93 2.237-1.366.779a.05.05 0 0 1-.048 0L2.585 9.342a2.98 2.98 0 0 1-1.113-4.094zm11.216 2.571L8.747 5.576l1.362-.776a.05.05 0 0 1 .048 0l3.265 1.86a3 3 0 0 1 1.173 1.207 2.96 2.96 0 0 1-.27 3.2 3.05 3.05 0 0 1-1.36.997V8.279a.52.52 0 0 0-.276-.445m1.36-2.015-.097-.057-3.226-1.855a.53.53 0 0 0-.53 0L6.249 6.153V4.598a.04.04 0 0 1 .019-.04L9.533 2.7a3.07 3.07 0 0 1 3.257.139c.474.325.843.778 1.066 1.303.223.526.289 1.103.191 1.664zM5.503 8.575 4.139 7.8a.05.05 0 0 1-.026-.037V4.049c0-.57.166-1.127.476-1.607s.752-.864 1.275-1.105a3.08 3.08 0 0 1 3.234.41l-.096.054-3.23 1.838a.53.53 0 0 0-.265.455zm.742-1.577 1.758-1 1.762 1v2l-1.755 1-1.762-1z"/></svg></span><span class="pane-header-meta">~/code/freshell</span><div class="pane-btns"><span class="pane-btn"><i data-lucide="refresh-cw" class="icon-xs"></i></span><span class="pane-btn"><i data-lucide="settings" class="icon-xs"></i></span><span class="pane-btn"><i data-lucide="maximize-2" class="icon-xs"></i></span><span class="pane-btn"><i data-lucide="x" class="icon-xs"></i></span></div></div>
+          <div class="fresh-mock">
+            <div class="fresh-main">
+              <div class="fresh-summary">Freshcodex and Freshclaude share model selection, attachments, questions, and approvals. Model and thinking changes apply to your next message. /undo rolls conversation turns back without changing your files; Freshclaude and Freshopencode also support /redo.</div>
+              <div class="fresh-diffs"><div class="fresh-diffs-title">Diffs</div>src/components/fresh-agent/FreshAgentView.tsx</div>
+              <div class="fresh-transcript">
+                <div class="fresh-turn user"><div class="fresh-role">You</div><div class="fresh-copy">What layout should Fresh clients use on desktop and phone?</div></div>
+                <div class="fresh-turn"><div class="fresh-role">Assistant</div><div class="fresh-activity">thought · 1 tool used</div><div class="fresh-copy">The pane keeps real geometry. Transcript text follows the terminal font size; metadata becomes a rail only when the pane has enough width.</div></div>
+              </div>
+              <div class="fresh-strip">
+                <button type="button" class="fresh-strip-chip" title="gpt-6-astra · effort max">GPT-6 Astra<i data-lucide="chevron-down" class="icon-xs"></i></button>
+                <span class="fresh-strip-ctx" role="meter" aria-label="Context window used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="47" title="96,000 / 200,000 tokens (47% full) — compacts at 100%"><span>context</span><span class="fresh-strip-meter"><i style="width:47%"></i></span><span class="fresh-strip-pct">47%</span></span>
+              </div>
+              <div class="fresh-composer">
+                <div class="fresh-thinking"><span></span></div>
+                <div class="fresh-input">Agent is working — sends queue for the next turn</div>
+                <details><summary>2 queued messages — review</summary><p>Check the updated settings</p><p>Summarize the changes</p></details>
+                <div class="fresh-actions"><div class="fresh-action"><i data-lucide="paperclip" class="icon-xs"></i></div><div class="fresh-action"><i data-lucide="square" class="icon-xs"></i></div><div class="fresh-action"><i data-lucide="list-start" class="icon-xs"></i></div><div class="fresh-action send"><i data-lucide="send" class="icon-xs"></i></div></div>
+              </div>
+            </div>
+            <aside class="fresh-rail">
+              <div class="fresh-rail-section"><div class="fresh-rail-title">Settings</div><div class="fresh-style-control" aria-label="Fresh Agent style setting"><span>Style</span><strong>Mono</strong></div></div>
+              <div class="fresh-rail-section"><div class="fresh-rail-title">Review</div><div class="fresh-rail-line">pending</div><div class="fresh-rail-line">review-responsive-display</div></div>
+              <div class="fresh-rail-section"><div class="fresh-rail-title">Fork lineage</div><div class="fresh-rail-line">parent-thread-with-long-identifier</div></div>
+              <div class="fresh-rail-section"><div class="fresh-rail-title">Worktrees</div><div class="fresh-rail-line">codex/fresh-client-responsive-display</div></div>
+            </aside>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings -->
+      <section class="settings-view" id="settings-view" aria-label="Settings preview" aria-hidden="true">
+        <div class="settings-page-header">
+          <div>
+            <h1>Settings</h1>
+            <p>Configure your preferences</p>
+          </div>
+        </div>
+        <div class="settings-shell">
+          <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+            <button class="settings-tab active" type="button" role="tab" aria-selected="true" data-settings-tab="appearance">Appearance</button>
+            <button class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="agents">Coding Agents</button>
+            <button class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="panes">Panes</button>
+            <button class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="workspace">Workspace</button>
+            <button class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="naming">Naming</button>
+            <button class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="network">Network</button>
+            <button class="settings-tab" type="button" role="tab" aria-selected="false" data-settings-tab="advanced">Advanced</button>
+          </div>
+
+          <div class="settings-panel active" id="settings-panel-appearance" role="tabpanel" aria-label="Appearance settings" aria-hidden="false">
+            <div class="settings-preview-title">
+              <span>Terminal preview</span>
+              <span>40x8</span>
+            </div>
+            <div class="settings-terminal-preview" aria-label="Terminal preview"><span class="t-dim">// terminal preview: syntax demo</span>
+<span class="t-blue">const</span> answer: <span class="t-magenta">number</span> = <span class="t-yellow">42</span>
+<span class="t-blue">type</span> User = { id: <span class="t-magenta">number</span> }
+<span class="t-blue">function</span> <span class="t-cyan">greet</span>(name: <span class="t-magenta">string</span>) {
+  <span class="t-blue">return</span> <span class="t-green">"hi, "</span> + name
+} <span class="t-dim">// end</span></div>
+
+            <div class="settings-section">
+              <h2>Appearance</h2>
+              <p class="settings-section-desc">Theme and visual preferences</p>
+              <div class="settings-list">
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Theme</div></div>
+                  <div class="settings-control">
+                    <div class="settings-segmented" data-segmented>
+                      <button class="settings-segment active" type="button">System</button>
+                      <button class="settings-segment" type="button">Light</button>
+                      <button class="settings-segment" type="button">Dark</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">UI scale</div></div>
+                  <div class="settings-control">
+                    <div class="settings-range"><input type="range" min="0.75" max="4" step="0.05" value="1" aria-label="UI scale" data-format="percent"><span>100%</span></div>
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Color scheme</div></div>
+                  <div class="settings-control">
+                    <select class="settings-select" aria-label="Color scheme">
+                      <option>Auto (follow app theme)</option>
+                      <option>Dracula</option>
+                      <option>One Dark</option>
+                      <option>Solarized Dark</option>
+                      <option>GitHub Dark</option>
+                      <option>One Light</option>
+                      <option>Solarized Light</option>
+                      <option>GitHub Light</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Font family</div></div>
+                  <div class="settings-control">
+                    <select class="settings-select" aria-label="Font family">
+                      <option>System monospace</option>
+                      <option>JetBrains Mono</option>
+                      <option>Cascadia Code</option>
+                      <option>Cascadia Mono</option>
+                      <option>Fira Code</option>
+                      <option>Meslo LG S</option>
+                      <option>Source Code Pro</option>
+                      <option>IBM Plex Mono</option>
+                      <option>Consolas</option>
+                      <option>Monaco</option>
+                      <option>Menlo</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Font size</div></div>
+                  <div class="settings-control">
+                    <div class="settings-range"><input type="range" min="12" max="64" step="1" value="16" aria-label="Font size" data-format="px-percent"><span>16px (100%)</span></div>
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Line height</div></div>
+                  <div class="settings-control">
+                    <div class="settings-range"><input type="range" min="1" max="1.8" step="0.05" value="1" aria-label="Line height" data-format="fixed"><span>1.00</span></div>
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Cursor blink</div></div>
+                  <div class="settings-control settings-switch-wrap">
+                    <button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Cursor blink"></button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-panel" id="settings-panel-agents" role="tabpanel" aria-label="Coding agent settings" aria-hidden="true">
+            <div class="settings-agent-list">
+              <div class="settings-agent-item">
+                <div class="settings-agent-main">
+                  <span class="settings-agent-icon" aria-hidden="true">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="75.73 64.08 872.25 872.25" fill="currentColor"><path d="M616.9,649.5h-209.7c0,0,0,104.7,0,104.7h-56.6c0,0,.2-104.5.2-104.5h-48.6s.2,104.5.2,104.5h-56.7c0,0,.2-104.4.2-104.4l-48.6-.7v-96.4c.1,0-104.8,0-104.8,0v-104.9s104.9,0,104.9,0v-201.6c0,0,628.9,0,628.9,0v201.6c0,0,104.9,0,104.9,0v104.9s-104.9,0-104.9,0v96.6c.1,0-56.5.4-56.5.4l.2,104.5h-48.6s.2-104.6.2-104.6h-56.6s.2,104.6.2,104.6h-48.6s.2-104.6.2-104.6ZM351.1,447.5l-.5-96.4h-48.4c0,0,0,96.6,0,96.6l48.8-.2ZM722,447.7l-.4-96.7h-56.5c0,0,0,96.8,0,96.8h56.9Z"/></svg>
+                  </span>
+                  <span class="settings-agent-name">Claude CLI</span>
+                </div>
+                <button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Enable Claude CLI"></button>
+              </div>
+              <div class="settings-agent-item">
+                <div class="settings-agent-main">
+                  <span class="settings-agent-icon" aria-hidden="true">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="currentColor"><path d="M853.1,283.1c94.2,0,170.6,76.4,170.6,170.6s-76.4,170.6-170.6,170.6v-341.3h0ZM170.6,283.1C76.4,283.1,0,359.5,0,453.8s76.4,170.6,170.6,170.6v-341.3h0ZM853.1,624.3H170.6c0-188.5,152.8-341.3,341.3-341.3s341.3,152.8,341.3,341.3h-.1ZM410.8,496.4c0-23.6-19-42.6-42.6-42.6s-42.6,19-42.6,42.6,19,42.6,42.6,42.6,42.6-19,42.6-42.6h0ZM698.2,496.4c0-23.6-19-42.6-42.6-42.6s-42.6,19-42.6,42.6,19,42.6,42.6,42.6,42.6-19,42.6-42.6h0ZM234.6,624.3c-35.4,0-64,28.7-64,64s28.7,64,64,64v-127.9h0ZM368.2,624.3c-35.4,0-64,28.7-64,64s28.7,64,64,64v-127.9h0ZM789.1,752.3c35.4,0,64-28.7,64-64s-28.7-64-64-64v127.9h0ZM655.5,752.3c35.4,0,64-28.7,64-64s-28.7-64-64-64v127.9h0Z"/></svg>
+                  </span>
+                  <span class="settings-agent-name">Freshclaude</span>
+                </div>
+                <button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Enable Freshclaude"></button>
+              </div>
+              <div class="settings-agent-item">
+                <div class="settings-agent-main">
+                  <span class="settings-agent-icon" aria-hidden="true">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="-0.27 -0.23 16.55 16.55" fill="currentColor"><path d="M14.949 6.547a3.94 3.94 0 0 0-.348-3.273 4.11 4.11 0 0 0-4.4-1.934A4.1 4.1 0 0 0 8.423.2 4.15 4.15 0 0 0 6.305.086a4.1 4.1 0 0 0-1.891.948 4.04 4.04 0 0 0-1.158 1.753 4.1 4.1 0 0 0-1.563.679A4 4 0 0 0 .554 4.72a3.99 3.99 0 0 0 .502 4.731 3.94 3.94 0 0 0 .346 3.274 4.11 4.11 0 0 0 4.402 1.933c.382.425.852.764 1.377.995.526.231 1.095.35 1.67.346 1.78.002 3.358-1.132 3.901-2.804a4.1 4.1 0 0 0 1.563-.68 4 4 0 0 0 1.14-1.253 3.99 3.99 0 0 0-.506-4.716m-6.097 8.406a3.05 3.05 0 0 1-1.945-.694l.096-.054 3.23-1.838a.53.53 0 0 0 .265-.455v-4.49l1.366.778q.02.011.025.035v3.722c-.003 1.653-1.361 2.992-3.037 2.996m-6.53-2.75a2.95 2.95 0 0 1-.36-2.01l.095.057L5.29 12.09a.53.53 0 0 0 .527 0l3.949-2.246v1.555a.05.05 0 0 1-.022.041L6.473 13.3c-1.454.826-3.311.335-4.15-1.098m-.85-6.94A3.02 3.02 0 0 1 3.07 3.949v3.785a.51.51 0 0 0 .262.451l3.93 2.237-1.366.779a.05.05 0 0 1-.048 0L2.585 9.342a2.98 2.98 0 0 1-1.113-4.094zm11.216 2.571L8.747 5.576l1.362-.776a.05.05 0 0 1 .048 0l3.265 1.86a3 3 0 0 1 1.173 1.207 2.96 2.96 0 0 1-.27 3.2 3.05 3.05 0 0 1-1.36.997V8.279a.52.52 0 0 0-.276-.445m1.36-2.015-.097-.057-3.226-1.855a.53.53 0 0 0-.53 0L6.249 6.153V4.598a.04.04 0 0 1 .019-.04L9.533 2.7a3.07 3.07 0 0 1 3.257.139c.474.325.843.778 1.066 1.303.223.526.289 1.103.191 1.664zM5.503 8.575 4.139 7.8a.05.05 0 0 1-.026-.037V4.049c0-.57.166-1.127.476-1.607s.752-.864 1.275-1.105a3.08 3.08 0 0 1 3.234.41l-.096.054-3.23 1.838a.53.53 0 0 0-.265.455zm.742-1.577 1.758-1 1.762 1v2l-1.755 1-1.762-1z"/></svg>
+                  </span>
+                  <span class="settings-agent-name">Codex CLI</span>
+                </div>
+                <button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Enable Codex CLI"></button>
+              </div>
+              <div class="settings-agent-item">
+                <div class="settings-agent-main">
+                  <span class="settings-agent-icon" aria-hidden="true">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="-0.27 -0.23 16.55 16.55" fill="currentColor"><path d="M14.949 6.547a3.94 3.94 0 0 0-.348-3.273 4.11 4.11 0 0 0-4.4-1.934A4.1 4.1 0 0 0 8.423.2 4.15 4.15 0 0 0 6.305.086a4.1 4.1 0 0 0-1.891.948 4.04 4.04 0 0 0-1.158 1.753 4.1 4.1 0 0 0-1.563.679A4 4 0 0 0 .554 4.72a3.99 3.99 0 0 0 .502 4.731 3.94 3.94 0 0 0 .346 3.274 4.11 4.11 0 0 0 4.402 1.933c.382.425.852.764 1.377.995.526.231 1.095.35 1.67.346 1.78.002 3.358-1.132 3.901-2.804a4.1 4.1 0 0 0 1.563-.68 4 4 0 0 0 1.14-1.253 3.99 3.99 0 0 0-.506-4.716m-6.097 8.406a3.05 3.05 0 0 1-1.945-.694l.096-.054 3.23-1.838a.53.53 0 0 0 .265-.455v-4.49l1.366.778q.02.011.025.035v3.722c-.003 1.653-1.361 2.992-3.037 2.996m-6.53-2.75a2.95 2.95 0 0 1-.36-2.01l.095.057L5.29 12.09a.53.53 0 0 0 .527 0l3.949-2.246v1.555a.05.05 0 0 1-.022.041L6.473 13.3c-1.454.826-3.311.335-4.15-1.098m-.85-6.94A3.02 3.02 0 0 1 3.07 3.949v3.785a.51.51 0 0 0 .262.451l3.93 2.237-1.366.779a.05.05 0 0 1-.048 0L2.585 9.342a2.98 2.98 0 0 1-1.113-4.094zm11.216 2.571L8.747 5.576l1.362-.776a.05.05 0 0 1 .048 0l3.265 1.86a3 3 0 0 1 1.173 1.207 2.96 2.96 0 0 1-.27 3.2 3.05 3.05 0 0 1-1.36.997V8.279a.52.52 0 0 0-.276-.445m1.36-2.015-.097-.057-3.226-1.855a.53.53 0 0 0-.53 0L6.249 6.153V4.598a.04.04 0 0 1 .019-.04L9.533 2.7a3.07 3.07 0 0 1 3.257.139c.474.325.843.778 1.066 1.303.223.526.289 1.103.191 1.664zM5.503 8.575 4.139 7.8a.05.05 0 0 1-.026-.037V4.049c0-.57.166-1.127.476-1.607s.752-.864 1.275-1.105a3.08 3.08 0 0 1 3.234.41l-.096.054-3.23 1.838a.53.53 0 0 0-.265.455zm.742-1.577 1.758-1 1.762 1v2l-1.755 1-1.762-1z"/></svg>
+                  </span>
+                  <span class="settings-agent-name">Freshcodex</span>
+                </div>
+                <button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Enable Freshcodex"></button>
+              </div>
+              <div class="settings-agent-item">
+                <div class="settings-agent-main">
+                  <span class="settings-agent-icon" aria-hidden="true">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="444 174 312 312" fill="currentColor"><path d="M520,180h200v300h-240V180h40ZM540,300v120h120v-180h-120v60Z"/><path d="M660,300v120h-120v-120h120Z" fill-opacity="0.5"/></svg>
+                  </span>
+                  <span class="settings-agent-name">OpenCode</span>
+                </div>
+                <button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Enable OpenCode"></button>
+              </div>
+              <div class="settings-agent-item">
+                <div class="settings-agent-main">
+                  <span class="settings-agent-icon" aria-hidden="true">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="444.00 174.00 312.00 312.00" fill="currentColor"><path d="M520,180h200v300h-240V180h40ZM540,300v120h120v-180h-120v60Z"/><path d="M660,300v120h-120v-120h120Z" fill-opacity="0.5"/></svg>
+                  </span>
+                  <span class="settings-agent-name">Freshopencode</span>
+                </div>
+                <button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Enable Freshopencode"></button>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-panel" id="settings-panel-panes" role="tabpanel" aria-label="Pane settings" aria-hidden="true">
+            <div class="settings-section">
+              <h2>Pane behavior</h2>
+              <p class="settings-section-desc">Layout, defaults, and completion indicators</p>
+              <div class="settings-list">
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Open sidebar session in</div><div class="settings-label-desc">Where to open a session when clicked in the sidebar.</div></div>
+                  <div class="settings-control">
+                    <div class="settings-segmented" data-segmented><button class="settings-segment active" type="button">New tab</button><button class="settings-segment" type="button">Split pane</button></div>
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Default new pane</div></div>
+                  <div class="settings-control"><select class="settings-select" aria-label="Default new pane"><option>Ask</option><option>Shell</option><option>Browser</option><option>Editor</option></select></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Snap distance</div></div>
+                  <div class="settings-control"><div class="settings-range"><input type="range" min="0" max="8" step="1" value="2" aria-label="Snap distance" data-format="snap"><span>2%</span></div></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Icons on tabs</div></div>
+                  <div class="settings-control settings-switch-wrap"><button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Icons on tabs"></button></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Multi-row tabs</div><div class="settings-label-desc">Show tabs in multiple rows instead of a single scrollable row.</div></div>
+                  <div class="settings-control settings-switch-wrap"><button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Multi-row tabs"></button></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Tab completion indicator</div></div>
+                  <div class="settings-control"><div class="settings-segmented" data-segmented><button class="settings-segment active" type="button">Highlight</button><button class="settings-segment" type="button">Pulse</button><button class="settings-segment" type="button">Darken</button><button class="settings-segment" type="button">None</button></div></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Dismiss attention on</div></div>
+                  <div class="settings-control"><div class="settings-segmented" data-segmented><button class="settings-segment active" type="button">Tab click</button><button class="settings-segment" type="button">Typing</button></div></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Sound on completion</div></div>
+                  <div class="settings-control settings-switch-wrap"><button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Sound on completion"></button></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <h2>Editor pane</h2>
+              <p class="settings-section-desc">External editor for file opening</p>
+              <div class="settings-list">
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">External editor</div><div class="settings-label-desc">Which editor to use when opening files from the editor pane.</div></div>
+                  <div class="settings-control"><select class="settings-select" aria-label="External editor"><option>Auto (system default)</option><option>Cursor</option><option>VS Code</option><option>Custom command</option></select></div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <div class="settings-panel" id="settings-panel-workspace" role="tabpanel" aria-label="Workspace settings" aria-hidden="true">
+            <div class="settings-section">
+              <h2>Sidebar</h2>
+              <p class="settings-section-desc">Session list and navigation</p>
+              <div class="settings-list">
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Sort mode</div></div>
+                  <div class="settings-control">
+                    <select class="settings-select" aria-label="Sort mode">
+                      <option>Activity (status first)</option>
+                      <option>Recency</option>
+                      <option>Recency (tabs first)</option>
+                      <option>Project</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Worktree grouping</div></div>
+                  <div class="settings-control"><select class="settings-select" aria-label="Worktree grouping"><option>Repository</option><option>Worktree</option></select></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Show project badges</div></div>
+                  <div class="settings-control settings-switch-wrap"><button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Show project badges"></button></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Show subagent sessions</div></div>
+                  <div class="settings-control settings-switch-wrap"><button class="settings-switch" type="button" role="switch" aria-checked="false" aria-label="Show subagent sessions"></button></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Ignore Codex subagent sessions</div></div>
+                  <div class="settings-control settings-switch-wrap"><button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Ignore Codex subagent sessions"></button></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Show non-interactive sessions</div></div>
+                  <div class="settings-control settings-switch-wrap"><button class="settings-switch" type="button" role="switch" aria-checked="false" aria-label="Show non-interactive sessions"></button></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Hide empty sessions</div><div class="settings-label-desc">Hide sessions that have no messages yet.</div></div>
+                  <div class="settings-control settings-switch-wrap"><button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Hide empty sessions"></button></div>
+                </div>
+                <div class="settings-row stack">
+                  <div class="settings-label"><div class="settings-label-title">Hide sessions by first chat</div><div class="settings-label-desc">One substring per line. Matching sessions are hidden from the sidebar.</div></div>
+                  <div class="settings-control wide"><textarea class="settings-textarea" aria-label="Sidebar first chat exclusion substrings" placeholder="__AUTO__"></textarea></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">First chat must start with match</div></div>
+                  <div class="settings-control settings-switch-wrap"><button class="settings-switch" type="button" role="switch" aria-checked="false" aria-label="Require first chat exclusion substring at start"></button></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <h2>Keyboard shortcuts</h2>
+              <p class="settings-section-desc">Navigation and terminal</p>
+              <div class="settings-shortcuts" aria-label="Keyboard shortcuts">
+                <div class="settings-shortcut-row"><span>New tab</span><span class="settings-shortcut-keys"><kbd>Alt</kbd> <kbd>T</kbd></span></div>
+                <div class="settings-shortcut-row"><span>Close tab</span><span class="settings-shortcut-keys"><kbd>Alt</kbd> <kbd>W</kbd></span></div>
+                <div class="settings-shortcut-row"><span>Reopen closed tab</span><span class="settings-shortcut-keys"><kbd>Alt</kbd> <kbd>H</kbd></span></div>
+                <div class="settings-shortcut-row"><span>Previous tab</span><span class="settings-shortcut-keys"><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>[</kbd></span></div>
+                <div class="settings-shortcut-row"><span>Next tab</span><span class="settings-shortcut-keys"><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>]</kbd></span></div>
+                <div class="settings-shortcut-row"><span>Copy selection</span><span class="settings-shortcut-keys"><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>C</kbd></span></div>
+                <div class="settings-shortcut-row"><span>Paste</span><span class="settings-shortcut-keys"><kbd>Ctrl</kbd> <kbd>V</kbd></span></div>
+                <div class="settings-shortcut-row"><span>Search</span><span class="settings-shortcut-keys"><kbd>Ctrl</kbd> <kbd>F</kbd></span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-panel" id="settings-panel-naming" role="tabpanel" aria-label="Naming settings" aria-hidden="true">
+            <div class="settings-section">
+              <h2>Naming</h2>
+              <p class="settings-section-desc">Automatic session names</p>
+              <div class="settings-list">
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Gemini API key</div><div class="settings-label-desc">Used for automatic session naming.</div></div>
+                  <div class="settings-control"><input class="settings-input" type="password" aria-label="Gemini API key" placeholder="Enter Gemini API key"></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Auto-generate session titles</div><div class="settings-label-desc">Generate names for new coding sessions.</div></div>
+                  <div class="settings-control settings-switch-wrap"><button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Auto-generate session titles"></button></div>
+                </div>
+                <div class="settings-row stack">
+                  <div class="settings-label"><div class="settings-label-title">Naming prompt</div><div class="settings-label-desc">Instructions for generating session titles.</div></div>
+                  <div class="settings-control wide"><textarea class="settings-textarea" aria-label="Naming prompt" placeholder="Generate a short title (3-8 words) for a coding assistant conversation."></textarea></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-panel" id="settings-panel-network" role="tabpanel" aria-label="Network settings" aria-hidden="true">
+            <div class="settings-section">
+              <h2>Network</h2>
+              <p class="settings-section-desc">Remote access from other devices</p>
+              <div class="settings-list">
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Remote access</div><div class="settings-label-desc">Allow connections from other devices on your network.</div></div>
+                  <div class="settings-control settings-switch-wrap"><button class="settings-switch" type="button" role="switch" aria-checked="false" aria-label="Remote access"></button></div>
+                </div>
+              </div>
+              <div class="settings-note">Firewall status and device links appear here only when remote access is enabled or needs attention.</div>
+            </div>
+          </div>
+
+          <div class="settings-panel" id="settings-panel-advanced" role="tabpanel" aria-label="Advanced settings" aria-hidden="true">
+            <div class="settings-section">
+              <h2>Advanced</h2>
+              <p class="settings-section-desc">Terminal internals and debugging</p>
+              <div class="settings-list">
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Scrollback lines</div></div>
+                  <div class="settings-control"><div class="settings-range"><input type="range" min="1000" max="20000" step="500" value="10000" aria-label="Scrollback lines" data-format="locale"><span>10,000</span></div></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Warn on external links</div></div>
+                  <div class="settings-control settings-switch-wrap"><button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Warn on external links"></button></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Debug logging</div></div>
+                  <div class="settings-control settings-switch-wrap"><button class="settings-switch" type="button" role="switch" aria-checked="false" aria-label="Debug logging"></button></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Agent MCP server</div><div class="settings-label-desc">Expose Freshell as an MCP tool to coding agents.</div></div>
+                  <div class="settings-control settings-switch-wrap"><button class="settings-switch on" type="button" role="switch" aria-checked="true" aria-label="Agent MCP server"></button></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">OSC52 clipboard access</div></div>
+                  <div class="settings-control"><div class="settings-segmented" data-segmented><button class="settings-segment active" type="button">Ask</button><button class="settings-segment" type="button">Always</button><button class="settings-segment" type="button">Never</button></div></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <h2>Runtime</h2>
+              <p class="settings-section-desc">Idle terminals and startup defaults</p>
+              <div class="settings-list">
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Auto-kill idle (minutes)</div></div>
+                  <div class="settings-control"><div class="settings-range"><input type="range" min="5" max="720" step="5" value="15" aria-label="Auto-kill idle minutes" data-format="plain"><span>15</span></div></div>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">Default working directory</div></div>
+                  <div class="settings-control"><input class="settings-input" type="text" aria-label="Default working directory" placeholder="e.g. C:\Users\you\projects"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <h2>Extensions</h2>
+              <p class="settings-section-desc">Developer extension controls</p>
+              <div class="settings-empty-state">
+                <i data-lucide="puzzle" class="icon"></i>
+                <span>No extensions installed</span>
+              </div>
+            </div>
+
+            <div class="settings-section">
+              <h2>Devices</h2>
+              <p class="settings-section-desc">Device names and local aliases</p>
+              <div class="settings-list">
+                <div class="settings-row">
+                  <div class="settings-label"><div class="settings-label-title">This machine</div><div class="settings-label-desc">Renaming this updates what other machines see.</div></div>
+                  <div class="settings-control"><input class="settings-input" type="text" aria-label="Device name for this machine" value="local-device"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script>
+// ========== Initialize Lucide Icons ==========
+lucide.createIcons();
+
+// ========== Sidebar Toggle ==========
+const sidebarToggle = document.getElementById('sidebar-toggle');
+const sidebarOpen = document.getElementById('sidebar-open');
+const sidebar = document.getElementById('sidebar');
+let sidebarVisible = window.innerWidth > 768;
+if (!sidebarVisible) {
+  sidebar.style.display = 'none';
+  sidebarOpen.style.display = '';
+}
+
+function updateSidebarVisibility() {
+  sidebar.style.display = sidebarVisible ? '' : 'none';
+  sidebarOpen.style.display = sidebarVisible ? 'none' : '';
+}
+
+sidebarToggle.addEventListener('click', () => {
+  sidebarVisible = false;
+  updateSidebarVisibility();
+});
+
+sidebarOpen.addEventListener('click', () => {
+  sidebarVisible = true;
+  updateSidebarVisibility();
+});
+
+window.addEventListener('resize', () => {
+  if (window.innerWidth <= 768 && sidebarVisible) return
+  if (window.innerWidth > 768) {
+    sidebarVisible = true
+  }
+  if (window.innerWidth <= 768 && !sidebarVisible) {
+    sidebarVisible = false
+  }
+  updateSidebarVisibility()
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return
+  if (document.getElementById('settings-view')?.classList.contains('active')) return
+  if (!sidebarVisible) return
+  sidebarVisible = !sidebarVisible;
+  updateSidebarVisibility();
+});
+
+// ========== Sidebar Nav ==========
+const settingsView = document.getElementById('settings-view');
+const tabbar = document.querySelector('.tabbar');
+const settingsNavButton = document.querySelector('.sb-nav-btn[title="Settings"]');
+const primaryNavButton = document.querySelector('.sb-nav-btn[title="Coding Agents"]');
+
+function restoreActiveTabPanel() {
+  const activeTab = document.querySelector('.tab.active[data-tab]') || document.querySelector('.tab[data-tab]');
+  if (!activeTab) return;
+  const id = activeTab.dataset.tab;
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-' + id)?.classList.add('active');
+}
+
+function hideSettingsView() {
+  if (!settingsView) return;
+  settingsView.classList.remove('active');
+  settingsView.setAttribute('aria-hidden', 'true');
+  if (tabbar) tabbar.style.display = '';
+  restoreActiveTabPanel();
+  if (window.innerWidth <= 768) {
+    sidebarVisible = false;
+    updateSidebarVisibility();
+  }
+}
+
+function showSettingsView() {
+  if (!settingsView) return;
+  cancelAnimations();
+  hideSnark();
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  if (tabbar) tabbar.style.display = 'none';
+  settingsView.classList.add('active');
+  settingsView.setAttribute('aria-hidden', 'false');
+  if (window.innerWidth <= 768) {
+    sidebarVisible = false;
+    updateSidebarVisibility();
+  }
+  lucide.createIcons();
+}
+
+document.querySelectorAll('.sb-nav-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.sb-nav-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    if (btn === settingsNavButton) {
+      showSettingsView();
+      return;
+    }
+    hideSettingsView();
+  });
+});
+
+// ========== Tab Switching ==========
+const allTabs = document.querySelectorAll('.tab[data-tab]');
+const allPanels = document.querySelectorAll('.tab-panel');
+let activeAnimations = [];
+
+allTabs.forEach(tab => {
+  tab.addEventListener('click', () => {
+    hideSettingsView();
+    document.querySelectorAll('.sb-nav-btn').forEach(b => b.classList.remove('active'));
+    primaryNavButton?.classList.add('active');
+    const id = tab.dataset.tab;
+    allTabs.forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    allPanels.forEach(p => p.classList.remove('active'));
+    document.getElementById('panel-' + id).classList.add('active');
+    cancelAnimations();
+    startAnimation(id);
+  });
+});
+
+function cancelAnimations() {
+  activeAnimations.forEach(id => clearTimeout(id));
+  activeAnimations = [];
+}
+
+// ========== Terminal Animation Engine ==========
+function animateTerminal(containerId, lines, callback) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = '';
+  let i = 0;
+
+  function addCursor() {
+    const existing = el.querySelector('.term-cursor');
+    if (existing) existing.remove();
+    const c = document.createElement('span');
+    c.className = 'term-cursor';
+    // Append cursor inside the last term-line so it sits next to the prompt
+    const lastLine = el.querySelector('.term-line:last-of-type');
+    if (lastLine) lastLine.appendChild(c);
+    else el.appendChild(c);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function next() {
+    if (i >= lines.length) { addCursor(); if (callback) callback(); return; }
+    const line = lines[i]; i++;
+
+    if (line.typed) {
+      const div = document.createElement('div');
+      div.className = 'term-line';
+      div.innerHTML = line.prompt || '';
+      el.querySelector('.term-cursor')?.remove();
+      el.appendChild(div);
+      typeText(div, line.command, 0, () => {
+        const tid = setTimeout(next, line.delay || 300);
+        activeAnimations.push(tid);
+      });
+    } else {
+      const div = document.createElement('div');
+      div.className = 'term-line';
+      div.innerHTML = line.html || '';
+      el.querySelector('.term-cursor')?.remove();
+      el.appendChild(div);
+      addCursor();
+      const tid = setTimeout(next, line.delay || 40);
+      activeAnimations.push(tid);
+    }
+  }
+  addCursor();
+  const tid = setTimeout(next, 400);
+  activeAnimations.push(tid);
+}
+
+function typeText(el, text, pos, callback) {
+  if (pos >= text.length) { callback(); return; }
+  el.innerHTML += text[pos] === ' ' ? ' ' : escapeHtml(text[pos]);
+  el.closest('.terminal').scrollTop = el.closest('.terminal').scrollHeight;
+  const speed = 11 + Math.random() * 15;
+  const tid = setTimeout(() => typeText(el, text, pos + 1, callback), speed);
+  activeAnimations.push(tid);
+}
+
+function escapeHtml(c) {
+  if (c === '<') return '&lt;'; if (c === '>') return '&gt;';
+  if (c === '&') return '&amp;'; return c;
+}
+
+// ========== Content Definitions ==========
+const P = '<span class="t-green">&#10095; </span>';
+const FP = '<span class="t-green">freshell</span> <span class="t-magenta">(main)</span> <span class="t-dim">|</span> ' + P;
+
+const content = {
+  welcome: [
+    { typed: true, prompt: P, command: 'freshell', delay: 700 },
+    { html: '' },
+    { html: '  🐚🔥 <span class="t-bold">freshell</span> <span class="t-dim">v0.7.5</span>', delay: 60 },
+    { html: '  <span class="t-dim">Self-hosted browser terminal multiplexer</span>', delay: 60 },
+    { html: '', delay: 200 },
+    { html: '  <span class="t-success">✓</span> Multi-tab terminal management', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Claude Code, Codex, Kimi, OpenCode &amp; more', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Fresh OpenCode streaming &mdash; shared <span class="t-dim">opencode serve</span> sidecar with server-pushed idle state, drivable via orchestration', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Model + thinking selector for fresh agents &mdash; <span class="t-dim">/model</span>, recent choices, and live Claude and OpenCode catalogs', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Split panes with browser views', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Clickable URLs in terminal with right-click context menu', delay: 50 },
+    { html: '  <span class="t-success">✓</span> In-pane terminal search with Ctrl+F', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Advanced OSC52 clipboard policy (Ask/Always/Never)', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Session history &amp; AI summaries', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Remote tab copies keep layout and reconnect safely on this machine', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Remote access with setup wizard &amp; QR code', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Pane type system for custom panes', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Automatic session titles', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Progressive sidebar search', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Keyboard shortcuts dialog (Alt+T, Alt+W, Alt+H)', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Personalized sidebar per device', delay: 50 },
+    { html: '  <span class="t-success">✓</span> Freshclaude rich chat UI', delay: 50 },
+    { html: '', delay: 300 },
+    { html: '  <span class="t-dim">Your coding CLIs, organized in the browser.</span>', delay: 80 },
+    { html: '  <span class="t-dim">GitHub:</span> <a href="https://github.com/danshapiro/freshell" target="_blank" class="t-blue">https://github.com/danshapiro/freshell</a>', delay: 80 },
+    { html: '' },
+    { html: '  <span class="t-dim">Try the tabs at the top to learn more.</span>', delay: 80 },
+    { html: '' },
+    { typed: true, prompt: FP, command: '', delay: 0 },
+  ],
+
+  claude: [
+    { typed: true, prompt: P, command: 'claude', delay: 700 },
+    { html: '', delay: 300 },
+    { html: '<span class="t-dim">╭───────────────────────────────────────────╮</span>', delay: 30 },
+    { html: '<span class="t-dim">│</span> <span class="t-magenta">✻</span> <span class="t-bold">Claude Code</span>          <span class="t-dim">Press ? for help │</span>', delay: 30 },
+    { html: '<span class="t-dim">╰───────────────────────────────────────────╯</span>', delay: 200 },
+    { html: '' },
+    { typed: true, prompt: '<span class="t-blue">&#10095; </span>', command: 'Add a dark mode toggle to the settings page', delay: 600 },
+    { html: '' },
+    { html: 'I\'ll add a dark mode toggle. Let me check the current', delay: 40 },
+    { html: 'implementation first.', delay: 200 },
+    { html: '' },
+    { html: '  <span class="t-dim">Read</span> <span class="t-cyan">src/components/Settings.tsx</span>', delay: 80 },
+    { html: '  <span class="t-dim">Read</span> <span class="t-cyan">src/lib/theme.ts</span>', delay: 300 },
+    { html: '' },
+    { html: 'The settings page uses a card-based layout. I\'ll add a', delay: 40 },
+    { html: 'theme selector with system/light/dark options.', delay: 200 },
+    { html: '' },
+    { html: '  <span class="t-dim">Edit</span> <span class="t-cyan">src/components/Settings.tsx</span>', delay: 60 },
+    { html: '   <span class="t-success">+</span> Added <span class="t-bold">ThemeSelector</span> component', delay: 40 },
+    { html: '   <span class="t-success">+</span> Three-way toggle: System | Light | Dark', delay: 40 },
+    { html: '   <span class="t-success">+</span> Reads OS preference for "system" mode', delay: 150 },
+    { html: '' },
+    { html: '  <span class="t-dim">Write</span> <span class="t-cyan">src/lib/theme.ts</span>', delay: 60 },
+    { html: '   <span class="t-success">+</span> CSS variable switching utility', delay: 40 },
+    { html: '   <span class="t-success">+</span> localStorage persistence', delay: 40 },
+    { html: '   <span class="t-success">+</span> Media query listener for OS changes', delay: 200 },
+    { html: '' },
+    { html: '<span class="t-success">✓</span> Dark mode toggle added. The component respects the', delay: 40 },
+    { html: '  OS theme preference by default and allows manual override.', delay: 300 },
+    { html: '' },
+    { html: '<span class="t-green">freshell</span> <span class="t-magenta">(main)</span> <span class="t-dim">|</span> <span class="t-yellow">55,872</span>' },
+    { html: '<span class="t-yellow">** bypass permissions on</span> <span class="t-dim">(shift+tab to cycle)</span>' },
+  ],
+
+  'ws-top': [
+    { typed: true, prompt: '<span class="t-blue">&#10095; </span>', command: 'Fix the failing test in auth.test.ts', delay: 500 },
+    { html: '' },
+    { html: 'Let me look at the test and the auth module.', delay: 200 },
+    { html: '' },
+    { html: '  <span class="t-dim">Read</span> <span class="t-cyan">server/auth.test.ts</span>', delay: 80 },
+    { html: '  <span class="t-dim">Read</span> <span class="t-cyan">server/auth.ts</span>', delay: 300 },
+    { html: '' },
+    { html: 'The test expects <span class="t-cyan">validateToken</span> to throw on expired', delay: 40 },
+    { html: 'tokens, but it returns <span class="t-cyan">null</span> instead.', delay: 200 },
+    { html: '' },
+    { html: '  <span class="t-dim">Edit</span> <span class="t-cyan">server/auth.ts</span>', delay: 60 },
+    { html: '   <span class="t-success">+</span> Line 42: <span class="t-red">throw new</span> <span class="t-yellow">TokenExpiredError</span>()', delay: 40 },
+    { html: '   <span class="t-success">+</span> Export <span class="t-yellow">TokenExpiredError</span> class', delay: 200 },
+    { html: '' },
+    { html: '<span class="t-success">✓</span> Fixed. Run the tests to verify.', delay: 60 },
+    { html: '' },
+    { html: '<span class="t-green">freshell</span> <span class="t-magenta">(main)</span> <span class="t-dim">|</span> <span class="t-yellow">55,872</span>' },
+  ],
+
+  'ws-bottom': [
+    { typed: true, prompt: P, command: 'npm test', delay: 400 },
+    { html: '', delay: 600 },
+    { html: ' <span class="t-success">✓</span> server/auth.test.ts <span class="t-dim">(4)</span> <span class="t-dim">12ms</span>', delay: 60 },
+    { html: '   <span class="t-success">✓</span> <span class="t-dim">validates correct tokens</span>', delay: 30 },
+    { html: '   <span class="t-success">✓</span> <span class="t-dim">rejects invalid tokens</span>', delay: 30 },
+    { html: '   <span class="t-success">✓</span> <span class="t-dim">throws on expired tokens</span>', delay: 30 },
+    { html: '   <span class="t-success">✓</span> <span class="t-dim">handles missing auth header</span>', delay: 80 },
+    { html: ' <span class="t-success">✓</span> server/ws-handler.test.ts <span class="t-dim">(8)</span> <span class="t-dim">45ms</span>', delay: 60 },
+    { html: ' <span class="t-success">✓</span> src/store/tabs.test.ts <span class="t-dim">(6)</span> <span class="t-dim">23ms</span>', delay: 60 },
+    { html: ' <span class="t-success">✓</span> src/store/panes.test.ts <span class="t-dim">(5)</span> <span class="t-dim">18ms</span>', delay: 60 },
+    { html: ' <span class="t-success">✓</span> server/terminal-registry.test.ts <span class="t-dim">(7)</span> <span class="t-dim">31ms</span>', delay: 150 },
+    { html: '' },
+    { html: ' <span class="t-bold">Tests</span>  <span class="t-success">30 passed</span> <span class="t-dim">(30)</span>', delay: 60 },
+    { html: ' <span class="t-bold">Time</span>   <span class="t-dim">1.24s</span>', delay: 60 },
+    { html: '' },
+  ],
+
+  start: [
+    { html: '<span class="t-dim"># Install freshell</span>', delay: 100 },
+    { typed: true, prompt: P, command: 'npm install -g freshell', delay: 600 },
+    { html: '', delay: 500 },
+    { html: '<span class="t-dim">added 142 packages in 4.2s</span>', delay: 300 },
+    { html: '' },
+    { html: '<span class="t-dim"># Start the server</span>', delay: 100 },
+    { typed: true, prompt: P, command: 'freshell --port 3000', delay: 600 },
+    { html: '', delay: 400 },
+    { html: '🐚🔥 <span class="t-bold">freshell</span> <span class="t-dim">v0.7.5</span>', delay: 60 },
+    { html: '', delay: 200 },
+    { html: '<span class="t-dim">Open your browser to connect.</span>', delay: 80 },
+    { html: '<span class="t-dim">Run</span> <span class="t-cyan">freshell --help</span> <span class="t-dim">for more options.</span>', delay: 100 },
+    { html: '' },
+    { html: '<span class="t-dim"># Or clone and run from source</span>', delay: 100 },
+    { typed: true, prompt: P, command: 'git clone https://github.com/danshapiro/freshell', delay: 500 },
+    { typed: true, prompt: P, command: 'cd freshell && npm install && npm run dev', delay: 400 },
+    { html: '', delay: 400 },
+    { html: '<span class="t-success">✓</span> <span class="t-dim">Client:</span> <span class="t-cyan">http://localhost:5173</span>', delay: 60 },
+    { html: '<span class="t-success">✓</span> <span class="t-dim">Server:</span> <span class="t-cyan">http://localhost:3000</span>', delay: 60 },
+    { html: '' },
+  ],
+};
+
+// ========== Start Animation ==========
+function startAnimation(tabId) {
+  if (tabId === 'workspace') {
+    animateTerminal('term-ws-top', content['ws-top']);
+    animateTerminal('term-ws-bottom', content['ws-bottom']);
+  } else if (content[tabId]) {
+    animateTerminal('term-' + tabId, content[tabId]);
+  }
+}
+
+// ========== Project Card Expand/Collapse ==========
+document.querySelectorAll('.sv-project-header').forEach(header => {
+  header.addEventListener('click', () => {
+    header.closest('.sv-project').classList.toggle('open');
+  });
+});
+
+// ========== Boot ==========
+startAnimation('welcome');
+
+// ========== Fourth Wall Breaker (WarGames WOPR style) ==========
+const GITHUB_URL = 'https://github.com/danshapiro/freshell';
+const GH = `<a href="${GITHUB_URL}" target="_blank">github.com/danshapiro/freshell</a>`;
+
+const quips = [
+  `This is just a webpage pretending to be a terminal. The real thing is at ${GH} — and it actually works.`,
+  `You're clicking around a fake terminal right now. Go get the real one at ${GH} before someone sees you.`,
+  `None of these buttons do anything. For buttons that do things, visit ${GH}.`,
+  `This is a glorified screenshot with delusions of grandeur. The actual app lives at ${GH}.`,
+  `You've been typing into a div. The real terminal is at ${GH}.`,
+  `Impressive, right? Now imagine if it actually did something. ${GH}`,
+  `This page has the energy of a concept car at an auto show. Drive the real thing: ${GH}`,
+  `No terminals were harmed in the making of this webpage. Get the real ones at ${GH}.`,
+  `Fun fact: this entire page is one HTML file cosplaying as a terminal multiplexer. The genuine article: ${GH}`,
+  `You just watched CSS pretend to be a shell. For an actual shell, there's ${GH}.`,
+  `Sir, this is a webpage. The real freshell is at ${GH}.`,
+  `Everything you see here is a lie. A beautiful, CSS-powered lie. Truth: ${GH}`,
+  `This page runs zero PTY processes. Zero! Fix that at ${GH}.`,
+  `Your cursor is blinking but nobody's home. Move in at ${GH}.`,
+  `If you squint, this almost looks real. For the non-squinting version: ${GH}`,
+  `This terminal has never executed a single command and it's not about to start. ${GH}`,
+  `You're admiring the menu. The kitchen is at ${GH}.`,
+  `Somewhere, a real terminal is waiting for you. It's at ${GH} and it's getting impatient.`,
+  `This demo has all the features of freshell except the part where it works. ${GH}`,
+  `You wouldn't download a car, but you should <code>git clone</code> a terminal multiplexer: ${GH}`,
+];
+
+// Shuffle bag so we don't repeat until all shown
+let quipBag = [];
+function nextQuip() {
+  if (quipBag.length === 0) {
+    quipBag = [...quips];
+    for (let i = quipBag.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [quipBag[i], quipBag[j]] = [quipBag[j], quipBag[i]];
+    }
+  }
+  return quipBag.pop();
+}
+
+const snarkOverlay = document.createElement('div');
+snarkOverlay.className = 'snark-overlay';
+snarkOverlay.innerHTML = `
+  <div class="snark-dismiss"></div>
+  <div class="snark-box">
+    <div class="snark-msg"></div>
+  </div>`;
+document.body.appendChild(snarkOverlay);
+const snarkBox = snarkOverlay.querySelector('.snark-box');
+const snarkMsg = snarkOverlay.querySelector('.snark-msg');
+const snarkDismiss = snarkOverlay.querySelector('.snark-dismiss');
+
+function showSnark() {
+  snarkMsg.innerHTML = nextQuip();
+  snarkOverlay.classList.add('show');
+}
+
+function cycleSnark() {
+  snarkMsg.innerHTML = nextQuip();
+}
+
+function hideSnark() {
+  snarkOverlay.classList.remove('show');
+}
+
+// Click on box → GitHub
+snarkBox.addEventListener('click', (e) => {
+  if (e.target.tagName === 'A') return;
+  e.stopPropagation();
+  window.open(GITHUB_URL, '_blank');
+});
+
+// Click backdrop → dismiss
+snarkDismiss.addEventListener('click', (e) => {
+  e.stopPropagation();
+  hideSnark();
+});
+
+// Trigger: keypress anywhere (someone trying to type)
+document.addEventListener('keydown', (e) => {
+  if (settingsView?.classList.contains('active')) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === 'Escape') { hideSnark(); return; }
+  if (e.key === 'Tab') return; // let tab switching work
+  if (e.key === 'Enter' && snarkOverlay.classList.contains('show')) {
+    e.preventDefault();
+    window.open(GITHUB_URL, '_blank');
+    return;
+  }
+  // Printable character or arrow
+  if (e.key.length > 1 && !e.key.startsWith('Arrow')) return;
+  if (snarkOverlay.classList.contains('show')) {
+    cycleSnark(); // Update message on each keypress
+  } else {
+    showSnark();
+  }
+});
+
+// Trigger: clicks on inert UI elements
+const inertSelectors = [
+  '.sb-item',
+  '.sb-search input',
+  '.tab-close',
+  '.tab-add',
+  '.pane-btn',
+  '.picker-option',
+  '.sv-search input',
+  '.sv-refresh',
+  '.sb-resume-btn',
+];
+
+document.addEventListener('click', (e) => {
+  for (const sel of inertSelectors) {
+    if (e.target.closest(sel)) { showSnark(); return; }
+  }
+});
+
+// ========== Settings Preview Interactions ==========
+function activateSettingsTab(id) {
+  const tab = document.querySelector(`.settings-tab[data-settings-tab="${id}"]`);
+  if (!tab) return;
+  document.querySelectorAll('.settings-tab').forEach(item => {
+    const selected = item === tab;
+    item.classList.toggle('active', selected);
+    item.setAttribute('aria-selected', selected ? 'true' : 'false');
+  });
+  document.querySelectorAll('.settings-panel').forEach(panel => {
+    const selected = panel.id === 'settings-panel-' + id;
+    panel.classList.toggle('active', selected);
+    panel.setAttribute('aria-hidden', selected ? 'false' : 'true');
+  });
+}
+
+document.querySelectorAll('.settings-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    activateSettingsTab(tab.dataset.settingsTab);
+  });
+});
+
+document.querySelectorAll('[data-segmented]').forEach(group => {
+  group.querySelectorAll('.settings-segment').forEach(button => {
+    button.addEventListener('click', () => {
+      group.querySelectorAll('.settings-segment').forEach(item => item.classList.remove('active'));
+      button.classList.add('active');
+    });
+  });
+});
+
+document.querySelectorAll('.settings-switch').forEach(button => {
+  button.addEventListener('click', () => {
+    const next = !button.classList.contains('on');
+    button.classList.toggle('on', next);
+    button.setAttribute('aria-checked', next ? 'true' : 'false');
+  });
+});
+
+function formatSettingsRange(input) {
+  const value = Number(input.value);
+  switch (input.dataset.format) {
+    case 'percent':
+      return Math.round(value * 100) + '%';
+    case 'px-percent':
+      return `${value}px (${Math.round(value / 16 * 100)}%)`;
+    case 'fixed':
+      return value.toFixed(2);
+    case 'snap':
+      return value === 0 ? 'Off' : value + '%';
+    case 'locale':
+      return value.toLocaleString();
+    default:
+      return String(value);
+  }
+}
+
+document.querySelectorAll('.settings-range input').forEach(input => {
+  const label = input.closest('.settings-range')?.querySelector('span');
+  const preview = document.querySelector('.settings-terminal-preview');
+  const update = () => {
+    if (label) label.textContent = formatSettingsRange(input);
+    if (preview && input.dataset.format === 'px-percent') {
+      preview.style.fontSize = input.value + 'px';
+    }
+    if (preview && input.dataset.format === 'fixed') {
+      preview.style.lineHeight = input.value;
+    }
+  };
+  input.addEventListener('input', update);
+  update();
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if (!settingsView?.classList.contains('active')) return;
+  hideSettingsView();
+  document.querySelectorAll('.sb-nav-btn').forEach(b => b.classList.remove('active'));
+  primaryNavButton?.classList.add('active');
+});
+</script>
+</body>
+</html>

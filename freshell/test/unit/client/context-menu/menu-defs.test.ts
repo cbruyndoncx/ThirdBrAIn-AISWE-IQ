@@ -1,0 +1,709 @@
+import { describe, it, expect, vi } from 'vitest'
+import { buildMenuItems, type MenuActions, type MenuBuildContext } from '../../../../src/components/context-menu/menu-defs'
+import type { ContextTarget } from '../../../../src/components/context-menu/context-menu-types'
+
+function createActions(): MenuActions {
+  return {
+    newDefaultTab: vi.fn(),
+    newTabWithPane: vi.fn(),
+    copyTabNames: vi.fn(),
+    toggleSidebar: vi.fn(),
+    copyShareLink: vi.fn(),
+    openView: vi.fn(),
+    copyTabName: vi.fn(),
+    refreshTab: vi.fn(),
+    renameTab: vi.fn(),
+    closeTab: vi.fn(),
+    reopenClosedTab: vi.fn(),
+    closeOtherTabs: vi.fn(),
+    closeTabsToRight: vi.fn(),
+    moveTab: vi.fn(),
+    renamePane: vi.fn(),
+    refreshPane: vi.fn(),
+    replacePane: vi.fn(),
+    splitPane: vi.fn(),
+    resetSplit: vi.fn(),
+    swapSplit: vi.fn(),
+    closePane: vi.fn(),
+    getTerminalActions: vi.fn(() => ({
+      copySelection: vi.fn(),
+      paste: vi.fn(),
+      selectAll: vi.fn(),
+      clearScrollback: vi.fn(),
+      reset: vi.fn(),
+      scrollToBottom: vi.fn(),
+      hasSelection: vi.fn(() => false),
+      openSearch: vi.fn(),
+    })),
+    getEditorActions: vi.fn(() => ({
+      cut: vi.fn(),
+      copy: vi.fn(),
+      paste: vi.fn(),
+      selectAll: vi.fn(),
+      openInEditor: vi.fn(),
+      saveNow: vi.fn(),
+      togglePreview: vi.fn(),
+      copyPath: vi.fn(),
+      revealInExplorer: vi.fn(),
+    })),
+    getBrowserActions: vi.fn(() => ({
+      back: vi.fn(),
+      forward: vi.fn(),
+      reload: vi.fn(),
+      copyUrl: vi.fn(),
+      openExternal: vi.fn(),
+      toggleDevTools: vi.fn(),
+    })),
+    openSessionInNewTab: vi.fn(),
+    openSessionInThisTab: vi.fn(),
+    renameSession: vi.fn(),
+    generateSessionTitle: vi.fn(),
+    toggleArchiveSession: vi.fn(),
+    deleteSession: vi.fn(),
+    copySessionId: vi.fn(),
+    copySessionCwd: vi.fn(),
+    copySessionSummary: vi.fn(),
+    copySessionMetadata: vi.fn(),
+    copyResumeCommand: vi.fn(),
+    reopenPaneAsSessionTarget: vi.fn(),
+    setProjectColor: vi.fn(),
+    toggleProjectExpanded: vi.fn(),
+    openAllSessionsInProject: vi.fn(),
+    copyProjectPath: vi.fn(),
+    openTerminal: vi.fn(),
+    renameTerminal: vi.fn(),
+    generateTerminalSummary: vi.fn(),
+    deleteTerminal: vi.fn(),
+    copyTerminalCwd: vi.fn(),
+    copyMessageText: vi.fn(),
+    copyMessageCode: vi.fn(),
+    copyFreshAgentCodeBlock: vi.fn(),
+    copyFreshAgentToolInput: vi.fn(),
+    copyFreshAgentToolOutput: vi.fn(),
+    copyFreshAgentDiffNew: vi.fn(),
+    copyFreshAgentDiffOld: vi.fn(),
+    copyFreshAgentFilePath: vi.fn(),
+    showKeyboardShortcuts: vi.fn(),
+    openUrlInPane: vi.fn(),
+    openUrlInTab: vi.fn(),
+    openUrlInBrowser: vi.fn(),
+    copyUrl: vi.fn(),
+  }
+}
+
+function makeCtx(actions: MenuActions, overrides?: Partial<MenuBuildContext>): MenuBuildContext {
+  return {
+    view: 'terminal',
+    sidebarCollapsed: false,
+    tabs: [{ id: 'tab-1', title: 'Tab', mode: 'shell' }] as any,
+    paneLayouts: {
+      'tab-1': {
+        type: 'leaf',
+        id: 'pane-1',
+        content: { kind: 'terminal', createRequestId: 'req-1', status: 'running', mode: 'shell' },
+      },
+    },
+    sessions: [],
+    expandedProjects: new Set<string>(),
+    contextElement: null,
+    clickTarget: null,
+    actions,
+    aiEnabled: false,
+    platform: 'linux',
+    ...overrides,
+  }
+}
+
+function getTerminalItem(items: ReturnType<typeof buildMenuItems>, id: string) {
+  const item = items.find((candidate) => candidate.type === 'item' && candidate.id === id)
+  expect(item?.type).toBe('item')
+  if (!item || item.type !== 'item') throw new Error(`Missing terminal item: ${id}`)
+  return item
+}
+
+const REOPEN_SESSION_TYPE_CASES = [
+  {
+    provider: 'claude',
+    cliSessionType: 'claude',
+    freshSessionType: 'freshclaude',
+    sessionId: '550e8400-e29b-41d4-a716-446655440000',
+    cliToFreshLabel: 'Reopen as freshclaude',
+    freshToCliLabel: 'Reopen as Claude CLI',
+  },
+  {
+    provider: 'codex',
+    cliSessionType: 'codex',
+    freshSessionType: 'freshcodex',
+    sessionId: 'codex-thread-1',
+    cliToFreshLabel: 'Reopen as freshcodex',
+    freshToCliLabel: 'Reopen as Codex CLI',
+  },
+  {
+    provider: 'opencode',
+    cliSessionType: 'opencode',
+    freshSessionType: 'freshopencode',
+    sessionId: 'ses_opencode_1',
+    cliToFreshLabel: 'Reopen as freshopencode',
+    freshToCliLabel: 'Reopen as OpenCode CLI',
+  },
+] as const
+
+describe('context menu global view labels', () => {
+  it('includes renamed views and new tabs view in global menu', () => {
+    const items = buildMenuItems(
+      { kind: 'global' },
+      makeCtx(createActions(), {
+        tabs: [],
+        paneLayouts: {},
+      }),
+    )
+
+    const labels = items
+      .filter((item) => item.type === 'item' && item.id.startsWith('open-'))
+      .map((item) => item.label)
+    expect(labels).toEqual([
+      'Open Tabs',
+      'Open Panes',
+      'Open Projects',
+      'Open Settings',
+    ])
+  })
+})
+
+describe('buildMenuItems - refresh items', () => {
+  it('enables Refresh tab only when the stored layout has at least one refresh-capable leaf', () => {
+    const actions = createActions()
+    const items = buildMenuItems(
+      { kind: 'tab', tabId: 'tab-1' },
+      makeCtx(actions, {
+        paneLayouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              {
+                type: 'leaf',
+                id: 'pane-live-browser',
+                content: {
+                  kind: 'browser',
+                  browserInstanceId: 'browser-1',
+                  url: 'https://example.com',
+                  devToolsOpen: false,
+                },
+              },
+              {
+                type: 'leaf',
+                id: 'pane-blank-browser',
+                content: {
+                  kind: 'browser',
+                  browserInstanceId: 'browser-2',
+                  url: '',
+                  devToolsOpen: false,
+                },
+              },
+            ],
+          },
+        },
+      }),
+    )
+
+    const refreshItem = items.find((item) => item.type === 'item' && item.id === 'refresh-tab')
+    expect(refreshItem?.type).toBe('item')
+    expect(refreshItem?.type === 'item' ? refreshItem.disabled : true).toBe(false)
+  })
+
+  it('disables Refresh pane for blank browser panes and unattached terminal panes', () => {
+    const blankBrowserItems = buildMenuItems(
+      { kind: 'browser', tabId: 'tab-1', paneId: 'pane-1' },
+      makeCtx(createActions(), {
+        paneLayouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'browser',
+              browserInstanceId: 'browser-1',
+              url: '',
+              devToolsOpen: false,
+            },
+          },
+        },
+      }),
+    )
+    const blankBrowserRefresh = blankBrowserItems.find((item) => item.type === 'item' && item.id === 'refresh-pane')
+    expect(blankBrowserRefresh?.type === 'item' ? blankBrowserRefresh.disabled : false).toBe(true)
+
+    const unattachedTerminalItems = buildMenuItems(
+      { kind: 'terminal', tabId: 'tab-1', paneId: 'pane-1' },
+      makeCtx(createActions(), {
+        paneLayouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'shell',
+              createRequestId: 'req-1',
+              status: 'running',
+            },
+          },
+        },
+      }),
+    )
+    const unattachedTerminalRefresh = unattachedTerminalItems.find((item) => item.type === 'item' && item.id === 'refresh-pane')
+    expect(unattachedTerminalRefresh?.type === 'item' ? unattachedTerminalRefresh.disabled : false).toBe(true)
+  })
+
+  it('includes Refresh pane on pane, terminal, and browser menus', () => {
+    for (const target of [
+      { kind: 'pane', tabId: 'tab-1', paneId: 'pane-1' } as const,
+      { kind: 'terminal', tabId: 'tab-1', paneId: 'pane-1' } as const,
+      { kind: 'browser', tabId: 'tab-1', paneId: 'pane-2' } as const,
+    ]) {
+      const items = buildMenuItems(target, makeCtx(createActions(), {
+        paneLayouts: {
+          'tab-1': {
+            type: 'split',
+            id: 'split-1',
+            direction: 'horizontal',
+            sizes: [50, 50],
+            children: [
+              {
+                type: 'leaf',
+                id: 'pane-1',
+                content: {
+                  kind: 'terminal',
+                  mode: 'shell',
+                  createRequestId: 'req-1',
+                  terminalId: 'term-1',
+                  status: 'running',
+                },
+              },
+              {
+                type: 'leaf',
+                id: 'pane-2',
+                content: {
+                  kind: 'browser',
+                  browserInstanceId: 'browser-2',
+                  url: 'https://example.com',
+                  devToolsOpen: false,
+                },
+              },
+            ],
+          },
+        },
+      }))
+
+      expect(items.find((item) => item.type === 'item' && item.id === 'refresh-pane')).toBeDefined()
+    }
+  })
+})
+
+describe('buildMenuItems - reopen as paired session flavor', () => {
+  for (const entry of REOPEN_SESSION_TYPE_CASES) {
+    it(`adds ${entry.cliToFreshLabel} to a ${entry.cliSessionType} CLI terminal body menu`, () => {
+      const actions = createActions()
+      const items = buildMenuItems(
+        { kind: 'terminal', tabId: 'tab-1', paneId: 'pane-1' },
+        makeCtx(actions, {
+          paneLayouts: {
+            'tab-1': {
+              type: 'leaf',
+              id: 'pane-1',
+              content: {
+                kind: 'terminal',
+                mode: entry.cliSessionType,
+                sessionRef: { provider: entry.provider, sessionId: entry.sessionId },
+                createRequestId: 'req-1',
+                status: 'running',
+              },
+            },
+          },
+        }),
+      )
+
+      const item = getTerminalItem(items, 'reopen-pane-as-session-type')
+      expect(item.label).toBe(entry.cliToFreshLabel)
+      item.onSelect()
+      expect(actions.reopenPaneAsSessionTarget).toHaveBeenCalledWith(expect.objectContaining({
+        provider: entry.provider,
+        sessionId: entry.sessionId,
+        sourceSessionType: entry.cliSessionType,
+        targetSessionType: entry.freshSessionType,
+      }))
+    })
+
+    it(`adds ${entry.freshToCliLabel} to a ${entry.freshSessionType} body menu using pane state`, () => {
+      const actions = createActions()
+      const items = buildMenuItems(
+        {
+          kind: 'fresh-agent',
+          tabId: 'tab-1',
+          paneId: 'pane-1',
+          provider: entry.provider,
+          sessionType: entry.freshSessionType,
+        },
+        makeCtx(actions, {
+          paneLayouts: {
+            'tab-1': {
+              type: 'leaf',
+              id: 'pane-1',
+              content: {
+                kind: 'fresh-agent',
+                sessionType: entry.freshSessionType,
+                provider: entry.provider,
+                sessionRef: { provider: entry.provider, sessionId: entry.sessionId },
+                createRequestId: 'req-1',
+                status: 'idle',
+              },
+            },
+          },
+        }),
+      )
+
+      const item = getTerminalItem(items, 'reopen-pane-as-session-type')
+      expect(item.label).toBe(entry.freshToCliLabel)
+      item.onSelect()
+      expect(actions.reopenPaneAsSessionTarget).toHaveBeenCalledWith(expect.objectContaining({
+        provider: entry.provider,
+        sessionId: entry.sessionId,
+        sourceSessionType: entry.freshSessionType,
+        targetSessionType: entry.cliSessionType,
+      }))
+      expect(items.some((candidate) => candidate.type === 'item' && candidate.id === 'fc-copy-session')).toBe(false)
+    })
+  }
+
+  it('adds Reopen as freshclaude to a Claude CLI terminal body menu with a durable target payload', () => {
+    const actions = createActions()
+    const items = buildMenuItems(
+      { kind: 'terminal', tabId: 'tab-1', paneId: 'pane-1' },
+      makeCtx(actions, {
+        paneLayouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'claude',
+              sessionRef: { provider: 'claude', sessionId: '550e8400-e29b-41d4-a716-446655440000' },
+              createRequestId: 'req-1',
+              status: 'running',
+            },
+          },
+        },
+      }),
+    )
+
+    const item = getTerminalItem(items, 'reopen-pane-as-session-type')
+    expect(item.label).toBe('Reopen as freshclaude')
+    item.onSelect()
+    expect(actions.reopenPaneAsSessionTarget).toHaveBeenCalledWith(expect.objectContaining({
+      tabId: 'tab-1',
+      paneId: 'pane-1',
+      provider: 'claude',
+      sessionId: '550e8400-e29b-41d4-a716-446655440000',
+      targetSessionType: 'freshclaude',
+    }))
+  })
+
+  it('adds Reopen as Claude CLI to a FreshClaude body menu', () => {
+    const actions = createActions()
+    const items = buildMenuItems(
+      {
+        kind: 'fresh-agent',
+        tabId: 'tab-1',
+        paneId: 'pane-1',
+        sessionId: 'runtime-sdk-session-id',
+        provider: 'claude',
+        sessionType: 'freshclaude',
+      },
+      makeCtx(actions, {
+        paneLayouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'fresh-agent',
+              sessionType: 'freshclaude',
+              provider: 'claude',
+              sessionId: 'runtime-sdk-session-id',
+              sessionRef: { provider: 'claude', sessionId: '550e8400-e29b-41d4-a716-446655440000' },
+              createRequestId: 'req-1',
+              status: 'idle',
+            },
+          },
+        },
+      }),
+    )
+
+    const item = items.find((candidate) => candidate.type === 'item' && candidate.id === 'reopen-pane-as-session-type')
+    expect(item?.type).toBe('item')
+    if (!item || item.type !== 'item') throw new Error('missing reopen item')
+    expect(item.label).toBe('Reopen as Claude CLI')
+    item.onSelect()
+    expect(actions.reopenPaneAsSessionTarget).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'claude',
+      sessionId: '550e8400-e29b-41d4-a716-446655440000',
+      targetSessionType: 'claude',
+    }))
+  })
+
+  it('does not add a FreshAgent reopen item for non-durable placeholder ids', () => {
+    const actions = createActions()
+    const items = buildMenuItems(
+      { kind: 'fresh-agent', tabId: 'tab-1', paneId: 'pane-1', sessionId: 'freshopencode-req-1', provider: 'opencode', sessionType: 'freshopencode' },
+      makeCtx(actions, {
+        paneLayouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'fresh-agent',
+              sessionType: 'freshopencode',
+              provider: 'opencode',
+              sessionRef: { provider: 'opencode', sessionId: 'freshopencode-req-1' },
+              createRequestId: 'req-1',
+              status: 'idle',
+            },
+          },
+        },
+      }),
+    )
+
+    expect(items.some((item) => item.type === 'item' && item.id === 'reopen-pane-as-session-type')).toBe(false)
+  })
+
+  it('disables reopen while the source agent is busy', () => {
+    const actions = createActions()
+    const items = buildMenuItems(
+      { kind: 'terminal', tabId: 'tab-1', paneId: 'pane-1' },
+      makeCtx(actions, {
+        paneLayouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'terminal',
+              mode: 'codex',
+              sessionRef: { provider: 'codex', sessionId: 'codex-thread-1' },
+              terminalId: 'term-1',
+              createRequestId: 'req-1',
+              status: 'running',
+            },
+          },
+        },
+        reopenActivityByPaneId: {
+          'pane-1': { isBusy: true },
+        },
+      }),
+    )
+
+    const item = getTerminalItem(items, 'reopen-pane-as-session-type')
+    expect(item.disabled).toBe(true)
+    expect(item.label).toBe('Reopen as freshcodex')
+    item.onSelect()
+    expect(actions.reopenPaneAsSessionTarget).not.toHaveBeenCalled()
+  })
+
+  it('disables reopen while the source agent has pending prompts', () => {
+    const actions = createActions()
+    const items = buildMenuItems(
+      { kind: 'fresh-agent', tabId: 'tab-1', paneId: 'pane-1', sessionId: 'runtime-sdk-session-id', provider: 'claude', sessionType: 'freshclaude' },
+      makeCtx(actions, {
+        paneLayouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'fresh-agent',
+              sessionType: 'freshclaude',
+              provider: 'claude',
+              sessionId: 'runtime-sdk-session-id',
+              sessionRef: { provider: 'claude', sessionId: '550e8400-e29b-41d4-a716-446655440000' },
+              createRequestId: 'req-1',
+              status: 'idle',
+            },
+          },
+        },
+        reopenActivityByPaneId: {
+          'pane-1': { isBusy: false, hasWaitingItems: true },
+        },
+      }),
+    )
+
+    const item = getTerminalItem(items, 'reopen-pane-as-session-type')
+    expect(item.disabled).toBe(true)
+    expect(item.label).toBe('Reopen as Claude CLI')
+    item.onSelect()
+    expect(actions.reopenPaneAsSessionTarget).not.toHaveBeenCalled()
+  })
+})
+
+describe('buildMenuItems - "Replace pane" item', () => {
+  it('includes "Replace pane" for target.kind === "pane"', () => {
+    const actions = createActions()
+    const target: ContextTarget = { kind: 'pane', tabId: 'tab-1', paneId: 'pane-1' }
+    const items = buildMenuItems(target, makeCtx(actions))
+
+    const replaceItem = items.find((item) => item.type === 'item' && item.id === 'replace-pane')
+    expect(replaceItem).toBeDefined()
+    if (replaceItem?.type === 'item') {
+      expect(replaceItem.label).toBe('Replace pane')
+    }
+  })
+
+  it('"Replace pane" appears after "Rename pane" in pane menu', () => {
+    const actions = createActions()
+    const target: ContextTarget = { kind: 'pane', tabId: 'tab-1', paneId: 'pane-1' }
+    const items = buildMenuItems(target, makeCtx(actions))
+
+    const renameIndex = items.findIndex((item) => item.type === 'item' && item.id === 'rename-pane')
+    const replaceIndex = items.findIndex((item) => item.type === 'item' && item.id === 'replace-pane')
+    expect(renameIndex).toBeGreaterThanOrEqual(0)
+    expect(replaceIndex).toBeGreaterThan(renameIndex)
+  })
+
+  it('includes "Replace pane" for terminal/browser/editor menus', () => {
+    const actions = createActions()
+    const terminalItems = buildMenuItems(
+      { kind: 'terminal', tabId: 'tab-1', paneId: 'pane-1' },
+      makeCtx(actions),
+    )
+    const browserItems = buildMenuItems(
+      { kind: 'browser', tabId: 'tab-1', paneId: 'pane-1' },
+      makeCtx(actions),
+    )
+    const editorItems = buildMenuItems(
+      { kind: 'editor', tabId: 'tab-1', paneId: 'pane-1' },
+      makeCtx(actions, {
+        paneLayouts: {
+          'tab-1': {
+            type: 'leaf',
+            id: 'pane-1',
+            content: {
+              kind: 'editor',
+              filePath: '/test.ts',
+              language: 'typescript',
+              readOnly: false,
+              content: '',
+              viewMode: 'source' as const,
+            },
+          },
+        },
+      }),
+    )
+
+    for (const items of [terminalItems, browserItems, editorItems]) {
+      const replaceItem = items.find((item) => item.type === 'item' && item.id === 'replace-pane')
+      expect(replaceItem).toBeDefined()
+      if (replaceItem?.type === 'item') {
+        expect(replaceItem.label).toBe('Replace pane')
+      }
+    }
+  })
+
+  it('calls actions.replacePane when selected', () => {
+    const actions = createActions()
+    const target: ContextTarget = { kind: 'pane', tabId: 'tab-1', paneId: 'pane-1' }
+    const items = buildMenuItems(target, makeCtx(actions))
+
+    const replaceItem = items.find((item) => item.type === 'item' && item.id === 'replace-pane')
+    expect(replaceItem).toBeDefined()
+    if (replaceItem?.type === 'item') {
+      replaceItem.onSelect()
+      expect(actions.replacePane).toHaveBeenCalledWith('tab-1', 'pane-1')
+    }
+  })
+})
+
+describe('buildMenuItems - terminal "Search" item', () => {
+  it('"Search" appears after the new clipboard separator', () => {
+    const actions = createActions()
+    const items = buildMenuItems(
+      { kind: 'terminal', tabId: 'tab-1', paneId: 'pane-1' },
+      makeCtx(actions),
+    )
+
+    const separatorIndex = items.findIndex((item) => item.type === 'separator' && item.id === 'terminal-clipboard-sep')
+    const searchIndex = items.findIndex((item) => item.type === 'item' && item.id === 'terminal-search')
+    expect(separatorIndex).toBeGreaterThanOrEqual(0)
+    expect(searchIndex).toBeGreaterThan(separatorIndex)
+  })
+
+  it('includes "Search" item in terminal context menu', () => {
+    const actions = createActions()
+    const target: ContextTarget = { kind: 'terminal', tabId: 'tab-1', paneId: 'pane-1' }
+    const items = buildMenuItems(target, makeCtx(actions))
+
+    const searchItem = items.find((item) => item.type === 'item' && item.id === 'terminal-search')
+    expect(searchItem).toBeDefined()
+    if (searchItem?.type === 'item') {
+      expect(searchItem.label).toBe('Search')
+    }
+  })
+
+  it('calls terminalActions.openSearch when selected', () => {
+    const actions = createActions()
+    const target: ContextTarget = { kind: 'terminal', tabId: 'tab-1', paneId: 'pane-1' }
+    const items = buildMenuItems(target, makeCtx(actions))
+
+    const terminalActions = (actions.getTerminalActions as ReturnType<typeof vi.fn>).mock.results[0]?.value
+    const searchItem = items.find((item) => item.type === 'item' && item.id === 'terminal-search')
+    expect(searchItem).toBeDefined()
+    if (searchItem?.type === 'item') {
+      searchItem.onSelect()
+      expect(terminalActions?.openSearch).toHaveBeenCalled()
+    }
+  })
+})
+
+describe('buildMenuItems - terminal clipboard section', () => {
+  it('places Copy, Paste, and Select all in the first section with icons', () => {
+    const items = buildMenuItems(
+      { kind: 'terminal', tabId: 'tab-1', paneId: 'pane-1' },
+      makeCtx(createActions()),
+    )
+
+    expect(
+      items.slice(0, 4).map((item) => item.type === 'item' ? item.id : item.type),
+    ).toEqual([
+      'terminal-copy',
+      'terminal-paste',
+      'terminal-select-all',
+      'separator',
+    ])
+
+    expect(getTerminalItem(items, 'terminal-copy').label).toBe('Copy')
+    expect(getTerminalItem(items, 'terminal-copy').icon).toBeTruthy()
+    expect(getTerminalItem(items, 'terminal-paste').icon).toBeTruthy()
+    expect(getTerminalItem(items, 'terminal-select-all').icon).toBeTruthy()
+  })
+
+  it('preserves copy enabled state and action wiring', () => {
+    const actions = createActions()
+    const terminalActions = {
+      copySelection: vi.fn(),
+      paste: vi.fn(),
+      selectAll: vi.fn(),
+      clearScrollback: vi.fn(),
+      reset: vi.fn(),
+      scrollToBottom: vi.fn(),
+      hasSelection: vi.fn(() => true),
+      openSearch: vi.fn(),
+    }
+    actions.getTerminalActions = vi.fn(() => terminalActions)
+
+    const items = buildMenuItems(
+      { kind: 'terminal', tabId: 'tab-1', paneId: 'pane-1' },
+      makeCtx(actions),
+    )
+
+    const copy = getTerminalItem(items, 'terminal-copy')
+    expect(copy.disabled).toBe(false)
+    copy.onSelect()
+    expect(terminalActions.copySelection).toHaveBeenCalledTimes(1)
+  })
+})

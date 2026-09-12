@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "./dist/electron",
+    "rootDir": ".",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "incremental": true,
+    "tsBuildInfoFile": "./node_modules/.cache/tsconfig.electron.tsbuildinfo",
+    "declaration": true,
+    "sourceMap": true
+  },
+  "include": [
+    "electron/**/*"
+  ],
+  "exclude": [
+    "electron/preload.ts",
+    "electron/setup-wizard/**/*.tsx",
+    "electron/setup-wizard/index.html",
+    "electron/launch-chooser/**/*.tsx",
+    "electron/launch-chooser/index.html",
+    "electron/profile-picker/**/*.tsx",
+    "electron/profile-picker/index.html"
+  ]
+}
