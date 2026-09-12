@@ -1,0 +1,326 @@
+/**
+ * Task automation integration tests
+ * Tests handleTerminalStateChange: auto-moves tasks based on terminal state + project config
+ * Run with: tsx --loader ./packages/shared/test-utils/loader.ts packages/domains/projects/src/main/task-automation.test.ts
+ */
+import {
+  createTestHarness,
+  test,
+  expect,
+  describe
+} from '../../../../shared/test-utils/ipc-harness.js'
+import { handleTerminalStateChange } from './task-automation.js'
+
+const h = await createTestHarness()
+
+function seedProject(
+  config: { on_terminal_active: string | null; on_terminal_idle: string | null } | null
+): string {
+  const id = crypto.randomUUID()
+  const columns = JSON.stringify([
+    { id: 'todo', label: 'Todo', color: 'blue', position: 0, category: 'unstarted' },
+    { id: 'in_progress', label: 'In Progress', color: 'yellow', position: 1, category: 'started' },
+    { id: 'review', label: 'Review', color: 'purple', position: 2, category: 'started' },
+    { id: 'done', label: 'Done', color: 'green', position: 3, category: 'completed' }
+  ])
+  h.db
+    .prepare(
+      'INSERT INTO projects (id, name, color, path, columns_config, task_automation_config) VALUES (?, ?, ?, ?, ?, ?)'
+    )
+    .run(
+      id,
+      `Proj-${id.slice(0, 6)}`,
+      '#ff0000',
+      '/tmp/test',
+      columns,
+      config ? JSON.stringify(config) : null
+    )
+  return id
+}
+
+function seedTask(projectId: string, status = 'todo'): string {
+  const id = crypto.randomUUID()
+  h.db
+    .prepare(
+      'INSERT INTO tasks (id, project_id, title, status, priority, "order") VALUES (?, ?, ?, ?, 3, 0)'
+    )
+    .run(id, projectId, `Task-${id.slice(0, 6)}`, status)
+  return id
+}
+
+function getStatus(taskId: string): string {
+  const row = h.db.prepare('SELECT status FROM tasks WHERE id = ?').get(taskId) as {
+    status: string
+  }
+  return row.status
+}
+
+let notifyCalls = 0
+function resetNotify(): void {
+  notifyCalls = 0
+}
+function notifyTasksChanged(): void {
+  notifyCalls++
+}
+
+await describe('task automation: state change triggers', async () => {
+  test('running triggers on_terminal_active status change', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: null })
+    const taskId = seedTask(projId, 'todo')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'running', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('in_progress')
+    expect(notifyCalls).toBe(1)
+  })
+
+  test('running->idle triggers on_terminal_idle', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: null, on_terminal_idle: 'review' })
+    const taskId = seedTask(projId, 'in_progress')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'idle', 'running', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('review')
+    expect(notifyCalls).toBe(1)
+  })
+
+  test('both configs work in sequence (active then idle)', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: 'review' })
+    const taskId = seedTask(projId, 'todo')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'running', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('in_progress')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'idle', 'running', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('review')
+    expect(notifyCalls).toBe(2)
+  })
+})
+
+await describe('task automation: non-triggering state changes', async () => {
+  test('starting->idle does NOT trigger on_terminal_idle', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: 'review' })
+    const taskId = seedTask(projId, 'todo')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'idle', 'starting', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('todo')
+    expect(notifyCalls).toBe(0)
+  })
+
+  test('running->error does NOT trigger anything', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: 'review' })
+    const taskId = seedTask(projId, 'in_progress')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'error', 'running', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('in_progress')
+    expect(notifyCalls).toBe(0)
+  })
+
+  test('running->dead does NOT trigger anything', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: 'review' })
+    const taskId = seedTask(projId, 'in_progress')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'dead', 'running', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('in_progress')
+    expect(notifyCalls).toBe(0)
+  })
+
+  test('idle->running DOES trigger on_terminal_active', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: null })
+    const taskId = seedTask(projId, 'todo')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'running', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('in_progress')
+  })
+
+  test('starting->running triggers on_terminal_active', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: null })
+    const taskId = seedTask(projId, 'todo')
+    await handleTerminalStateChange(
+      h.slayDb,
+      `${taskId}:0`,
+      'running',
+      'starting',
+      notifyTasksChanged
+    )
+    expect(getStatus(taskId)).toBe('in_progress')
+  })
+
+  test('error->idle does NOT trigger on_terminal_idle', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: null, on_terminal_idle: 'review' })
+    const taskId = seedTask(projId, 'in_progress')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'idle', 'error', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('in_progress')
+    expect(notifyCalls).toBe(0)
+  })
+
+  test('idle->dead does NOT trigger anything', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: 'review' })
+    const taskId = seedTask(projId, 'todo')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'dead', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('todo')
+    expect(notifyCalls).toBe(0)
+  })
+})
+
+await describe('task automation: no-op cases', async () => {
+  test('task already in target status is no-op', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: null })
+    const taskId = seedTask(projId, 'in_progress')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'running', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('in_progress')
+    expect(notifyCalls).toBe(0)
+  })
+
+  test('project with no automation config does nothing', async () => {
+    resetNotify()
+    const projId = seedProject(null)
+    const taskId = seedTask(projId, 'todo')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'running', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('todo')
+    expect(notifyCalls).toBe(0)
+  })
+
+  test('config field is null for relevant trigger does nothing', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: null, on_terminal_idle: 'review' })
+    const taskId = seedTask(projId, 'todo')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'running', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('todo')
+    expect(notifyCalls).toBe(0)
+  })
+
+  test('task not found does not throw', async () => {
+    resetNotify()
+    seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: null })
+    await handleTerminalStateChange(
+      h.slayDb,
+      'nonexistent-task:0',
+      'running',
+      'idle',
+      notifyTasksChanged
+    )
+    expect(notifyCalls).toBe(0)
+  })
+
+  test('project not found does not throw', async () => {
+    resetNotify()
+    h.db.pragma('foreign_keys = OFF')
+    const taskId = crypto.randomUUID()
+    h.db
+      .prepare(
+        'INSERT INTO tasks (id, project_id, title, status, priority, "order") VALUES (?, ?, ?, ?, 3, 0)'
+      )
+      .run(taskId, 'nonexistent-project', 'Orphan', 'todo')
+    h.db.pragma('foreign_keys = ON')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'running', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('todo')
+    expect(notifyCalls).toBe(0)
+  })
+})
+
+await describe('task automation: sessionId parsing', async () => {
+  test('extracts taskId from taskId:suffix format', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: null })
+    const taskId = seedTask(projId, 'todo')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'running', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('in_progress')
+  })
+
+  test('handles bare taskId (no colon)', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: null })
+    const taskId = seedTask(projId, 'todo')
+    await handleTerminalStateChange(h.slayDb, taskId, 'running', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('in_progress')
+  })
+
+  test('handles sessionId with multiple colons', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: null })
+    const taskId = seedTask(projId, 'todo')
+    await handleTerminalStateChange(
+      h.slayDb,
+      `${taskId}:sub:extra`,
+      'running',
+      'idle',
+      notifyTasksChanged
+    )
+    expect(getStatus(taskId)).toBe('in_progress')
+  })
+})
+
+await describe('task automation: edge cases', async () => {
+  test('malformed JSON in config does not throw', async () => {
+    resetNotify()
+    const projId = crypto.randomUUID()
+    h.db
+      .prepare(
+        'INSERT INTO projects (id, name, color, path, task_automation_config) VALUES (?, ?, ?, ?, ?)'
+      )
+      .run(projId, 'BadJSON', '#ff0000', '/tmp/bad', '{not valid json')
+    const taskId = seedTask(projId, 'todo')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'running', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('todo')
+    expect(notifyCalls).toBe(0)
+  })
+
+  test('second terminal for same task already at target status is no-op', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: null })
+    const taskId = seedTask(projId, 'todo')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'running', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('in_progress')
+    expect(notifyCalls).toBe(1)
+    await handleTerminalStateChange(h.slayDb, `${taskId}:1`, 'running', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('in_progress')
+    expect(notifyCalls).toBe(1)
+  })
+
+  test('task in completed status is NOT un-completed by automation', async () => {
+    resetNotify()
+    const projId = seedProject({ on_terminal_active: 'in_progress', on_terminal_idle: null })
+    const taskId = seedTask(projId, 'done')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'running', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('done')
+    expect(notifyCalls).toBe(0)
+  })
+
+  test('task in canceled status is NOT un-canceled by automation', async () => {
+    resetNotify()
+    const projId = crypto.randomUUID()
+    const columns = JSON.stringify([
+      { id: 'todo', label: 'Todo', color: 'blue', position: 0, category: 'unstarted' },
+      {
+        id: 'in_progress',
+        label: 'In Progress',
+        color: 'yellow',
+        position: 1,
+        category: 'started'
+      },
+      { id: 'done', label: 'Done', color: 'green', position: 2, category: 'completed' },
+      { id: 'canceled', label: 'Canceled', color: 'slate', position: 3, category: 'canceled' }
+    ])
+    h.db
+      .prepare(
+        'INSERT INTO projects (id, name, color, path, columns_config, task_automation_config) VALUES (?, ?, ?, ?, ?, ?)'
+      )
+      .run(
+        projId,
+        `Proj-${projId.slice(0, 6)}`,
+        '#ff0000',
+        '/tmp/test',
+        columns,
+        JSON.stringify({ on_terminal_active: 'in_progress', on_terminal_idle: null })
+      )
+    const taskId = seedTask(projId, 'canceled')
+    await handleTerminalStateChange(h.slayDb, `${taskId}:0`, 'running', 'idle', notifyTasksChanged)
+    expect(getStatus(taskId)).toBe('canceled')
+    expect(notifyCalls).toBe(0)
+  })
+})
+
+h.cleanup()
+console.log('\nDone')

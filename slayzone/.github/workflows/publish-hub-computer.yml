@@ -1,0 +1,123 @@
+name: Publish hub + computer + cli (npm)
+
+# Publishes @slayzone/hub, @slayzone/computer and @slayzone/cli to npm.
+#
+# hub + computer are install-time-rebuild packages (bin.cjs bundles workspace deps;
+# native addons rebuild on the consumer's machine at `npm install`). The CLI has
+# no native deps — its bundle is self-contained, so it publishes with zero
+# dependencies and nothing to rebuild.
+#
+# AUTH: npm Trusted Publishing (OIDC) — no NPM_TOKEN. GitHub mints a short-lived
+# OIDC token (needs `id-token: write`); npm (>=11.5.1) exchanges it for a scoped
+# publish credential. The @slayzone npm org must have a Trusted Publisher
+# configured for ALL THREE packages pointing at debuglebowski/slayzone +
+# this workflow filename, else publish fails.
+#
+# ⚠️ DO NOT RENAME THIS FILE. The Trusted Publisher config on npm pins this exact
+# workflow FILENAME; renaming it revokes publish auth for every package until the
+# npm-side config is updated to match.
+#
+# NOTE for @slayzone/cli: it is newly published, so it needs its own Trusted
+# Publisher entry on npm before the first `--publish` run — otherwise hub and
+# computer publish and the CLI fails. The script is idempotent per package, so a
+# re-dispatch after adding the entry skips what already landed.
+#
+# SAFE TO COMMIT / INERT UNTIL ENABLED: live `npm publish` only runs when the
+# OIDC token endpoint is available (i.e. `id-token: write` granted, real repo).
+# Fork/PR runs lack it -> DRY RUN (build + pack + smoke-boot under plain node),
+# publishing nothing.
+#
+# This is a STANDALONE workflow, deliberately separate from the desktop-app
+# release pipeline (release.yml / release-foundation.yml) so it does not touch
+# the policy-governed release files (scripts/ci/check-release-workflow-policy.sh).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Publish mode
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - publish
+
+concurrency:
+  group: publish-hub-computer-${{ github.event_name == 'push' && github.ref_name || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # OIDC — npm Trusted Publishing (no long-lived token)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # publish-npm.sh builds from a clean-HEAD worktree
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          # node 24: the hub bundle uses the node:sqlite builtin. Absent on node
+          # 20 (smoke crashes ERR_UNKNOWN_BUILTIN_MODULE); flag-gated on 22.
+          # Flag-free only from 23.4/24 — 24 is the proven-working version.
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm >=11.5.1; node 24 ships 11.3.x. Pin to
+      # 11.5.1 (NOT @latest) — @latest is npm 12.x, a new major whose install-
+      # script defaults break node-pty's compile-at-install (smoke fails with a
+      # missing pty.node). 11.5.1 stays on the same 11.x line as stock 11.3.x
+      # (proven to build node-pty) while satisfying the OIDC minimum.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@11.5.1
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          CI_SKIP_POSTINSTALL: '1'
+
+      # Resolve effective mode: a `publish` intent only takes effect when the
+      # OIDC token endpoint is available (id-token: write granted — absent on
+      # forks / PRs from forks). Otherwise fall back to dry-run so the run is inert.
+      - name: Resolve publish mode
+        id: mode
+        env:
+          REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'publish' }}
+        run: |
+          set -euo pipefail
+          # OIDC token endpoint is injected into the process env only when
+          # id-token: write is effective (absent on fork PRs) — read it here,
+          # not via the workflow `env` expression context (which never holds it).
+          HAS_OIDC=false
+          [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && HAS_OIDC=true
+          if [ "$REQUESTED" = "publish" ] && [ "$HAS_OIDC" = "true" ]; then
+            echo "effective=publish" >> "$GITHUB_OUTPUT"
+            echo "Publish mode: LIVE (OIDC available — trusted publishing)"
+          else
+            echo "effective=dry-run" >> "$GITHUB_OUTPUT"
+            if [ "$REQUESTED" = "publish" ]; then
+              echo "::warning::publish requested but OIDC token endpoint absent — running DRY RUN (nothing published)"
+            else
+              echo "Publish mode: dry-run"
+            fi
+          fi
+
+      - name: Build + pack + smoke (dry run)
+        if: steps.mode.outputs.effective == 'dry-run'
+        run: bash scripts/publish-npm.sh
+
+      # No NODE_AUTH_TOKEN: npm (>=11.5.1) auto-detects OIDC and exchanges it for
+      # a scoped publish credential via the org's Trusted Publisher config.
+      - name: Build + pack + smoke + publish
+        if: steps.mode.outputs.effective == 'publish'
+        run: bash scripts/publish-npm.sh --publish

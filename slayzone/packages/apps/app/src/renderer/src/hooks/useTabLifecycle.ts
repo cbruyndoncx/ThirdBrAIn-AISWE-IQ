@@ -1,0 +1,121 @@
+import { useEffect, useRef } from 'react'
+import type { Task } from '@slayzone/task/shared'
+import type { Project } from '@slayzone/projects/shared'
+import { useTabStore, type Tab } from '@slayzone/settings'
+import { taskDetailCache } from '@slayzone/task/client/taskDetailCache'
+import { track } from '@slayzone/telemetry/client'
+
+export function useTabLifecycle({
+  tasks,
+  projects,
+  tabs,
+  activeTabIndex,
+  setTerminalFocusRequests,
+  hubIdByProject,
+  hubIdByTask
+}: {
+  tasks: Task[]
+  projects: Project[]
+  tabs: Tab[]
+  activeTabIndex: number
+  setTerminalFocusRequests: React.Dispatch<React.SetStateAction<Record<string, number>>>
+  /** Multi-hub: project→hub / task→hub origin maps (empty when single-hub). */
+  hubIdByProject?: Map<string, string>
+  hubIdByTask?: Map<string, string>
+}): void {
+  // Sync task/project data into tab store for worktree grouping + temp task
+  // detection. Multi-hub: annotate each project with its owning hub so the
+  // warm-pool feed routes counts to the right hub (absent → default hub).
+  useEffect(() => {
+    const annotatedProjects = hubIdByProject
+      ? projects.map((p) => ({ ...p, hubId: hubIdByProject.get(p.id) }))
+      : projects
+    useTabStore.setState({ _taskLookup: { tasks, projects: annotatedProjects } })
+  }, [tasks, projects, hubIdByProject])
+
+  // Evict cache entries when task tabs close (prevent memory leaks). Multi-hub:
+  // evict the (taskId, hubId) slot so a remote task's cached detail is freed.
+  const prevTabsRef = useRef(tabs)
+  useEffect(() => {
+    const prev = prevTabsRef.current
+    prevTabsRef.current = tabs
+    for (const tab of prev) {
+      if (tab.type !== 'task') continue
+      if (!tabs.some((t) => t.type === 'task' && t.taskId === tab.taskId)) {
+        taskDetailCache.evict('taskDetail', tab.taskId, hubIdByTask?.get(tab.taskId))
+      }
+    }
+  }, [tabs, hubIdByTask])
+
+  // Track whether task data has loaded at least once.
+  const tasksLoadedRef = useRef(false)
+  if (tasks.length > 0) tasksLoadedRef.current = true
+
+  // Sync tab titles/status and remove tabs for deleted tasks.
+  useEffect(() => {
+    if (!tasksLoadedRef.current) return
+    const taskIds = new Set(tasks.map((t) => t.id))
+    const store = useTabStore.getState()
+    const prev = store.tabs
+    const removedTabs = prev.filter(
+      (tab): tab is Extract<Tab, { type: 'task' }> =>
+        tab.type === 'task' && !taskIds.has(tab.taskId)
+    )
+    if (removedTabs.length > 0) {
+      const newClosed = [...store.closedTabs, ...removedTabs]
+      while (newClosed.length > 20) newClosed.shift()
+      useTabStore.setState({ closedTabs: newClosed })
+    }
+    const filtered = prev.filter((tab) => tab.type !== 'task' || taskIds.has(tab.taskId))
+    const newActive =
+      filtered.length < prev.length
+        ? Math.min(store.activeTabIndex, filtered.length - 1)
+        : store.activeTabIndex
+    const updated = filtered.map((tab) => {
+      if (tab.type !== 'task') return tab
+      const task = tasks.find((t) => t.id === tab.taskId)
+      if (task) {
+        const isSubTask = !!task.parent_id
+        const isTemporary = !!task.is_temporary
+        if (
+          task.title !== tab.title ||
+          task.status !== tab.status ||
+          isSubTask !== tab.isSubTask ||
+          isTemporary !== tab.isTemporary
+        ) {
+          return { ...tab, title: task.title, status: task.status, isSubTask, isTemporary }
+        }
+      }
+      return tab
+    })
+    useTabStore.setState({ tabs: updated, activeTabIndex: newActive })
+  }, [tasks])
+
+  // Drop stale focus requests for tasks that no longer exist.
+  useEffect(() => {
+    const taskIds = new Set(tasks.map((t) => t.id))
+    setTerminalFocusRequests((prev) => {
+      let changed = false
+      const next: Record<string, number> = {}
+      for (const [id, requestId] of Object.entries(prev)) {
+        if (taskIds.has(id)) next[id] = requestId
+        else changed = true
+      }
+      return changed ? next : prev
+    })
+  }, [tasks])
+
+  // Track page views on tab switch
+  const prevTabIndexRef = useRef(-1)
+  useEffect(() => {
+    if (activeTabIndex === prevTabIndexRef.current) return
+    prevTabIndexRef.current = activeTabIndex
+    const tab = tabs[activeTabIndex]
+    if (!tab) return
+    if (tab.type === 'task') {
+      track('$pageview', { $current_url: `/task/${tab.taskId}`, page: 'task', task_id: tab.taskId })
+    } else {
+      track('$pageview', { $current_url: `/${tab.type}`, page: tab.type })
+    }
+  }, [activeTabIndex, tabs])
+}

@@ -1,0 +1,73 @@
+appId: com.slayzone.app
+productName: SlayZone
+directories:
+  buildResources: build
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - '!**/node_modules/@slayzone/**'
+asarUnpack:
+  - resources/**
+  - '**/node_modules/better-sqlite3/**'
+  - '**/node_modules/node-pty/**'
+win:
+  executableName: slayzone
+nsis:
+  artifactName: ${productName}-setup-${arch}.${ext}
+  shortcutName: ${productName}
+  uninstallDisplayName: ${productName}
+  createDesktopShortcut: always
+afterPack: build/afterPack.cjs
+mac:
+  artifactName: ${productName}-${arch}.${ext}
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  icon: build/icon.icns
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    - NSCameraUsageDescription: Application requests access to the device's camera.
+    - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
+    - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
+    - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+    - NSDesktopFolderUsageDescription: Application requests access to the user's Desktop folder.
+    - NSRemovableVolumesUsageDescription: Application requests access to removable volumes.
+    - NSNetworkVolumesUsageDescription: Application requests access to network volumes.
+  notarize: true
+dmg:
+  artifactName: ${productName}-${arch}.${ext}
+linux:
+  target:
+    - AppImage
+    - deb
+  executableName: slayzone
+  maintainer: slayzone
+  category: Utility
+deb:
+  artifactName: ${productName}-${arch}.${ext}
+appImage:
+  artifactName: ${productName}-${arch}.${ext}
+extraResources:
+  - from: "../cli/dist/slay.js"
+    to: "bin/slay.js"
+  - from: "../cli/bin/slay"
+    to: "bin/slay"
+  - from: "../hub/dist/bin.cjs"
+    to: "hub/bin.cjs"
+  # server.ts's WEB_ROOT resolves as `join(__dirname, '..', 'dist', 'web')`
+  # relative to wherever bin.cjs itself runs from — an OFFSET, not a fixed
+  # path, so it resolves correctly both unpackaged (dist/bin.cjs + dist/web
+  # side by side under packages/apps/hub/) and here. bin.cjs lands at
+  # resourcesPath/hub/bin.cjs, so __dirname there is resourcesPath/hub — the
+  # SAME offset from resourcesPath/hub then requires this bundle at
+  # resourcesPath/dist/web, not resourcesPath/hub/web.
+  - from: "../hub/dist/web"
+    to: "dist/web"
+npmRebuild: true
+nativeRebuilder: sequential
+publish:
+  provider: github

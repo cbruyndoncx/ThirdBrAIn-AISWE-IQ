@@ -1,0 +1,37 @@
+{
+  "name": "@slayzone/usage-analytics",
+  "version": "0.36.0-beta.17",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./shared": "./src/shared/index.ts",
+    "./server": "./src/server/index.ts",
+    "./electron": "./src/electron/index.ts",
+    "./client": "./src/client/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@slayzone/types": "workspace:*",
+    "@slayzone/transport": "workspace:*",
+    "@slayzone/ui": "workspace:*",
+    "@tanstack/react-query": "^5.100.9",
+    "lucide-react": "^0.562.0",
+    "recharts": "^2.15.3",
+    "@slayzone/platform": "workspace:*",
+    "@slayzone/projects": "workspace:*"
+  },
+  "peerDependencies": {
+    "electron": "^41.0.0",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/react": "^19.2.7",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,91 @@
+import { useState, useEffect, useRef } from 'react'
+import { useTRPCClient } from '@slayzone/transport/client'
+
+interface DesktopHandoffPolicy {
+  protocol: string
+  hostScope?: string
+}
+
+interface UseBrowserViewLifecycleOpts {
+  tabId: string
+  taskId: string
+  url: string
+  partition?: string
+  kind?: 'browser-tab' | 'web-panel'
+  desktopHandoffPolicy?: DesktopHandoffPolicy | null
+}
+
+// NOTE: browser.createView / browser.destroyView spawn and tear down the native
+// Electron WebContentsView. These are electron-native view ops and intentionally
+// stay on the preload bridge per the migration design (no tRPC cutover).
+export function useBrowserViewLifecycle(opts: UseBrowserViewLifecycleOpts): {
+  viewId: string | null
+} {
+  const trpcClient = useTRPCClient()
+  const { tabId, taskId, url, partition, kind, desktopHandoffPolicy } = opts
+  const [viewId, setViewId] = useState<string | null>(null)
+  const mountedRef = useRef(true)
+  const currentTabIdRef = useRef(tabId)
+
+  useEffect(() => {
+    mountedRef.current = true
+    currentTabIdRef.current = tabId
+
+    let createdViewId: string | null = null
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+
+    const tryCreate = async (): Promise<void> => {
+      if (!mountedRef.current || currentTabIdRef.current !== tabId) return
+
+      try {
+        const id = await trpcClient.app.browser.createView.mutate({
+          taskId,
+          tabId,
+          partition,
+          url: url || 'about:blank',
+          bounds: { x: 0, y: 0, width: 1, height: 1 },
+          kind,
+          desktopHandoffPolicy
+        })
+
+        if (!id) {
+          // Manager returned null (window not ready) — retry
+          console.warn('[useBrowserViewLifecycle] createView returned null, retrying in 500ms')
+          retryTimer = setTimeout(() => {
+            if (mountedRef.current) void tryCreate()
+          }, 500)
+          return
+        }
+
+        if (!mountedRef.current || currentTabIdRef.current !== tabId) {
+          void trpcClient.app.browser.destroyView.mutate({ viewId: id as string })
+          return
+        }
+
+        createdViewId = id as string
+        setViewId(id as string)
+      } catch (err) {
+        console.error('[useBrowserViewLifecycle] createView failed:', err)
+        // Retry on failure (e.g., main process not ready)
+        retryTimer = setTimeout(() => {
+          if (mountedRef.current) void tryCreate()
+        }, 500)
+      }
+    }
+
+    void tryCreate()
+
+    return () => {
+      mountedRef.current = false
+      if (retryTimer) clearTimeout(retryTimer)
+      if (createdViewId) {
+        void trpcClient.app.browser.destroyView.mutate({ viewId: createdViewId })
+      }
+      setViewId(null)
+    }
+    // url/partition are initial values only — intentional
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabId, taskId, trpcClient])
+
+  return { viewId }
+}

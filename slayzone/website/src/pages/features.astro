@@ -1,0 +1,149 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro'
+import SiteNav from '../components/SiteNav.astro'
+import SiteFooter from '../components/SiteFooter.astro'
+import FeatureList from '../components/features/FeatureList.astro'
+import { features, featurePath } from '../data/features.js'
+import '../styles/features.css'
+
+const featureLinks = features.map((feature) => ({
+  legacyId: feature.legacyId,
+  href: featurePath(feature),
+  label: `Read more about ${feature.title}`
+}))
+---
+
+<BaseLayout
+  title="SlayZone — Features"
+  description="All SlayZone features for AI coding agent orchestration: kanban board, PTY terminals, git worktrees, embedded browsers, PR workflow, token usage tracking."
+  canonicalPath="/features"
+>
+  <Fragment slot="nav"><SiteNav current="features" /></Fragment>
+
+  <div class="features-header">
+    <h1>All features</h1>
+    <p>Everything a card hides. And then some.</p>
+  </div>
+
+  <FeatureList />
+
+  <noscript>
+    <section class="feature-detail-noscript">
+      <h2>Feature deep dives</h2>
+      <ul>
+        {features.map((feature) => (
+          <li><a href={featurePath(feature)}>{feature.title}</a></li>
+        ))}
+      </ul>
+    </section>
+  </noscript>
+
+  <Fragment slot="footer"><SiteFooter /></Fragment>
+</BaseLayout>
+
+<style>
+  .feature-text { display: flex; flex-direction: column; align-items: flex-start; }
+  :global(.feature-section) {
+    position: relative;
+    cursor: pointer;
+  }
+  :global(.feature-section + .feature-section) {
+    border-top: 0;
+  }
+  :global(.feature-visual),
+  :global(.feature-text) {
+    position: relative;
+    z-index: 2;
+  }
+  :global(.feature-visual) {
+    pointer-events: auto;
+    z-index: 6;
+    transition: transform 0.35s ease, box-shadow 0.35s ease;
+    transform-origin: left center;
+  }
+  :global(.feature-visual:hover) {
+    z-index: 10;
+    transform: scale(1.2);
+    box-shadow: 0 18px 48px rgba(17, 20, 40, 0.16);
+  }
+  :global(.feature-section:nth-child(even) .feature-visual) {
+    transform-origin: right center;
+  }
+  :global(.feature-detail-link) {
+    position: relative;
+    z-index: 3;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 16px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: #5f6478;
+    text-decoration: none;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    pointer-events: auto;
+  }
+  :global(.feature-detail-link:hover) {
+    color: var(--accent);
+  }
+  :global(.feature-detail-link::after) {
+    content: '→';
+    opacity: 0.82;
+    transition: transform 0.2s ease, opacity 0.2s ease;
+  }
+  :global(.feature-detail-link:hover::after) {
+    opacity: 1;
+    transform: translateX(2px);
+  }
+  .feature-detail-noscript {
+    max-width: 960px;
+    margin: 0 auto 72px;
+    padding: 0 24px;
+  }
+  .feature-detail-noscript h2 {
+    font-size: 18px;
+    margin: 0 0 12px;
+    letter-spacing: -0.04em;
+  }
+  .feature-detail-noscript ul {
+    margin: 0;
+    padding-left: 18px;
+    color: #555;
+  }
+  .feature-detail-noscript a { color: var(--accent); }
+  @media (max-width: 800px) {
+    :global(.feature-visual) {
+      transform: none !important;
+    }
+    :global(.feature-visual:hover) {
+      transform: none !important;
+      box-shadow: none;
+    }
+  }
+</style>
+
+<script is:inline define:vars={{ featureLinks }}>
+  const detailLinks = Array.isArray(featureLinks) ? featureLinks : []
+  detailLinks.forEach((feature) => {
+    const section = document.getElementById(feature.legacyId)
+    if (!section) return
+    const text = section.querySelector('.feature-text')
+    if (!text) return
+    section.dataset.href = feature.href
+    section.setAttribute('aria-label', feature.label)
+    const link = document.createElement('a')
+    link.className = 'feature-detail-link'
+    link.href = feature.href
+    link.textContent = 'More on this feature'
+    link.setAttribute('aria-label', feature.label)
+    text.appendChild(link)
+    section.addEventListener('click', (event) => {
+      if (event.target instanceof Element && event.target.closest('.feature-detail-link')) return
+      window.location.href = feature.href
+    })
+  })
+</script>

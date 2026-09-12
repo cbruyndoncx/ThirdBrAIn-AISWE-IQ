@@ -1,0 +1,145 @@
+import * as React from 'react'
+import { Loader2, Pause } from 'lucide-react'
+import { cn } from './utils'
+import { getTerminalStateStyle, ATTENTION_STATE_STYLE } from './terminal-state'
+import { ProgressRing } from './progress-ring'
+import { Tooltip, TooltipTrigger, TooltipContent } from './tooltip'
+
+export interface TerminalProgressDotProps {
+  state: string | undefined
+  progress?: number | null
+  isDone?: boolean
+  /** Render muted fallback dot when no state. Default: false (renders nothing). */
+  alwaysShow?: boolean
+  tooltipSide?: 'top' | 'right' | 'bottom' | 'left'
+  /** Render bare blob without Tooltip wrapper. Default: false. */
+  noTooltip?: boolean
+  /** Override style with a pulsing amber "needs attention" indicator. */
+  needsAttention?: boolean
+  /**
+   * When true, a hibernated (paused) session keeps its pause icon even while
+   * `needsAttention` is set — the pause symbol wins over the amber override.
+   * Use where unread is surfaced separately (e.g. a trailing pill) so the blob
+   * can show real state. Default: false (attention overrides every state).
+   */
+  pauseOverridesAttention?: boolean
+  size?: number
+  /** Larger footprint while running / loading. Default: same as `size`. */
+  activeSize?: number
+  className?: string
+}
+
+export function TerminalProgressDot({
+  state,
+  progress,
+  isDone,
+  alwaysShow = false,
+  tooltipSide,
+  noTooltip = false,
+  needsAttention = false,
+  pauseOverridesAttention = false,
+  size = 14,
+  activeSize = size,
+  className
+}: TerminalProgressDotProps): React.JSX.Element | null {
+  const baseStyle = getTerminalStateStyle(state)
+  // Attention normally overrides every state. With `pauseOverridesAttention`,
+  // a hibernated session keeps its pause icon — the pause symbol wins.
+  const attentionWins = needsAttention && !(pauseOverridesAttention && state === 'hibernated')
+  const stateStyle = attentionWins ? ATTENTION_STATE_STYLE : baseStyle
+  const showProgress = !isDone && progress != null && progress > 0
+  const showState = !!stateStyle || alwaysShow
+  if (!showState && !showProgress) return null
+
+  const dotColor = stateStyle?.color ?? 'bg-muted-foreground/40'
+  const stateLabel = stateStyle?.label ?? 'No session'
+  const isRunning = !attentionWins && state === 'running'
+  // Main agent done, background subagents still working: same spinner affordance
+  // (work IS happening) at half speed and reduced opacity, so it reads as
+  // "progressing, but nothing needs you" next to a real `running` spinner.
+  const isBackground = !attentionWins && state === 'background'
+  // Hibernated (idle-closed) sessions show a pause icon instead of a dot.
+  const isHibernated = !attentionWins && state === 'hibernated'
+
+  // Wrapper footprint is the constant max of size/activeSize, so the row layout
+  // never shifts when a terminal goes active. The indicator renders at `size`
+  // normally and `activeSize` while running OR while background subagents are
+  // still working — background only differs by speed/opacity (see above), not
+  // size, else its spinner reads as a rendering glitch next to a full-size one.
+  // A mere progress value does not enlarge it. Always <= footprint, so it sits
+  // inside the wrapper (no flex-shrink, no clipping). Blob and ring stay
+  // even-sized; with an even footprint the free space splits to whole pixels —
+  // pixel-perfect concentric.
+  const renderSize = isRunning || isBackground ? activeSize : size
+  const footprint = Math.max(size, activeSize)
+  const innerSize = Math.round((renderSize * 0.85) / 2) * 2
+  // Progress ring is sized off `size`, not `renderSize`, so its radius stays
+  // fixed regardless of terminal state.
+  const ringSize = size + 6
+  const ringInset = (footprint - ringSize) / 2
+
+  const blob = (
+    <span
+      className={cn('relative inline-flex items-center justify-center shrink-0', className)}
+      style={{ width: footprint, height: footprint }}
+    >
+      {showProgress && (
+        <ProgressRing
+          value={progress!}
+          size={ringSize}
+          strokeWidth={1.5}
+          className="absolute"
+          style={{ left: ringInset, top: ringInset }}
+        />
+      )}
+      {showState &&
+        (isHibernated ? (
+          <Pause
+            size={footprint}
+            strokeWidth={1.5}
+            className={cn(
+              'relative z-10 shrink-0 fill-current',
+              stateStyle?.textColor ?? 'text-violet-500'
+            )}
+            aria-label={stateLabel}
+          />
+        ) : isRunning || isBackground ? (
+          <Loader2
+            size={innerSize}
+            strokeWidth={2.75}
+            className={cn(
+              'relative z-10 shrink-0 animate-spin',
+              // Half speed for background work. Arbitrary duration only — the
+              // animation itself is untouched, so nothing about the existing
+              // running spinner changes.
+              isBackground && '[animation-duration:2s]',
+              stateStyle?.textColor ?? 'text-green-500'
+            )}
+            aria-label={stateLabel}
+          />
+        ) : (
+          <span
+            className={cn('relative z-10 shrink-0 rounded-full', dotColor)}
+            style={{ width: innerSize, height: innerSize }}
+            aria-label={stateLabel}
+          />
+        ))}
+    </span>
+  )
+
+  if (noTooltip) return blob
+
+  const tooltipText = [
+    showState ? stateLabel : null,
+    showProgress ? `${Math.round(progress!)}%` : null
+  ]
+    .filter(Boolean)
+    .join(' - ')
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{blob}</TooltipTrigger>
+      <TooltipContent side={tooltipSide}>{tooltipText}</TooltipContent>
+    </Tooltip>
+  )
+}

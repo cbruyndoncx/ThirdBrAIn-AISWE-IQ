@@ -1,0 +1,457 @@
+import { tmpdir } from 'node:os'
+import { describe, expect, it } from 'vitest'
+import type { ComputerConfig } from '../config'
+import { createPtyHandlers } from './pty'
+import type { ComputerDialer } from './types'
+
+interface Notify {
+  method: string
+  params: Record<string, unknown>
+}
+
+function makeCtx() {
+  const notifies: Notify[] = []
+  const dialer: ComputerDialer = {
+    notify: (method, params) => {
+      notifies.push({ method, params: (params ?? {}) as Record<string, unknown> })
+      return true
+    }
+  }
+  const config: ComputerConfig = {
+    hubUrl: 'ws://localhost:0/computers',
+    name: 'test',
+    allowedRoots: [tmpdir()],
+    capabilities: ['pty']
+  }
+  return { notifies, ctx: { dialer, config, log: () => {} } }
+}
+
+async function waitFor(pred: () => boolean, timeoutMs = 8000): Promise<void> {
+  const start = Date.now()
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out')
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
+
+function dataParams(notifies: Notify[]): Array<{ seq: number; data: string }> {
+  return notifies
+    .filter((n) => n.method === 'pty.data')
+    .map((n) => ({ seq: n.params.seq as number, data: n.params.data as string }))
+}
+
+describe('createPtyHandlers', () => {
+  it('streams monotonic pty.data, replays a gap via getBufferSince, then emits pty.exit', async () => {
+    const { notifies, ctx } = makeCtx()
+    const pty = createPtyHandlers(ctx)
+    const sessionId = 'sess-1'
+
+    // `cat` echoes stdin back through the pty and stays alive until killed —
+    // deterministic control over when frames arrive.
+    const spawned = (await pty.handlers['pty.spawn']({
+      sessionId,
+      command: 'cat',
+      cwd: process.cwd()
+    })) as { pid: number }
+    expect(spawned.pid).toBeGreaterThan(0)
+
+    await pty.handlers['pty.write']({ sessionId, data: 'alpha\n' })
+    await waitFor(() =>
+      dataParams(notifies)
+        .map((f) => f.data)
+        .join('')
+        .includes('alpha')
+    )
+    await pty.handlers['pty.write']({ sessionId, data: 'bravo\n' })
+    await waitFor(() =>
+      dataParams(notifies)
+        .map((f) => f.data)
+        .join('')
+        .includes('bravo')
+    )
+
+    const frames = dataParams(notifies)
+    expect(frames.length).toBeGreaterThan(1)
+    // Seq is monotonic and dense from 0 (one append per emitted frame).
+    frames.forEach((f, i) => expect(f.seq).toBe(i))
+
+    // Gap replay: the hub says "I have up to seq N, give me the rest".
+    const sinceSeq = frames[0].seq
+    const replay = (await pty.handlers['pty.getBufferSince']({ sessionId, seq: sinceSeq })) as {
+      frames: Array<{ seq: number; data: string }>
+    }
+    const expected = frames.filter((f) => f.seq > sinceSeq)
+    expect(replay.frames.map((f) => f.seq)).toEqual(expected.map((f) => f.seq))
+    expect(replay.frames.map((f) => f.data).join('')).toBe(expected.map((f) => f.data).join(''))
+
+    // Kill → exit notification, and the session is cleaned up afterwards.
+    await pty.handlers['pty.kill']({ sessionId })
+    await waitFor(() => notifies.some((n) => n.method === 'pty.exit'))
+    const exit = notifies.find((n) => n.method === 'pty.exit')!.params
+    expect(exit.sessionId).toBe(sessionId)
+
+    const afterExit = (await pty.handlers['pty.getBufferSince']({ sessionId, seq: 0 })) as {
+      frames: unknown[]
+    }
+    expect(afterExit.frames).toEqual([])
+
+    pty.disposeAll()
+  })
+
+  it('live frame N and buffered frame N are byte-identical (hub mixes the two sources per seq)', async () => {
+    // The hub's `ingest` keeps whichever copy of a seq ARRIVES FIRST and drops
+    // the other (`if (seq <= entry.lastSeq) return`), so a stream can be assembled
+    // from live frame 3 + backfilled frame 4 + live frame 5. That makes the two
+    // sources interchangeable BY CONTRACT: any per-seq divergence corrupts the
+    // assembled stream — dropping bytes in one ordering and stranding a torn
+    // escape prefix in the other. So the computer must never emit a frame whose
+    // buffered bytes differ from its live bytes.
+    const { notifies, ctx } = makeCtx()
+    const pty = createPtyHandlers(ctx)
+    const sessionId = 'sess-parity'
+
+    // Emit output torn mid-query across two pty reads, then stay alive so the
+    // buffer is still queryable.
+    await pty.handlers['pty.spawn']({
+      sessionId,
+      command: 'sh',
+      args: [
+        '-c',
+        'printf "one\\n"; sleep 0.3; printf "two\\033[?6"; sleep 0.3; printf "nthree\\n"; exec tail -f /dev/null'
+      ],
+      cwd: process.cwd()
+    })
+    await waitFor(() =>
+      dataParams(notifies)
+        .map((f) => f.data)
+        .join('')
+        .includes('three')
+    )
+
+    const replay = (await pty.handlers['pty.getBufferSince']({ sessionId, seq: 0 })) as {
+      frames: Array<{ seq: number; data: string }>
+    }
+    const bufferedBySeq = new Map(replay.frames.map((f) => [f.seq, f.data]))
+    for (const frame of dataParams(notifies)) {
+      if (!bufferedBySeq.has(frame.seq)) continue // evicted, not divergent
+      expect(bufferedBySeq.get(frame.seq)).toBe(frame.data)
+    }
+
+    await pty.handlers['pty.kill']({ sessionId })
+    await waitFor(() => notifies.some((n) => n.method === 'pty.exit'))
+    pty.disposeAll()
+  })
+
+  it('warm session buffers silently, then adopt rekeys it with pid + seq continuity', async () => {
+    const { notifies, ctx } = makeCtx()
+    const pty = createPtyHandlers(ctx)
+
+    const warm = (await pty.handlers['pty.warmSpawn']({
+      warmId: 'warm-1',
+      command: 'cat',
+      cwd: process.cwd()
+    })) as { pid: number }
+    expect(warm.pid).toBeGreaterThan(0)
+
+    // Output produced BEFORE adoption must not be streamed: the hub has no
+    // session to route it to, and adopt hands the whole buffer over instead.
+    await pty.handlers['pty.write']({ sessionId: 'warm-1', data: 'preboot\n' })
+    await waitFor(() => (pty.handlers['pty.warmList']() as { warms: unknown[] }).warms.length === 1)
+    await new Promise((r) => setTimeout(r, 150))
+    expect(dataParams(notifies)).toEqual([])
+
+    const listed = (await pty.handlers['pty.warmList']()) as {
+      warms: Array<{ warmId: string; pid: number; cwd: string }>
+    }
+    expect(listed.warms[0]).toMatchObject({ warmId: 'warm-1', pid: warm.pid })
+
+    const adopted = (await pty.handlers['pty.warmAdopt']({
+      warmId: 'warm-1',
+      sessionId: 'sess-warm'
+    })) as { pid: number; data: string; seq: number }
+
+    // SAME process — adoption rekeys, it never respawns.
+    expect(adopted.pid).toBe(warm.pid)
+    expect(adopted.data).toContain('preboot')
+    expect(adopted.seq).toBeGreaterThanOrEqual(0)
+
+    // No longer warm, and now streaming under the REAL session id.
+    expect((pty.handlers['pty.warmList']() as { warms: unknown[] }).warms).toEqual([])
+    await pty.handlers['pty.write']({ sessionId: 'sess-warm', data: 'after\n' })
+    await waitFor(() =>
+      dataParams(notifies)
+        .map((f) => f.data)
+        .join('')
+        .includes('after')
+    )
+    const live = notifies.filter((n) => n.method === 'pty.data')
+    expect(live.every((n) => n.params.sessionId === 'sess-warm')).toBe(true)
+
+    // Seq CONTINUES past the handover rather than restarting — the whole reason
+    // adoption rekeys the buffer instead of replaying a seed into a fresh one.
+    expect(dataParams(notifies)[0].seq).toBeGreaterThan(adopted.seq)
+
+    // ...and backfill spanning the boundary still resolves against that buffer.
+    const replay = (await pty.handlers['pty.getBufferSince']({
+      sessionId: 'sess-warm',
+      seq: -1
+    })) as { frames: Array<{ seq: number; data: string }> }
+    expect(replay.frames.map((f) => f.data).join('')).toContain('preboot')
+
+    pty.disposeAll()
+  })
+
+  it('warm exit before adoption stays silent; adopting an unknown warm throws', async () => {
+    const { notifies, ctx } = makeCtx()
+    const pty = createPtyHandlers(ctx)
+
+    await pty.handlers['pty.warmSpawn']({
+      warmId: 'warm-dies',
+      command: 'sh',
+      args: ['-c', 'exit 0'],
+      cwd: process.cwd()
+    })
+    // The hub holds no session for a warm id, so a pre-adopt death must not
+    // surface as pty.exit — it would tear down a session that never existed.
+    await waitFor(() => (pty.handlers['pty.warmList']() as { warms: unknown[] }).warms.length === 0)
+    expect(notifies.some((n) => n.method === 'pty.exit')).toBe(false)
+
+    expect(() => pty.handlers['pty.warmAdopt']({ warmId: 'warm-dies', sessionId: 's' })).toThrow(
+      /no warm session/
+    )
+
+    pty.disposeAll()
+  })
+
+  it('warmKill reaps an unclaimed warm (orphan reconcile) and is idempotent', async () => {
+    const { ctx } = makeCtx()
+    const pty = createPtyHandlers(ctx)
+
+    await pty.handlers['pty.warmSpawn']({
+      warmId: 'warm-orphan',
+      command: 'cat',
+      cwd: process.cwd()
+    })
+    expect((pty.handlers['pty.warmList']() as { warms: unknown[] }).warms).toHaveLength(1)
+
+    await pty.handlers['pty.warmKill']({ warmId: 'warm-orphan' })
+    expect((pty.handlers['pty.warmList']() as { warms: unknown[] }).warms).toEqual([])
+    // Idempotent: the hub reconciles against a list that may already be stale.
+    await pty.handlers['pty.warmKill']({ warmId: 'warm-orphan' })
+
+    pty.disposeAll()
+  })
+
+  it('emits pty.exit with exitCode 0 for a short-lived command', async () => {
+    const { notifies, ctx } = makeCtx()
+    const pty = createPtyHandlers(ctx)
+    await pty.handlers['pty.spawn']({
+      sessionId: 's2',
+      command: 'sh',
+      args: ['-c', 'printf hi'],
+      cwd: process.cwd()
+    })
+    await waitFor(() => notifies.some((n) => n.method === 'pty.exit'))
+    const exit = notifies.find((n) => n.method === 'pty.exit')!.params
+    expect(exit.exitCode).toBe(0)
+    pty.disposeAll()
+  })
+
+  it('re-spawning the same sessionId does not let the old pty tear down the replacement', async () => {
+    const { notifies, ctx } = makeCtx()
+    const pty = createPtyHandlers(ctx)
+    const sessionId = 'dup'
+
+    await pty.handlers['pty.spawn']({ sessionId, command: 'cat', cwd: process.cwd() })
+    // Replace it with a fresh pty under the SAME id (kills the first).
+    await pty.handlers['pty.spawn']({ sessionId, command: 'cat', cwd: process.cwd() })
+    // Give the killed original time to fire its (now-superseded) exit.
+    await new Promise((r) => setTimeout(r, 250))
+    expect(notifies.some((n) => n.method === 'pty.exit')).toBe(false)
+
+    // The replacement is alive and streaming.
+    await pty.handlers['pty.write']({ sessionId, data: 'ping\n' })
+    await waitFor(() =>
+      dataParams(notifies)
+        .map((f) => f.data)
+        .join('')
+        .includes('ping')
+    )
+
+    // Exactly one exit fires — for the active session only.
+    await pty.handlers['pty.kill']({ sessionId })
+    await waitFor(() => notifies.filter((n) => n.method === 'pty.exit').length === 1)
+    await new Promise((r) => setTimeout(r, 100))
+    expect(notifies.filter((n) => n.method === 'pty.exit').length).toBe(1)
+
+    pty.disposeAll()
+  })
+
+  it('getBufferSince accepts seq -1 and replays from seq 0 (opening-chunk recovery)', async () => {
+    const { notifies, ctx } = makeCtx()
+    const pty = createPtyHandlers(ctx)
+    const sessionId = 'sess-from-start'
+
+    await pty.handlers['pty.spawn']({ sessionId, command: 'cat', cwd: process.cwd() })
+    await pty.handlers['pty.write']({ sessionId, data: 'first\n' })
+    await waitFor(() =>
+      dataParams(notifies)
+        .map((f) => f.data)
+        .join('')
+        .includes('first')
+    )
+
+    // -1 is what the hub sends when the chunk it is missing is seq 0 itself: its
+    // gap detector starts at lastSeq = -1. Rejecting it (the old `nonnegative()`
+    // bound) made the caller's best-effort catch swallow the failure and the
+    // session lose its opening output permanently.
+    const replay = (await pty.handlers['pty.getBufferSince']({ sessionId, seq: -1 })) as {
+      frames: Array<{ seq: number; data: string }>
+    }
+    expect(replay.frames[0]?.seq).toBe(0)
+    expect(replay.frames.map((f) => f.data).join('')).toContain('first')
+
+    await pty.handlers['pty.kill']({ sessionId })
+    pty.disposeAll()
+  })
+
+  it('getBufferSince on an unknown session returns no frames', async () => {
+    const { ctx } = makeCtx()
+    const pty = createPtyHandlers(ctx)
+    const res = (await pty.handlers['pty.getBufferSince']({ sessionId: 'nope', seq: 0 })) as {
+      frames: unknown[]
+    }
+    expect(res.frames).toEqual([])
+  })
+
+  it('overlays the computer loopback SLAYZONE_AGENT_HOOK_URL and strips any hub token', async () => {
+    // The agent must ALWAYS post its hook to the computer's OWN loopback relay —
+    // never to a hub URL the hub baked in. The computer overlays the URL at spawn
+    // and strips any stray SLAYZONE_HUB_TOKEN so no per-agent bearer leaks into
+    // the subprocess env.
+    const { ctx } = makeCtx()
+    const hookUrl = 'http://127.0.0.1:54999/api/agent-hook'
+    const pty = createPtyHandlers({ ...ctx, agentHookUrl: hookUrl })
+    const sessionId = 'env-check'
+
+    // Spawn `env` and capture its output to inspect the child's environment.
+    let out = ''
+    const dialer: ComputerDialer = {
+      notify: (method, params) => {
+        if (method === 'pty.data') out += (params as { data: string }).data
+        return true
+      }
+    }
+    const pty2 = createPtyHandlers({ ...ctx, dialer, agentHookUrl: hookUrl })
+    await pty2.handlers['pty.spawn']({
+      sessionId,
+      command: 'sh',
+      args: ['-c', 'echo HOOK=$SLAYZONE_AGENT_HOOK_URL; echo TOKEN=[$SLAYZONE_HUB_TOKEN]'],
+      cwd: process.cwd(),
+      env: {
+        // The hub baked in a (now-wrong) hub hook URL + a bearer; the computer
+        // must override the URL and drop the token.
+        SLAYZONE_AGENT_HOOK_URL: 'https://hub.example:8443/api/agent-hook',
+        SLAYZONE_HUB_TOKEN: 'should-be-stripped',
+        SLAYZONE_AGENT_ID: 'claude-code'
+      }
+    })
+    await waitFor(() => out.includes('HOOK=') && out.includes('TOKEN='))
+    expect(out).toContain(`HOOK=${hookUrl}`)
+    expect(out).toContain('TOKEN=[]')
+    pty2.disposeAll()
+    pty.disposeAll()
+  })
+
+  it('sanitizes the inherited process.env base: strips infra/secret/identity + non-prefixed infra, keeps PATH', async () => {
+    // The computer inherits its parent (supervisor) process.env, which carries
+    // SlayZone infra/secret/identity vars. NONE of those may leak into a spawned
+    // agent's env — a computer-hosted `slay` reinterpreting an inherited
+    // SLAYZONE_HUB_ADDRESS/HUB_TOKEN/TASK_ID is the exact leak this closes. The
+    // user env (PATH/HOME/toolchains) MUST survive. This is the BASE channel
+    // (process.env), distinct from the hub-passed override channel tested above.
+    const saved: Record<string, string | undefined> = {}
+    const inject: Record<string, string> = {
+      SLAYZONE_HUB_ADDRESS: 'hub.example:8443', // infra
+      SLAYZONE_HUB_TOKEN: 'inherited-secret', // secret
+      SLAYZONE_MODE: 'remote', // infra
+      SLAYZONE_TASK_ID: 'inherited-task', // identity (overlay would re-add correct)
+      SLAYZONE_FUTURE_UNLISTED: 'fail-closed', // unmanifested → fail closed
+      ELECTRON_RUN_AS_NODE: '1' // non-prefixed infra
+    }
+    for (const [k, v] of Object.entries(inject)) {
+      saved[k] = process.env[k]
+      process.env[k] = v
+    }
+    try {
+      const { ctx } = makeCtx()
+      let out = ''
+      const dialer: ComputerDialer = {
+        notify: (method, params) => {
+          if (method === 'pty.data') out += (params as { data: string }).data
+          return true
+        }
+      }
+      const pty = createPtyHandlers({ ...ctx, dialer })
+      await pty.handlers['pty.spawn']({
+        sessionId: 'base-sanitize',
+        command: 'sh',
+        args: [
+          '-c',
+          'echo ADDR=[$SLAYZONE_HUB_ADDRESS]; echo TOK=[$SLAYZONE_HUB_TOKEN]; ' +
+            'echo MODE=[$SLAYZONE_MODE]; echo TASK=[$SLAYZONE_TASK_ID]; ' +
+            'echo FUT=[$SLAYZONE_FUTURE_UNLISTED]; echo ERAN=[$ELECTRON_RUN_AS_NODE]; ' +
+            'echo PATHSET=[${PATH:+yes}]'
+        ],
+        cwd: process.cwd(),
+        env: {}
+      })
+      await waitFor(() => out.includes('PATHSET='))
+      expect(out).toContain('ADDR=[]')
+      expect(out).toContain('TOK=[]')
+      expect(out).toContain('MODE=[]')
+      expect(out).toContain('TASK=[]')
+      expect(out).toContain('FUT=[]')
+      expect(out).toContain('ERAN=[]')
+      expect(out).toContain('PATHSET=[yes]')
+      pty.disposeAll()
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
+  it('WITHOUT agentHookUrl, passes env through byte-identically (no overlay, no strip)', async () => {
+    // Pre-init / tests: the relay port is not yet bound → no agentHookUrl. The
+    // env must be passed through UNCHANGED so this stays a no-op seam (behavior
+    // identical to before the split existed).
+    const { ctx } = makeCtx()
+    let out = ''
+    const dialer: ComputerDialer = {
+      notify: (method, params) => {
+        if (method === 'pty.data') out += (params as { data: string }).data
+        return true
+      }
+    }
+    const pty = createPtyHandlers({ ...ctx, dialer }) // NOTE: no agentHookUrl
+    const sessionId = 'passthrough'
+    await pty.handlers['pty.spawn']({
+      sessionId,
+      command: 'sh',
+      args: ['-c', 'echo HOOK=$SLAYZONE_AGENT_HOOK_URL; echo TOKEN=[$SLAYZONE_HUB_TOKEN]'],
+      cwd: process.cwd(),
+      env: {
+        SLAYZONE_AGENT_HOOK_URL: 'https://hub.example:8443/api/agent-hook',
+        SLAYZONE_HUB_TOKEN: 'kept-as-is',
+        SLAYZONE_AGENT_ID: 'claude-code'
+      }
+    })
+    await waitFor(() => out.includes('HOOK=') && out.includes('TOKEN='))
+    // Untouched: whatever the hub sent survives verbatim.
+    expect(out).toContain('HOOK=https://hub.example:8443/api/agent-hook')
+    expect(out).toContain('TOKEN=[kept-as-is]')
+    pty.disposeAll()
+  })
+})

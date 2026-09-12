@@ -1,0 +1,264 @@
+import {
+  test,
+  expect,
+  resetApp,
+  seed,
+  TEST_PROJECT_PATH,
+  notifyScriptEnv,
+  notifyScriptPath
+} from '../fixtures/electron'
+import fs from 'fs'
+import { spawnSync } from 'child_process'
+
+/**
+ * Scratch globals this spec parks on `window` inside its own `page.evaluate`
+ * closures, read back by `waitForFunction`. Module-scope rather than
+ * `declare global` (which the sibling hook specs also use): `e2e/` is one
+ * TypeScript program, so a global declaration here would be visible to every
+ * other spec and let an unrelated file's typo typecheck against it. Only
+ * app-contract globals belong in `e2e/globals.d.ts`.
+ */
+type CodexHookWindow = Window & {
+  __codexHookEvents?: unknown[]
+  __codexHookUnsub?: () => void
+  __codexStartEvents?: unknown[]
+  __codexStartUnsub?: () => void
+}
+
+/**
+ * Codex hook-driven agent lifecycle E2E.
+ *
+ * Codex integration uses Codex's native hooks system — SlayZone writes
+ * `~/.codex/hooks.json`; Codex itself runs the hook. (The legacy
+ * `~/.slayzone/bin/codex` bash wrapper was removed: it could not run on
+ * Windows.)
+ *
+ * Validates the load-bearing links:
+ *   1. Boot installer writes a managed `hooks.json` covering the lifecycle events.
+ *   2. notify.sh accepts a Codex-native hook payload (JSON via stdin, event in
+ *      `hook_event_name`) — agentId=codex envelope POST → /api/agent-hook →
+ *      IPC broadcast with the correctly normalized lifecycle type.
+ */
+/** `notifyScriptEnv` bound to this spec's agent — see the fixture for why the
+ *  identity must ride the ctx blob and why the env scrub is load-bearing. */
+const codexHookEnv = (opts: { port: number; taskId?: string }): Record<string, string> =>
+  notifyScriptEnv({ agentId: 'codex', ...opts })
+
+test.describe('Codex agent hooks', () => {
+  test.beforeAll(async ({ mainWindow }) => {
+    await resetApp(mainWindow)
+  })
+
+  test('boot installer wrote a managed ~/.codex/hooks.json', async ({ mainWindow }) => {
+    const env = (await mainWindow.evaluate(() => {
+      return window.__testInvoke('e2e:get-env', ['SLAYZONE_CODEX_HOOKS_PATH'])
+    })) as Record<string, string>
+
+    expect(env.SLAYZONE_CODEX_HOOKS_PATH).toBeTruthy()
+    await waitForFile(env.SLAYZONE_CODEX_HOOKS_PATH, 5000)
+
+    const config = JSON.parse(fs.readFileSync(env.SLAYZONE_CODEX_HOOKS_PATH, 'utf8'))
+    expect(config.hooks).toBeDefined()
+    for (const ev of ['SessionStart', 'UserPromptSubmit', 'Stop', 'PermissionRequest']) {
+      const list = config.hooks[ev]
+      expect(Array.isArray(list)).toBe(true)
+      expect(list.length).toBeGreaterThanOrEqual(1)
+      const managed = list.find((e: { hooks?: Array<{ _slayzoneManaged?: boolean }> }) =>
+        e.hooks?.some((h) => h._slayzoneManaged === true)
+      )
+      expect(managed).toBeTruthy()
+      // notify.sh is invoked explicitly via bash for cross-platform reliability.
+      expect(managed.hooks[0].command).toContain('bash ')
+      expect(managed.hooks[0].command).toContain('notify.sh')
+    }
+  })
+
+  test('notify.sh accepts a Codex stdin hook payload → agent:lifecycle IPC for agentId=codex', async ({
+    mainWindow
+  }) => {
+    const port = (await mainWindow.evaluate(() => {
+      return window.__testInvoke('e2e:get-mcp-port', [])
+    })) as number | null
+    expect(port).toBeTruthy()
+    if (!port) return
+
+    const env = (await mainWindow.evaluate(() => {
+      return window.__testInvoke('e2e:get-env', ['SLAYZONE_USER_DATA_DIR'])
+    })) as Record<string, string>
+    const scriptPath = notifyScriptPath(env.SLAYZONE_USER_DATA_DIR)
+    await waitForFile(scriptPath, 5000)
+
+    await mainWindow.evaluate(() => {
+      const w = window as CodexHookWindow
+      const events: unknown[] = []
+      w.__codexHookEvents = events
+      const sub = window.getTrpcVanillaClient().agentLifecycle.onEvent.subscribe(undefined, {
+        onData: (ev) => {
+          events.push(ev)
+        }
+      })
+      w.__codexHookUnsub = () => sub.unsubscribe()
+    })
+
+    // Codex native hooks deliver the event as JSON on stdin (hook_event_name).
+    const res = spawnSync('bash', [scriptPath], {
+      input: JSON.stringify({ hook_event_name: 'Stop', session_id: 'e2e' }),
+      env: codexHookEnv({ port, taskId: 'e2e-codex-task' })
+    })
+    expect(res.status).toBe(0)
+
+    const handle = await mainWindow.waitForFunction(
+      () => {
+        const events = (window as CodexHookWindow).__codexHookEvents
+        return events && events.length > 0 ? events[0] : null
+      },
+      { timeout: 5000 }
+    )
+    const event = await handle.jsonValue()
+    expect(event).toMatchObject({
+      agentId: 'codex',
+      type: 'agent-stop',
+      taskId: 'e2e-codex-task'
+    })
+
+    await mainWindow.evaluate(() => {
+      ;(window as CodexHookWindow).__codexHookUnsub?.()
+    })
+  })
+
+  test('UserPromptSubmit stdin payload maps to agent-start', async ({ mainWindow }) => {
+    const port = (await mainWindow.evaluate(() => {
+      return window.__testInvoke('e2e:get-mcp-port', [])
+    })) as number | null
+    expect(port).toBeTruthy()
+    if (!port) return
+
+    const env = (await mainWindow.evaluate(() => {
+      return window.__testInvoke('e2e:get-env', ['SLAYZONE_USER_DATA_DIR'])
+    })) as Record<string, string>
+    const scriptPath = notifyScriptPath(env.SLAYZONE_USER_DATA_DIR)
+
+    await mainWindow.evaluate(() => {
+      const w = window as CodexHookWindow
+      const events: unknown[] = []
+      w.__codexStartEvents = events
+      const sub = window.getTrpcVanillaClient().agentLifecycle.onEvent.subscribe(undefined, {
+        onData: (ev) => {
+          events.push(ev)
+        }
+      })
+      w.__codexStartUnsub = () => sub.unsubscribe()
+    })
+
+    const res = spawnSync('bash', [scriptPath], {
+      // No taskId in the blob — this case asserts only agentId + normalized type,
+      // so it must not silently inherit the host session's task either.
+      input: JSON.stringify({ hook_event_name: 'UserPromptSubmit' }),
+      env: codexHookEnv({ port })
+    })
+    expect(res.status).toBe(0)
+
+    const handle = await mainWindow.waitForFunction(
+      () => {
+        const events = (window as CodexHookWindow).__codexStartEvents
+        return events && events.length > 0 ? events[0] : null
+      },
+      { timeout: 5000 }
+    )
+    const event = await handle.jsonValue()
+    expect(event).toMatchObject({ agentId: 'codex', type: 'agent-start' })
+
+    await mainWindow.evaluate(() => {
+      ;(window as CodexHookWindow).__codexStartUnsub?.()
+    })
+  })
+
+  test('SessionStart stdin payload persists session_id to provider_config.codex.conversationId', async ({
+    mainWindow
+  }) => {
+    const port = (await mainWindow.evaluate(() => {
+      return window.__testInvoke('e2e:get-mcp-port', [])
+    })) as number | null
+    expect(port).toBeTruthy()
+    if (!port) return
+
+    const env = (await mainWindow.evaluate(() => {
+      return window.__testInvoke('e2e:get-env', ['SLAYZONE_USER_DATA_DIR'])
+    })) as Record<string, string>
+    const scriptPath = notifyScriptPath(env.SLAYZONE_USER_DATA_DIR)
+    await waitForFile(scriptPath, 5000)
+
+    // A real task row must exist — the server reads provider_config by task id.
+    const s = seed(mainWindow)
+    const project = await s.createProject({
+      name: 'Codex Hook Capture',
+      color: '#0ea5e9',
+      path: TEST_PROJECT_PATH
+    })
+    const task = await s.createTask({
+      projectId: project.id,
+      title: 'CHC codex task',
+      status: 'todo'
+    })
+    await mainWindow.evaluate(
+      (id) => window.getTrpcVanillaClient().task.update.mutate({ id, terminalMode: 'codex' }),
+      task.id
+    )
+
+    // The codex SessionStart hook carries the codex CLI session_id — the
+    // PRIMARY resume-id capture path (no /status command needed).
+    const codexSessionId = '88888888-8888-4888-8888-888888888888'
+
+    // Seed the spawn-intent row slay writes when it launches the agent. Without
+    // it the hook is treated as foreign-observed and the legacy provider_config
+    // dual-write is skipped (RC1 clobber guard) — here we simulate the real
+    // slay-spawned path so the SessionStart id is honored + persisted.
+    await mainWindow.evaluate(
+      ({ id, sid }) =>
+        window.getTrpcVanillaClient().task.testRecordPendingSpawn.mutate({
+          taskId: id,
+          mode: 'codex',
+          expectedSessionId: sid,
+          usedResume: false
+        }),
+      { id: task.id, sid: codexSessionId }
+    )
+
+    const res = spawnSync('bash', [scriptPath], {
+      input: JSON.stringify({
+        hook_event_name: 'SessionStart',
+        session_id: codexSessionId,
+        source: 'startup'
+      }),
+      env: codexHookEnv({ port, taskId: task.id })
+    })
+    expect(res.status).toBe(0)
+
+    await expect
+      .poll(
+        async () => {
+          const t = await mainWindow.evaluate(
+            (id) => window.getTrpcVanillaClient().task.get.query({ id }),
+            task.id
+          )
+          const pc = (t as { provider_config?: unknown } | null)?.provider_config
+          const parsed = typeof pc === 'string' ? JSON.parse(pc) : pc
+          return (
+            (parsed as { codex?: { conversationId?: string } } | null)?.codex?.conversationId ??
+            null
+          )
+        },
+        { timeout: 5000 }
+      )
+      .toBe(codexSessionId)
+  })
+})
+
+async function waitForFile(p: string, timeoutMs: number): Promise<void> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    if (fs.existsSync(p)) return
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  throw new Error(`File did not appear within ${timeoutMs}ms: ${p}`)
+}

@@ -1,0 +1,46 @@
+{
+  "name": "@slayzone/task-artifacts",
+  "version": "0.36.0-beta.17",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./shared": "./src/shared/index.ts",
+    "./server": "./src/server/index.ts",
+    "./db": "./src/server/worker-db.ts",
+    "./client": "./src/client/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@codemirror/view": "^6.36.5",
+    "@slayzone/editor": "workspace:*",
+    "@slayzone/file-editor": "workspace:*",
+    "@slayzone/markdown": "workspace:*",
+    "@slayzone/platform": "workspace:*",
+    "@slayzone/settings": "workspace:*",
+    "@slayzone/task": "workspace:*",
+    "@slayzone/telemetry": "workspace:*",
+    "@slayzone/transport": "workspace:*",
+    "@slayzone/ui": "workspace:*",
+    "@tanstack/react-query": "^5.100.9",
+    "diff": "^7.0.0",
+    "lucide-react": "^0.562.0",
+    "zod": "^4.3.5"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/diff": "^7.0.0",
+    "@types/react": "^19.2.7",
+    "better-sqlite3": "^12.4.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

@@ -1,0 +1,3831 @@
+import Database from 'better-sqlite3'
+import { spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import {
+  parseSkillFrontmatter,
+  renderSkillFrontmatter,
+  validateSkillFrontmatter
+} from '@slayzone/ai-config/shared'
+
+interface Migration {
+  version: number
+  up: (db: Database.Database) => void
+}
+
+function parseJsonObject(raw: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+  } catch {
+    // ignore malformed JSON
+  }
+  return {}
+}
+
+function toTitleCaseFromSlug(slug: string): string {
+  const words = slug.replace(/[-_]+/g, ' ').trim().split(/\s+/).filter(Boolean)
+  if (words.length === 0) return 'Skill'
+  return words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')
+}
+
+function deriveSkillDescription(slug: string, body: string): string {
+  const firstContentLine = body.split('\n').find((line) => line.trim().length > 0)
+  const headingText = firstContentLine?.replace(/^#+\s*/, '').trim() ?? ''
+  return headingText || toTitleCaseFromSlug(slug)
+}
+
+function readCanonicalSkillMetadata(metadataJson: string): {
+  frontmatter: Record<string, string>
+  explicitFrontmatter: boolean
+} | null {
+  const parsed = parseJsonObject(metadataJson)
+  const rawCanonical = parsed.skillCanonical
+  if (!rawCanonical || typeof rawCanonical !== 'object' || Array.isArray(rawCanonical)) return null
+
+  const canonical = rawCanonical as Record<string, unknown>
+  const rawFrontmatter = canonical.frontmatter
+  const frontmatter: Record<string, string> = {}
+  if (rawFrontmatter && typeof rawFrontmatter === 'object' && !Array.isArray(rawFrontmatter)) {
+    for (const [key, value] of Object.entries(rawFrontmatter as Record<string, unknown>)) {
+      if (typeof value === 'string') frontmatter[key] = value
+      else if (value !== undefined && value !== null) frontmatter[key] = String(value)
+    }
+  }
+
+  return {
+    frontmatter,
+    explicitFrontmatter: canonical.explicitFrontmatter === true
+  }
+}
+
+export const migrations: Migration[] = [
+  {
+    version: 1,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE projects (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          color TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE tasks (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          parent_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          description TEXT,
+          status TEXT NOT NULL DEFAULT 'inbox',
+          priority INTEGER NOT NULL DEFAULT 3,
+          due_date TEXT,
+          blocked_reason TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE workspace_items (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          type TEXT NOT NULL,
+          name TEXT NOT NULL,
+          content TEXT,
+          url TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_tasks_project ON tasks(project_id);
+        CREATE INDEX idx_tasks_parent ON tasks(parent_id);
+        CREATE INDEX idx_tasks_status ON tasks(status);
+        CREATE INDEX idx_workspace_task ON workspace_items(task_id);
+      `)
+    }
+  },
+  {
+    version: 2,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE tags (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL UNIQUE,
+          color TEXT NOT NULL DEFAULT '#6b7280',
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE task_tags (
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+          PRIMARY KEY (task_id, tag_id)
+        );
+
+        CREATE TABLE settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+
+        CREATE INDEX idx_task_tags_task ON task_tags(task_id);
+        CREATE INDEX idx_task_tags_tag ON task_tags(tag_id);
+      `)
+    }
+  },
+  {
+    version: 3,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE chat_messages (
+          id TEXT PRIMARY KEY,
+          workspace_item_id TEXT NOT NULL REFERENCES workspace_items(id) ON DELETE CASCADE,
+          role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+          content TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_chat_messages_workspace ON chat_messages(workspace_item_id);
+      `)
+    }
+  },
+  {
+    version: 4,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN archived_at TEXT DEFAULT NULL;
+        CREATE INDEX idx_tasks_archived ON tasks(archived_at);
+      `)
+    }
+  },
+  {
+    version: 5,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN recurrence_type TEXT DEFAULT NULL;
+        ALTER TABLE tasks ADD COLUMN recurrence_interval INTEGER DEFAULT NULL;
+        ALTER TABLE tasks ADD COLUMN last_reset_at TEXT DEFAULT NULL;
+        ALTER TABLE tasks ADD COLUMN next_reset_at TEXT DEFAULT NULL;
+        CREATE INDEX idx_tasks_recurring ON tasks(next_reset_at) WHERE recurrence_type IS NOT NULL;
+      `)
+    }
+  },
+  {
+    version: 6,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE workspace_items ADD COLUMN favicon TEXT DEFAULT NULL;
+      `)
+    }
+  },
+  {
+    version: 7,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN last_active_workspace_item_id TEXT DEFAULT NULL;
+      `)
+    }
+  },
+  {
+    version: 8,
+    up: (db) => {
+      // Cleanup: remove unused tables and columns
+      db.exec(`
+        DROP TABLE IF EXISTS chat_messages;
+        DROP TABLE IF EXISTS workspace_items;
+        DROP INDEX IF EXISTS idx_tasks_parent;
+        DROP INDEX IF EXISTS idx_tasks_recurring;
+        ALTER TABLE tasks DROP COLUMN parent_id;
+        ALTER TABLE tasks DROP COLUMN blocked_reason;
+        ALTER TABLE tasks DROP COLUMN recurrence_type;
+        ALTER TABLE tasks DROP COLUMN recurrence_interval;
+        ALTER TABLE tasks DROP COLUMN last_reset_at;
+        ALTER TABLE tasks DROP COLUMN next_reset_at;
+        ALTER TABLE tasks DROP COLUMN last_active_workspace_item_id;
+      `)
+    }
+  },
+  {
+    version: 9,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE projects ADD COLUMN path TEXT DEFAULT NULL;
+        ALTER TABLE tasks ADD COLUMN claude_session_id TEXT DEFAULT NULL;
+
+        CREATE TABLE task_dependencies (
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          blocks_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          PRIMARY KEY (task_id, blocks_task_id)
+        );
+
+        CREATE INDEX idx_task_deps_task ON task_dependencies(task_id);
+        CREATE INDEX idx_task_deps_blocks ON task_dependencies(blocks_task_id);
+      `)
+    }
+  },
+  {
+    version: 10,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE terminal_sessions (
+          task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+          buffer TEXT NOT NULL,
+          serialized_state TEXT,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `)
+    }
+  },
+  {
+    version: 11,
+    up: (db) => {
+      // Add terminal mode columns
+      // Rename claude_session_id to claude_conversation_id (SQLite doesn't support direct rename, so add new + migrate)
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN terminal_mode TEXT DEFAULT 'claude-code';
+        ALTER TABLE tasks ADD COLUMN claude_conversation_id TEXT DEFAULT NULL;
+        ALTER TABLE tasks ADD COLUMN codex_conversation_id TEXT DEFAULT NULL;
+        ALTER TABLE tasks ADD COLUMN terminal_shell TEXT DEFAULT NULL;
+      `)
+      // Migrate data from old column to new
+      db.exec(`
+        UPDATE tasks SET claude_conversation_id = claude_session_id WHERE claude_session_id IS NOT NULL;
+      `)
+      // Note: SQLite doesn't support DROP COLUMN in older versions, keep claude_session_id for backwards compat
+    }
+  },
+  {
+    version: 12,
+    up: (db) => {
+      // Remove unused terminal_sessions table - sessions are now handled entirely in-memory
+      db.exec(`DROP TABLE IF EXISTS terminal_sessions;`)
+    }
+  },
+  {
+    version: 13,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN "order" INTEGER NOT NULL DEFAULT 0;`)
+      db.exec(`UPDATE tasks SET "order" = rowid;`)
+    }
+  },
+  {
+    version: 14,
+    up: (db) => {
+      db.exec(
+        `ALTER TABLE tasks ADD COLUMN dangerously_skip_permissions INTEGER NOT NULL DEFAULT 0;`
+      )
+    }
+  },
+  {
+    version: 15,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE worktrees (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          path TEXT NOT NULL,
+          branch TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE UNIQUE INDEX idx_worktrees_task ON worktrees(task_id);
+      `)
+    }
+  },
+  {
+    version: 16,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN panel_visibility TEXT DEFAULT NULL;`)
+    }
+  },
+  {
+    version: 17,
+    up: (db) => {
+      // Add worktree_path and browser_url to tasks
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN worktree_path TEXT DEFAULT NULL;
+        ALTER TABLE tasks ADD COLUMN browser_url TEXT DEFAULT NULL;
+      `)
+      // Migrate existing worktree paths to tasks
+      db.exec(`
+        UPDATE tasks
+        SET worktree_path = (
+          SELECT path FROM worktrees WHERE worktrees.task_id = tasks.id
+        )
+        WHERE id IN (SELECT task_id FROM worktrees)
+      `)
+      // Drop worktrees table
+      db.exec(`
+        DROP INDEX IF EXISTS idx_worktrees_task;
+        DROP TABLE IF EXISTS worktrees;
+      `)
+    }
+  },
+  {
+    version: 18,
+    up: (db) => {
+      // Add browser_tabs JSON column for multi-tab browser support
+      db.exec(`ALTER TABLE tasks ADD COLUMN browser_tabs TEXT DEFAULT NULL;`)
+
+      // Migrate existing browser_url values to browser_tabs JSON
+      // Using task_id as tab id since we need deterministic IDs in migration
+      const tasks = db
+        .prepare(
+          `SELECT id, browser_url FROM tasks WHERE browser_url IS NOT NULL AND browser_url != ''`
+        )
+        .all() as Array<{ id: string; browser_url: string }>
+      const updateStmt = db.prepare(`UPDATE tasks SET browser_tabs = ? WHERE id = ?`)
+      for (const task of tasks) {
+        const tabId = `tab-${task.id.slice(0, 8)}`
+        const browserTabs = JSON.stringify({
+          tabs: [{ id: tabId, url: task.browser_url, title: task.browser_url }],
+          activeTabId: tabId
+        })
+        updateStmt.run(browserTabs, task.id)
+      }
+    }
+  },
+  {
+    version: 19,
+    up: (db) => {
+      // Create terminal_tabs table for multi-tab terminal support
+      // Use IF NOT EXISTS to handle partial migration state
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS terminal_tabs (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          label TEXT,
+          mode TEXT NOT NULL DEFAULT 'terminal',
+          is_main INTEGER NOT NULL DEFAULT 0,
+          position INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_terminal_tabs_task ON terminal_tabs(task_id);
+      `)
+
+      // Create main tab for each existing task using its terminal_mode
+      // Use taskId as tab id (unique since each task has one main tab)
+      // Use INSERT OR IGNORE to skip tasks that already have a main tab
+      const tasks = db.prepare(`SELECT id, terminal_mode FROM tasks`).all() as Array<{
+        id: string
+        terminal_mode: string | null
+      }>
+      const insertStmt = db.prepare(`
+        INSERT OR IGNORE INTO terminal_tabs (id, task_id, label, mode, is_main, position, created_at)
+        VALUES (?, ?, NULL, ?, 1, 0, datetime('now'))
+      `)
+      for (const task of tasks) {
+        insertStmt.run(task.id, task.id, task.terminal_mode || 'claude-code')
+      }
+    }
+  },
+  {
+    version: 20,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN worktree_parent_branch TEXT DEFAULT NULL;`)
+    }
+  },
+  {
+    version: 21,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN claude_flags TEXT NOT NULL DEFAULT '';
+        ALTER TABLE tasks ADD COLUMN codex_flags TEXT NOT NULL DEFAULT '';
+      `)
+      db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).run(
+        'default_claude_flags',
+        '--allow-dangerously-skip-permissions'
+      )
+      db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).run(
+        'default_codex_flags',
+        '--sandbox workspace-write'
+      )
+    }
+  },
+  {
+    version: 22,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS diagnostics_events (
+          id TEXT PRIMARY KEY,
+          ts_ms INTEGER NOT NULL,
+          level TEXT NOT NULL,
+          source TEXT NOT NULL,
+          event TEXT NOT NULL,
+          trace_id TEXT,
+          task_id TEXT,
+          project_id TEXT,
+          session_id TEXT,
+          channel TEXT,
+          message TEXT,
+          payload_json TEXT,
+          redaction_version INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_diag_ts ON diagnostics_events(ts_ms);
+        CREATE INDEX IF NOT EXISTS idx_diag_level_ts ON diagnostics_events(level, ts_ms);
+        CREATE INDEX IF NOT EXISTS idx_diag_trace ON diagnostics_events(trace_id);
+        CREATE INDEX IF NOT EXISTS idx_diag_source_event_ts ON diagnostics_events(source, event, ts_ms);
+      `)
+
+      db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).run(
+        'diagnostics_enabled',
+        '1'
+      )
+      db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).run(
+        'diagnostics_verbose',
+        '0'
+      )
+      db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).run(
+        'diagnostics_include_pty_output',
+        '0'
+      )
+      db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).run(
+        'diagnostics_retention_days',
+        '14'
+      )
+    }
+  },
+  {
+    version: 23,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN merge_state TEXT DEFAULT NULL;`)
+    }
+  },
+  {
+    version: 24,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ai_config_items (
+          id TEXT PRIMARY KEY,
+          type TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          slug TEXT NOT NULL,
+          content TEXT NOT NULL DEFAULT '',
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_config_items_scope_type ON ai_config_items(scope, type);
+        CREATE INDEX IF NOT EXISTS idx_ai_config_items_project ON ai_config_items(project_id);
+
+        CREATE TABLE IF NOT EXISTS ai_config_project_selections (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          item_id TEXT NOT NULL REFERENCES ai_config_items(id) ON DELETE CASCADE,
+          target_path TEXT NOT NULL,
+          selected_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(project_id, item_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_config_sel_project ON ai_config_project_selections(project_id);
+        CREATE INDEX IF NOT EXISTS idx_ai_config_sel_item ON ai_config_project_selections(item_id);
+
+        CREATE TABLE IF NOT EXISTS ai_config_sources (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'placeholder',
+          last_checked_at TEXT DEFAULT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `)
+    }
+  },
+  {
+    version: 25,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN assignee TEXT DEFAULT NULL;`)
+    }
+  },
+  {
+    version: 26,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS integration_connections (
+          id TEXT PRIMARY KEY,
+          provider TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          workspace_name TEXT NOT NULL,
+          account_label TEXT NOT NULL,
+          credential_ref TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          last_synced_at TEXT DEFAULT NULL,
+          UNIQUE(provider, workspace_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_integration_connections_provider
+          ON integration_connections(provider, updated_at);
+
+        CREATE TABLE IF NOT EXISTS integration_project_mappings (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          provider TEXT NOT NULL,
+          connection_id TEXT NOT NULL REFERENCES integration_connections(id) ON DELETE CASCADE,
+          external_team_id TEXT NOT NULL,
+          external_team_key TEXT NOT NULL,
+          external_project_id TEXT DEFAULT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(project_id, provider)
+        );
+        CREATE INDEX IF NOT EXISTS idx_integration_project_mappings_connection
+          ON integration_project_mappings(connection_id);
+
+        CREATE TABLE IF NOT EXISTS external_links (
+          id TEXT PRIMARY KEY,
+          provider TEXT NOT NULL,
+          connection_id TEXT NOT NULL REFERENCES integration_connections(id) ON DELETE CASCADE,
+          external_type TEXT NOT NULL,
+          external_id TEXT NOT NULL,
+          external_key TEXT NOT NULL,
+          external_url TEXT NOT NULL DEFAULT '',
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          sync_state TEXT NOT NULL DEFAULT 'active',
+          last_sync_at TEXT DEFAULT NULL,
+          last_error TEXT DEFAULT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(provider, connection_id, external_id),
+          UNIQUE(provider, task_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_external_links_connection_state
+          ON external_links(connection_id, sync_state, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_external_links_task
+          ON external_links(task_id);
+
+        CREATE TABLE IF NOT EXISTS external_field_state (
+          id TEXT PRIMARY KEY,
+          external_link_id TEXT NOT NULL REFERENCES external_links(id) ON DELETE CASCADE,
+          field_name TEXT NOT NULL,
+          last_local_value_json TEXT NOT NULL DEFAULT 'null',
+          last_external_value_json TEXT NOT NULL DEFAULT 'null',
+          last_local_updated_at TEXT NOT NULL,
+          last_external_updated_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(external_link_id, field_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_external_field_state_link
+          ON external_field_state(external_link_id);
+
+        CREATE TABLE IF NOT EXISTS integration_state_mappings (
+          id TEXT PRIMARY KEY,
+          provider TEXT NOT NULL,
+          project_mapping_id TEXT NOT NULL REFERENCES integration_project_mappings(id) ON DELETE CASCADE,
+          local_status TEXT NOT NULL,
+          state_id TEXT NOT NULL,
+          state_type TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(provider, project_mapping_id, local_status)
+        );
+      `)
+    }
+  },
+  {
+    version: 27,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE integration_project_mappings
+          ADD COLUMN sync_mode TEXT NOT NULL DEFAULT 'one_way';
+      `)
+    }
+  },
+  {
+    version: 28,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE projects
+          ADD COLUMN auto_create_worktree_on_task_create INTEGER DEFAULT NULL;
+      `)
+      db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).run(
+        'auto_create_worktree_on_task_create',
+        '0'
+      )
+    }
+  },
+  {
+    version: 29,
+    up: (db) => {
+      db.prepare(
+        `UPDATE settings SET value = '--allow-dangerously-skip-permissions' WHERE key = 'default_claude_flags' AND value = '--dangerously-skip-permissions'`
+      ).run()
+      db.prepare(
+        `UPDATE tasks SET claude_flags = '--allow-dangerously-skip-permissions' WHERE claude_flags = '--dangerously-skip-permissions'`
+      ).run()
+    }
+  },
+  {
+    version: 30,
+    up: (db) => {
+      // Recreate ai_config_project_selections with provider + content_hash columns
+      db.exec(`
+        CREATE TABLE ai_config_project_selections_new (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          item_id TEXT NOT NULL REFERENCES ai_config_items(id) ON DELETE CASCADE,
+          provider TEXT NOT NULL DEFAULT 'claude',
+          target_path TEXT NOT NULL,
+          content_hash TEXT DEFAULT NULL,
+          selected_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(project_id, item_id, provider)
+        );
+        INSERT INTO ai_config_project_selections_new (id, project_id, item_id, provider, target_path, selected_at)
+          SELECT id, project_id, item_id, 'claude', target_path, selected_at
+          FROM ai_config_project_selections;
+        DROP TABLE ai_config_project_selections;
+        ALTER TABLE ai_config_project_selections_new RENAME TO ai_config_project_selections;
+        CREATE INDEX idx_ai_config_sel_project ON ai_config_project_selections(project_id);
+        CREATE INDEX idx_ai_config_sel_item ON ai_config_project_selections(item_id);
+      `)
+
+      // Seed CLI providers into existing ai_config_sources table
+      const stmt = db.prepare(
+        `INSERT OR IGNORE INTO ai_config_sources (id, name, kind, enabled, status) VALUES (?, ?, ?, ?, ?)`
+      )
+      stmt.run('provider-claude', 'Claude Code', 'claude', 1, 'active')
+      stmt.run('provider-codex', 'Codex', 'codex', 0, 'active')
+      stmt.run('provider-gemini', 'Gemini', 'gemini', 0, 'placeholder')
+    }
+  },
+  {
+    version: 31,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN parent_id TEXT DEFAULT NULL REFERENCES tasks(id) ON DELETE CASCADE;
+        CREATE INDEX idx_tasks_parent ON tasks(parent_id);
+      `)
+    }
+  },
+  {
+    version: 32,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN web_panel_urls TEXT DEFAULT NULL;`)
+    }
+  },
+  {
+    version: 33,
+    up: (db) => {
+      // Add conversation ID + flags columns for new providers
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN cursor_conversation_id TEXT DEFAULT NULL;
+        ALTER TABLE tasks ADD COLUMN gemini_conversation_id TEXT DEFAULT NULL;
+        ALTER TABLE tasks ADD COLUMN opencode_conversation_id TEXT DEFAULT NULL;
+        ALTER TABLE tasks ADD COLUMN cursor_flags TEXT NOT NULL DEFAULT '--force';
+        ALTER TABLE tasks ADD COLUMN gemini_flags TEXT NOT NULL DEFAULT '--yolo';
+        ALTER TABLE tasks ADD COLUMN opencode_flags TEXT NOT NULL DEFAULT '';
+      `)
+
+      // Default flag settings
+      const stmt = db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`)
+      stmt.run('default_cursor_flags', '--force')
+      stmt.run('default_gemini_flags', '--yolo')
+      stmt.run('default_opencode_flags', '')
+
+      // Seed new CLI providers into ai_config_sources
+      const insertStmt = db.prepare(
+        `INSERT OR IGNORE INTO ai_config_sources (id, name, kind, enabled, status) VALUES (?, ?, ?, ?, ?)`
+      )
+      insertStmt.run('provider-cursor', 'Cursor Agent', 'cursor', 0, 'active')
+      insertStmt.run('provider-opencode', 'OpenCode', 'opencode', 0, 'active')
+
+      // Activate gemini (was seeded as 'placeholder' in v30)
+      db.prepare(`UPDATE ai_config_sources SET status = 'active' WHERE kind = 'gemini'`).run()
+    }
+  },
+  {
+    version: 34,
+    up: (db) => {
+      // Add provider_config JSON column — consolidates all per-provider conversation_id + flags
+      db.exec(`ALTER TABLE tasks ADD COLUMN provider_config TEXT NOT NULL DEFAULT '{}'`)
+
+      // Migrate existing per-provider data into provider_config
+      const tasks = db
+        .prepare(`
+        SELECT id,
+          claude_conversation_id, codex_conversation_id, cursor_conversation_id,
+          gemini_conversation_id, opencode_conversation_id,
+          claude_flags, codex_flags, cursor_flags, gemini_flags, opencode_flags
+        FROM tasks
+      `)
+        .all() as Array<{
+        id: string
+        claude_conversation_id: string | null
+        codex_conversation_id: string | null
+        cursor_conversation_id: string | null
+        gemini_conversation_id: string | null
+        opencode_conversation_id: string | null
+        claude_flags: string
+        codex_flags: string
+        cursor_flags: string
+        gemini_flags: string
+        opencode_flags: string
+      }>
+
+      const updateStmt = db.prepare('UPDATE tasks SET provider_config = ? WHERE id = ?')
+      for (const task of tasks) {
+        const config: Record<string, { conversationId?: string | null; flags?: string }> = {}
+        const providers = [
+          { mode: 'claude-code', convId: task.claude_conversation_id, flags: task.claude_flags },
+          { mode: 'codex', convId: task.codex_conversation_id, flags: task.codex_flags },
+          { mode: 'cursor-agent', convId: task.cursor_conversation_id, flags: task.cursor_flags },
+          { mode: 'gemini', convId: task.gemini_conversation_id, flags: task.gemini_flags },
+          { mode: 'opencode', convId: task.opencode_conversation_id, flags: task.opencode_flags }
+        ]
+        for (const p of providers) {
+          if (p.convId || p.flags) {
+            config[p.mode] = {}
+            if (p.convId) config[p.mode].conversationId = p.convId
+            if (p.flags) config[p.mode].flags = p.flags
+          }
+        }
+        updateStmt.run(JSON.stringify(config), task.id)
+      }
+
+      // Old columns kept for backwards compat — drop in future v35
+    }
+  },
+  {
+    version: 35,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN is_temporary INTEGER NOT NULL DEFAULT 0`)
+    }
+  },
+  {
+    version: 36,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN merge_context TEXT DEFAULT NULL`)
+    }
+  },
+  {
+    version: 37,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN editor_open_files TEXT DEFAULT NULL`)
+    }
+  },
+  {
+    version: 38,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN web_panel_resolutions TEXT DEFAULT NULL`)
+    }
+  },
+  {
+    version: 39,
+    up: (db) => {
+      db.exec(`ALTER TABLE terminal_tabs ADD COLUMN group_id TEXT`)
+      // Backfill: each existing tab becomes its own group
+      db.exec(`UPDATE terminal_tabs SET group_id = id WHERE group_id IS NULL`)
+    }
+  },
+  {
+    version: 40,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS processes (
+          id TEXT PRIMARY KEY,
+          task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+          label TEXT NOT NULL,
+          command TEXT NOT NULL,
+          cwd TEXT NOT NULL DEFAULT '',
+          auto_restart INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_processes_task ON processes(task_id);
+      `)
+    }
+  },
+  {
+    // diagnostics_events moved to slayzone.dev.diagnostics.sqlite (separate DB)
+    // to prevent CLI REST notify → tasks:changed → IPC diagnostic write → REST notify → loop
+    version: 41,
+    up: (db) => {
+      db.exec(`DROP TABLE IF EXISTS diagnostics_events`)
+    }
+  },
+  {
+    version: 42,
+    up: (db) => {
+      // Idempotent for drifted local DBs where column exists but user_version < 42.
+      const projectColumns = db.prepare(`PRAGMA table_info(projects)`).all() as Array<{
+        name: string
+      }>
+      const hasColumnsConfig = projectColumns.some((column) => column.name === 'columns_config')
+      if (!hasColumnsConfig) {
+        db.exec(`ALTER TABLE projects ADD COLUMN columns_config TEXT DEFAULT NULL`)
+      }
+    }
+  },
+  {
+    version: 43,
+    up: (db) => {
+      // Codex is temporarily not configurable in ai-config.
+      // Clean legacy persisted state so storage matches current behavior.
+
+      // 1) Remove codex-linked project selections.
+      db.prepare(`DELETE FROM ai_config_project_selections WHERE provider = 'codex'`).run()
+
+      // 2) Ensure codex is globally disabled in provider source state.
+      db.prepare(
+        `UPDATE ai_config_sources SET enabled = 0, updated_at = datetime('now') WHERE kind = 'codex'`
+      ).run()
+
+      // 3) Strip codex from per-project provider settings payloads.
+      const rows = db
+        .prepare(`
+        SELECT key, value
+        FROM settings
+        WHERE key LIKE 'ai_providers:%'
+      `)
+        .all() as Array<{ key: string; value: string }>
+      const updateStmt = db.prepare(`UPDATE settings SET value = ? WHERE key = ?`)
+
+      for (const row of rows) {
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(row.value)
+        } catch {
+          continue
+        }
+        if (!Array.isArray(parsed)) continue
+
+        const filtered = parsed.filter(
+          (provider): provider is string => typeof provider === 'string' && provider !== 'codex'
+        )
+        if (filtered.length !== parsed.length) {
+          updateStmt.run(JSON.stringify(filtered), row.key)
+        }
+      }
+    }
+  },
+  {
+    version: 44,
+    up: (db) => {
+      // Remove legacy providers that are no longer supported in ai-config.
+      const removedProviders = ['aider', 'grok']
+
+      // 1) Remove provider rows.
+      db.prepare(`
+        DELETE FROM ai_config_sources
+        WHERE kind IN (${removedProviders.map(() => '?').join(', ')})
+      `).run(...removedProviders)
+
+      // 2) Remove project selections linked to removed providers.
+      db.prepare(`
+        DELETE FROM ai_config_project_selections
+        WHERE provider IN (${removedProviders.map(() => '?').join(', ')})
+      `).run(...removedProviders)
+
+      // 3) Strip removed providers from per-project provider settings payloads.
+      const rows = db
+        .prepare(`
+        SELECT key, value
+        FROM settings
+        WHERE key LIKE 'ai_providers:%'
+      `)
+        .all() as Array<{ key: string; value: string }>
+      const updateStmt = db.prepare(`UPDATE settings SET value = ? WHERE key = ?`)
+      const removedSet = new Set(removedProviders)
+
+      for (const row of rows) {
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(row.value)
+        } catch {
+          continue
+        }
+        if (!Array.isArray(parsed)) continue
+
+        const filtered = parsed.filter(
+          (provider): provider is string =>
+            typeof provider === 'string' && !removedSet.has(provider)
+        )
+        if (filtered.length !== parsed.length) {
+          updateStmt.run(JSON.stringify(filtered), row.key)
+        }
+      }
+    }
+  },
+  {
+    version: 45,
+    up: (db) => {
+      // Repair drifted schemas where user_version was already 42+ but projects.columns_config was never created.
+      const projectColumns = db.prepare(`PRAGMA table_info(projects)`).all() as Array<{
+        name: string
+      }>
+      const hasColumnsConfig = projectColumns.some((column) => column.name === 'columns_config')
+      if (!hasColumnsConfig) {
+        db.exec(`ALTER TABLE projects ADD COLUMN columns_config TEXT DEFAULT NULL`)
+      }
+    }
+  },
+  {
+    version: 46,
+    up: (db) => {
+      // Enforce unique item slugs per logical scope after repairing any legacy duplicates.
+      const rows = db
+        .prepare(`
+        SELECT id, scope, project_id, type, slug
+        FROM ai_config_items
+        ORDER BY created_at ASC, id ASC
+      `)
+        .all() as Array<{
+        id: string
+        scope: 'global' | 'project'
+        project_id: string | null
+        type: string
+        slug: string
+      }>
+
+      const updateSlug = db.prepare(
+        "UPDATE ai_config_items SET slug = ?, name = ?, updated_at = datetime('now') WHERE id = ?"
+      )
+      const seenByBucket = new Map<string, Set<string>>()
+
+      for (const row of rows) {
+        const bucket =
+          row.scope === 'global'
+            ? `global:${row.type}`
+            : `project:${row.project_id ?? ''}:${row.type}`
+        const seen = seenByBucket.get(bucket) ?? new Set<string>()
+        seenByBucket.set(bucket, seen)
+
+        const baseSlug = row.slug || 'untitled'
+        if (!seen.has(baseSlug)) {
+          seen.add(baseSlug)
+          continue
+        }
+
+        let suffix = 2
+        let nextSlug = `${baseSlug}-${suffix}`
+        while (seen.has(nextSlug)) {
+          suffix += 1
+          nextSlug = `${baseSlug}-${suffix}`
+        }
+
+        updateSlug.run(nextSlug, nextSlug, row.id)
+        seen.add(nextSlug)
+      }
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_ai_config_items_global_type_slug
+          ON ai_config_items(type, slug)
+          WHERE scope = 'global';
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_ai_config_items_project_project_type_slug
+          ON ai_config_items(project_id, type, slug)
+          WHERE scope = 'project';
+      `)
+    }
+  },
+  {
+    version: 47,
+    up: (db) => {
+      // Canonicalize legacy slugs (normalize format + preserve uniqueness) per logical scope/type bucket.
+      // v46 already introduced unique slug indexes, so drop/recreate them around normalization
+      // to avoid transient collisions while renaming rows into canonical form.
+      db.exec(`
+        DROP INDEX IF EXISTS ux_ai_config_items_global_type_slug;
+        DROP INDEX IF EXISTS ux_ai_config_items_project_project_type_slug;
+      `)
+
+      const normalizeSlug = (value: string): string => {
+        return (
+          value
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '') || 'untitled'
+        )
+      }
+
+      const rows = db
+        .prepare(`
+        SELECT id, scope, project_id, type, slug
+        FROM ai_config_items
+        ORDER BY created_at ASC, id ASC
+      `)
+        .all() as Array<{
+        id: string
+        scope: 'global' | 'project'
+        project_id: string | null
+        type: string
+        slug: string
+      }>
+
+      const updateSlug = db.prepare(
+        "UPDATE ai_config_items SET slug = ?, name = ?, updated_at = datetime('now') WHERE id = ?"
+      )
+      const seenByBucket = new Map<string, Set<string>>()
+
+      for (const row of rows) {
+        const bucket =
+          row.scope === 'global'
+            ? `global:${row.type}`
+            : `project:${row.project_id ?? ''}:${row.type}`
+        const seen = seenByBucket.get(bucket) ?? new Set<string>()
+        seenByBucket.set(bucket, seen)
+
+        const baseSlug = normalizeSlug(row.slug || 'untitled')
+        let nextSlug = baseSlug
+        if (seen.has(nextSlug)) {
+          let suffix = 2
+          nextSlug = `${baseSlug}-${suffix}`
+          while (seen.has(nextSlug)) {
+            suffix += 1
+            nextSlug = `${baseSlug}-${suffix}`
+          }
+        }
+
+        if (nextSlug !== row.slug) {
+          updateSlug.run(nextSlug, nextSlug, row.id)
+        }
+        seen.add(nextSlug)
+      }
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_ai_config_items_global_type_slug
+          ON ai_config_items(type, slug)
+          WHERE scope = 'global';
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_ai_config_items_project_project_type_slug
+          ON ai_config_items(project_id, type, slug)
+          WHERE scope = 'project';
+      `)
+    }
+  },
+  {
+    version: 48,
+    up: (db) => {
+      // Remove legacy 'command' items and orphaned selections
+      db.exec(`
+        DELETE FROM ai_config_project_selections
+          WHERE item_id IN (SELECT id FROM ai_config_items WHERE type = 'command');
+        DELETE FROM ai_config_items WHERE type = 'command';
+      `)
+    }
+  },
+  {
+    version: 49,
+    up: (db) => {
+      db.exec(`
+        DELETE FROM processes WHERE task_id IS NULL;
+        ALTER TABLE processes ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE CASCADE;
+        CREATE INDEX IF NOT EXISTS idx_processes_project ON processes(project_id);
+      `)
+    }
+  },
+  {
+    version: 50,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN deleted_at TEXT DEFAULT NULL`)
+    }
+  },
+  {
+    version: 51,
+    up: (db) => {
+      // Idempotent for drifted local DBs where column exists but user_version < 51.
+      const projectColumns = db.prepare(`PRAGMA table_info(projects)`).all() as Array<{
+        name: string
+      }>
+      const hasWorktreeSourceBranch = projectColumns.some(
+        (column) => column.name === 'worktree_source_branch'
+      )
+      if (!hasWorktreeSourceBranch) {
+        db.exec(`ALTER TABLE projects ADD COLUMN worktree_source_branch TEXT DEFAULT NULL`)
+      }
+    }
+  },
+  {
+    version: 52,
+    up: (db) => {
+      db.exec(`ALTER TABLE projects ADD COLUMN execution_context TEXT DEFAULT NULL`)
+    }
+  },
+  {
+    version: 53,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN ccs_profile TEXT DEFAULT NULL`)
+      db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`).run(
+        'ccs_enabled',
+        '0'
+      )
+    }
+  },
+  {
+    // CCS is now its own terminal mode — migrate ccs_profile to provider_config['ccs'].flags
+    version: 54,
+    up: (db) => {
+      // Copy ccs_profile into provider_config for tasks that had a profile set
+      db.exec(`
+        UPDATE tasks
+        SET provider_config = json_set(COALESCE(provider_config, '{}'), '$.ccs', json_object('flags', ccs_profile))
+        WHERE ccs_profile IS NOT NULL AND ccs_profile != ''
+      `)
+    }
+  },
+  {
+    version: 55,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS terminal_modes (
+          id TEXT PRIMARY KEY,
+          label TEXT NOT NULL,
+          type TEXT NOT NULL,
+          command TEXT,
+          args TEXT,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          is_builtin INTEGER NOT NULL DEFAULT 0,
+          "order" INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `)
+      // Data seeding handled by syncTerminalModes() on startup
+    }
+  },
+  {
+    version: 56,
+    up: (db) => {
+      // Simplify integration connections: keep only provider + credential reference metadata.
+      db.exec(`PRAGMA foreign_keys = OFF;`)
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS integration_connections_next (
+          id TEXT PRIMARY KEY,
+          provider TEXT NOT NULL,
+          credential_ref TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          last_synced_at TEXT DEFAULT NULL
+        );
+
+        INSERT INTO integration_connections_next (
+          id, provider, credential_ref, enabled, created_at, updated_at, last_synced_at
+        )
+        SELECT
+          id,
+          provider,
+          credential_ref,
+          enabled,
+          COALESCE(created_at, datetime('now')),
+          COALESCE(updated_at, datetime('now')),
+          last_synced_at
+        FROM integration_connections;
+
+        DROP TABLE integration_connections;
+        ALTER TABLE integration_connections_next RENAME TO integration_connections;
+
+        CREATE INDEX IF NOT EXISTS idx_integration_connections_provider
+          ON integration_connections(provider, updated_at);
+      `)
+      db.exec(`PRAGMA foreign_keys = ON;`)
+    }
+  },
+  {
+    version: 57,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE terminal_modes ADD COLUMN pattern_attention TEXT;
+        ALTER TABLE terminal_modes ADD COLUMN pattern_working TEXT;
+        ALTER TABLE terminal_modes ADD COLUMN pattern_error TEXT;
+      `)
+    }
+  },
+  {
+    version: 58,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE terminal_modes ADD COLUMN resume_command TEXT;
+      `)
+    }
+  },
+  {
+    version: 59,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE terminal_modes_new (
+          id TEXT PRIMARY KEY,
+          label TEXT NOT NULL,
+          type TEXT NOT NULL,
+          initial_command TEXT,
+          resume_command TEXT,
+          default_flags TEXT,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          is_builtin INTEGER NOT NULL DEFAULT 0,
+          "order" INTEGER NOT NULL DEFAULT 0,
+          pattern_attention TEXT,
+          pattern_working TEXT,
+          pattern_error TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        INSERT INTO terminal_modes_new (id, label, type, initial_command, resume_command, default_flags, enabled, is_builtin, "order", pattern_attention, pattern_working, pattern_error, created_at, updated_at)
+        SELECT id, label, type,
+          CASE
+            WHEN is_builtin = 0 AND command IS NOT NULL THEN command || ' {flags}'
+            ELSE NULL
+          END,
+          resume_command,
+          args,
+          enabled, is_builtin, "order", pattern_attention, pattern_working, pattern_error, created_at, updated_at
+        FROM terminal_modes;
+
+        DROP TABLE terminal_modes;
+        ALTER TABLE terminal_modes_new RENAME TO terminal_modes;
+      `)
+    }
+  },
+  {
+    version: 60,
+    up: (db) => {
+      db.exec(`UPDATE tasks SET terminal_mode = 'claude-code' WHERE terminal_mode = 'terminal'`)
+    }
+  },
+  {
+    // Migrate legacy settings.default_*_flags → terminal_modes.default_flags
+    // so terminal_modes becomes the single source of truth for default flags.
+    version: 61,
+    up: (db) => {
+      const mapping: Array<[string, string]> = [
+        ['default_claude_flags', 'claude-code'],
+        ['default_codex_flags', 'codex'],
+        ['default_cursor_flags', 'cursor-agent'],
+        ['default_gemini_flags', 'gemini'],
+        ['default_opencode_flags', 'opencode']
+      ]
+      const readSetting = db.prepare('SELECT value FROM settings WHERE key = ?')
+      const updateMode = db.prepare('UPDATE terminal_modes SET default_flags = ? WHERE id = ?')
+      for (const [settingsKey, modeId] of mapping) {
+        const row = readSetting.get(settingsKey) as { value: string } | undefined
+        if (row) {
+          updateMode.run(row.value, modeId)
+        }
+      }
+    }
+  },
+  {
+    version: 62,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE test_categories (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          pattern TEXT NOT NULL,
+          color TEXT NOT NULL DEFAULT '#6b7280',
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_test_categories_project ON test_categories(project_id);
+      `)
+    }
+  },
+  {
+    version: 63,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE test_labels (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          color TEXT NOT NULL DEFAULT '#6b7280',
+          sort_order INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX idx_test_labels_project ON test_labels(project_id);
+
+        CREATE TABLE test_file_labels (
+          project_id TEXT NOT NULL,
+          file_path TEXT NOT NULL,
+          label_id TEXT NOT NULL REFERENCES test_labels(id) ON DELETE CASCADE,
+          PRIMARY KEY (project_id, file_path)
+        );
+        CREATE INDEX idx_test_file_labels_label ON test_file_labels(label_id);
+      `)
+    }
+  },
+  {
+    version: 64,
+    up: (db) => {
+      db.exec(`
+        DROP TABLE IF EXISTS test_file_labels;
+        CREATE TABLE test_file_labels (
+          project_id TEXT NOT NULL,
+          file_path TEXT NOT NULL,
+          label_id TEXT NOT NULL REFERENCES test_labels(id) ON DELETE CASCADE,
+          PRIMARY KEY (project_id, file_path, label_id)
+        );
+        CREATE INDEX idx_test_file_labels_label ON test_file_labels(label_id);
+      `)
+    }
+  },
+  {
+    version: 65,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE test_file_notes (
+          project_id TEXT NOT NULL,
+          file_path TEXT NOT NULL,
+          note TEXT NOT NULL DEFAULT '',
+          PRIMARY KEY (project_id, file_path)
+        );
+      `)
+    }
+  },
+  {
+    version: 66,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE integration_project_mappings ADD COLUMN external_repo_owner TEXT DEFAULT NULL;
+        ALTER TABLE integration_project_mappings ADD COLUMN external_repo_name TEXT DEFAULT NULL;
+        ALTER TABLE integration_project_mappings ADD COLUMN last_discovery_at TEXT DEFAULT NULL;
+      `)
+    }
+  },
+  {
+    version: 67,
+    up: (db) => {
+      db.exec(`ALTER TABLE terminal_modes ADD COLUMN usage_config TEXT DEFAULT NULL;`)
+    }
+  },
+  {
+    version: 68,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN pr_url TEXT DEFAULT NULL;`)
+    }
+  },
+  {
+    version: 69,
+    up: (db) => {
+      const row = db.prepare(`SELECT value FROM settings WHERE key = 'panel_config'`).get() as
+        | { value: string }
+        | undefined
+      if (!row) return
+      try {
+        const config = JSON.parse(row.value) as {
+          builtinEnabled?: Record<string, boolean>
+          viewEnabled?: Record<string, Record<string, boolean>>
+          [k: string]: unknown
+        }
+        if (config.viewEnabled) {
+          if (config.builtinEnabled) {
+            delete config.builtinEnabled
+          } else return
+        } else {
+          const legacy = config.builtinEnabled ?? {}
+          delete config.builtinEnabled
+          const homeIds = new Set(['git', 'diff', 'editor', 'processes', 'tests'])
+          config.viewEnabled = {
+            home: Object.fromEntries(Object.entries(legacy).filter(([id]) => homeIds.has(id))),
+            task: { ...legacy }
+          }
+        }
+        db.prepare(`UPDATE settings SET value = ? WHERE key = 'panel_config'`).run(
+          JSON.stringify(config)
+        )
+      } catch {
+        /* malformed JSON, skip */
+      }
+    }
+  },
+  {
+    version: 70,
+    up: (db) => {
+      db.exec(`ALTER TABLE projects ADD COLUMN worktree_copy_behavior TEXT DEFAULT NULL`)
+      db.exec(`ALTER TABLE projects ADD COLUMN worktree_copy_paths TEXT DEFAULT NULL`)
+    }
+  },
+  {
+    version: 71,
+    up: (db) => {
+      db.exec(`ALTER TABLE projects ADD COLUMN graph_config TEXT DEFAULT NULL`)
+      db.exec(`ALTER TABLE tasks ADD COLUMN graph_config TEXT DEFAULT NULL`)
+    }
+  },
+  {
+    version: 72,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS feedback (
+          id TEXT PRIMARY KEY,
+          content TEXT NOT NULL,
+          thread_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `)
+    }
+  },
+  {
+    version: 73,
+    up: (db) => {
+      db.exec(`DROP TABLE IF EXISTS feedback`)
+      db.exec(`
+        CREATE TABLE feedback_threads (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          discord_thread_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE feedback_messages (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL REFERENCES feedback_threads(id) ON DELETE CASCADE,
+          content TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_feedback_messages_thread ON feedback_messages(thread_id);
+      `)
+    }
+  },
+  {
+    version: 74,
+    up: (db) => {
+      db.exec(`DELETE FROM settings WHERE key = 'shell'`)
+    }
+  },
+  {
+    version: 75,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS usage_records (
+          id TEXT PRIMARY KEY,
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          session_id TEXT,
+          timestamp TEXT NOT NULL,
+          input_tokens INTEGER NOT NULL DEFAULT 0,
+          output_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+          reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+          cost_usd REAL,
+          cwd TEXT,
+          task_id TEXT,
+          source_file TEXT NOT NULL,
+          source_offset INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_records_timestamp ON usage_records(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_usage_records_task_id ON usage_records(task_id);
+        CREATE INDEX IF NOT EXISTS idx_usage_records_provider ON usage_records(provider);
+
+        CREATE TABLE IF NOT EXISTS usage_parse_state (
+          file_path TEXT PRIMARY KEY,
+          last_offset INTEGER NOT NULL DEFAULT 0,
+          last_modified_ms INTEGER NOT NULL DEFAULT 0
+        );
+      `)
+    }
+  },
+  {
+    version: 76,
+    up: (db) => {
+      // Fix: Codex parser was using cumulative totals instead of per-turn deltas.
+      // Wipe cached data so it re-parses correctly.
+      db.exec(`DELETE FROM usage_records; DELETE FROM usage_parse_state;`)
+    }
+  },
+  {
+    version: 77,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE projects ADD COLUMN selected_repo TEXT;
+        ALTER TABLE tasks ADD COLUMN repo_name TEXT;
+      `)
+    }
+  },
+  {
+    version: 78,
+    up: (db) => {
+      const rows = db
+        .prepare(`
+        SELECT id, slug, content, metadata_json
+        FROM ai_config_items
+        WHERE type = 'skill'
+      `)
+        .all() as Array<{
+        id: string
+        slug: string
+        content: string
+        metadata_json: string
+      }>
+
+      const update = db.prepare(`
+        UPDATE ai_config_items
+        SET content = ?, metadata_json = ?, updated_at = datetime('now')
+        WHERE id = ?
+      `)
+
+      for (const row of rows) {
+        const normalizedContent = row.content.replace(/\r\n/g, '\n')
+        const parsed = parseSkillFrontmatter(normalizedContent)
+        const canonical = readCanonicalSkillMetadata(row.metadata_json)
+
+        let nextContent = normalizedContent
+        if (!parsed && canonical?.explicitFrontmatter) {
+          const body = normalizedContent.replace(/^\n+/, '')
+          const frontmatter = {
+            ...canonical.frontmatter,
+            name: canonical.frontmatter.name?.trim().length ? canonical.frontmatter.name : row.slug,
+            description: canonical.frontmatter.description?.trim().length
+              ? canonical.frontmatter.description
+              : deriveSkillDescription(row.slug, body)
+          }
+          const renderedFrontmatter = renderSkillFrontmatter(frontmatter)
+          nextContent = body ? `${renderedFrontmatter}\n${body}` : `${renderedFrontmatter}\n`
+        }
+
+        const nextMetadata = parseJsonObject(row.metadata_json)
+        delete nextMetadata.skillCanonical
+        nextMetadata.skillValidation = validateSkillFrontmatter(
+          row.slug,
+          parseSkillFrontmatter(nextContent)
+        )
+        const nextMetadataJson = JSON.stringify(nextMetadata)
+
+        if (nextContent !== row.content || nextMetadataJson !== row.metadata_json) {
+          update.run(nextContent, nextMetadataJson, row.id)
+        }
+      }
+    }
+  },
+  {
+    version: 79,
+    up: (db) => {
+      // Seed Qwen Code as a new CLI provider in the Context Manager
+      db.prepare(
+        `INSERT OR IGNORE INTO ai_config_sources (id, name, kind, enabled, status) VALUES (?, ?, ?, ?, ?)`
+      ).run('provider-qwen', 'Qwen Code', 'qwen', 0, 'active')
+    }
+  },
+  {
+    version: 80,
+    up: (db) => {
+      db.exec(`ALTER TABLE projects ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0`)
+      const rows = db.prepare('SELECT id FROM projects ORDER BY name').all() as { id: string }[]
+      const update = db.prepare('UPDATE projects SET sort_order = ? WHERE id = ?')
+      for (let i = 0; i < rows.length; i++) {
+        update.run(i, rows[i].id)
+      }
+    }
+  },
+  {
+    version: 81,
+    up: (db) => {
+      const stmt = db.prepare(
+        `INSERT OR IGNORE INTO ai_config_sources (id, name, kind, enabled, status) VALUES (?, ?, ?, ?, ?)`
+      )
+      stmt.run('provider-copilot', 'Copilot', 'copilot', 0, 'active')
+    }
+  },
+  {
+    version: 82,
+    up: (db) => {
+      db.exec(
+        `ALTER TABLE integration_project_mappings ADD COLUMN assigned_to_me INTEGER DEFAULT 0`
+      )
+    }
+  },
+  {
+    version: 83,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN base_dir TEXT DEFAULT NULL`)
+    }
+  },
+  {
+    version: 84,
+    up: (db) => {
+      // Scope tags to projects + add sort_order
+      const firstProject = db
+        .prepare('SELECT id FROM projects ORDER BY sort_order LIMIT 1')
+        .get() as { id: string } | undefined
+      const fallbackProjectId = firstProject?.id ?? ''
+
+      db.exec(`
+        CREATE TABLE tags_new (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          color TEXT NOT NULL DEFAULT '#6b7280',
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(project_id, name)
+        )
+      `)
+
+      // Migrate existing tags with alphabetical sort_order
+      const existingTags = db.prepare('SELECT * FROM tags ORDER BY name').all() as {
+        id: string
+        name: string
+        color: string
+        created_at: string
+      }[]
+      const insertTag = db.prepare(
+        'INSERT INTO tags_new (id, project_id, name, color, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+      )
+      for (let i = 0; i < existingTags.length; i++) {
+        const t = existingTags[i]
+        insertTag.run(t.id, fallbackProjectId, t.name, t.color, i, t.created_at)
+      }
+
+      // Recreate task_tags with FK to new tags table
+      db.exec(`
+        CREATE TABLE task_tags_new (
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          tag_id TEXT NOT NULL REFERENCES tags_new(id) ON DELETE CASCADE,
+          PRIMARY KEY (task_id, tag_id)
+        )
+      `)
+      db.exec(`INSERT INTO task_tags_new SELECT * FROM task_tags`)
+
+      db.exec(`DROP TABLE task_tags`)
+      db.exec(`DROP TABLE tags`)
+      db.exec(`ALTER TABLE tags_new RENAME TO tags`)
+      db.exec(`ALTER TABLE task_tags_new RENAME TO task_tags`)
+      db.exec(`CREATE INDEX idx_task_tags_task ON task_tags(task_id)`)
+      db.exec(`CREATE INDEX idx_task_tags_tag ON task_tags(tag_id)`)
+    }
+  },
+  {
+    version: 85,
+    up: (db) => {
+      db.exec(`ALTER TABLE tags ADD COLUMN text_color TEXT NOT NULL DEFAULT '#ffffff'`)
+      // Compute text_color for existing tags based on luminance
+      const tags = db.prepare('SELECT id, color FROM tags').all() as { id: string; color: string }[]
+      const update = db.prepare('UPDATE tags SET text_color = ? WHERE id = ?')
+      for (const tag of tags) {
+        const r = parseInt(tag.color.slice(1, 3), 16)
+        const g = parseInt(tag.color.slice(3, 5), 16)
+        const b = parseInt(tag.color.slice(5, 7), 16)
+        const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+        update.run(luminance > 0.55 ? '#000000' : '#ffffff', tag.id)
+      }
+    }
+  },
+  {
+    version: 86,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE task_templates (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          description TEXT,
+          terminal_mode TEXT,
+          provider_config TEXT,
+          panel_visibility TEXT,
+          browser_tabs TEXT,
+          web_panel_urls TEXT,
+          dangerously_skip_permissions INTEGER,
+          ccs_profile TEXT,
+          default_status TEXT,
+          default_priority INTEGER,
+          is_default INTEGER NOT NULL DEFAULT 0,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE UNIQUE INDEX idx_task_templates_default
+          ON task_templates(project_id) WHERE is_default = 1;
+      `)
+    }
+  },
+  {
+    version: 87,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS automations (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          description TEXT,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          trigger_config TEXT NOT NULL,
+          conditions TEXT,
+          actions TEXT NOT NULL,
+          run_count INTEGER NOT NULL DEFAULT 0,
+          last_run_at TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_automations_project ON automations(project_id);
+
+        CREATE TABLE IF NOT EXISTS automation_runs (
+          id TEXT PRIMARY KEY,
+          automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+          trigger_event TEXT,
+          status TEXT NOT NULL DEFAULT 'running',
+          error TEXT,
+          duration_ms INTEGER,
+          started_at TEXT NOT NULL DEFAULT (datetime('now')),
+          completed_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_automation_runs_automation ON automation_runs(automation_id);
+      `)
+    }
+  },
+  {
+    version: 88,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN loop_config TEXT DEFAULT NULL;`)
+    }
+  },
+  {
+    version: 89,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN snoozed_until TEXT DEFAULT NULL;`)
+    }
+  },
+  {
+    version: 90,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN description_format TEXT NOT NULL DEFAULT 'html';`)
+    }
+  },
+  {
+    version: 91,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN external_id TEXT DEFAULT NULL;
+        ALTER TABLE tasks ADD COLUMN external_provider TEXT DEFAULT NULL;
+        CREATE UNIQUE INDEX idx_tasks_external_dedup
+          ON tasks(project_id, external_provider, external_id)
+          WHERE external_id IS NOT NULL;
+      `)
+    }
+  },
+  {
+    version: 92,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS activity_events (
+          id TEXT PRIMARY KEY,
+          entity_type TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+          task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL,
+          actor_type TEXT NOT NULL,
+          source TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          payload_json TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_activity_events_task_created
+          ON activity_events(task_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_activity_events_entity
+          ON activity_events(entity_type, entity_id);
+        CREATE INDEX IF NOT EXISTS idx_activity_events_project_created
+          ON activity_events(project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS automation_action_runs (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES automation_runs(id) ON DELETE CASCADE,
+          automation_id TEXT NOT NULL REFERENCES automations(id) ON DELETE CASCADE,
+          task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+          project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+          action_index INTEGER NOT NULL,
+          action_type TEXT NOT NULL,
+          command TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'running',
+          output_tail TEXT,
+          error TEXT,
+          started_at TEXT NOT NULL DEFAULT (datetime('now')),
+          completed_at TEXT,
+          duration_ms INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_automation_action_runs_run
+          ON automation_action_runs(run_id, action_index);
+      `)
+    }
+  },
+  {
+    version: 93,
+    up: (db) => {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_activity_events_task_created_id
+          ON activity_events(task_id, created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_activity_events_project_created_id
+          ON activity_events(project_id, created_at DESC, id DESC);
+      `)
+    }
+  },
+  {
+    version: 94,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE skill_registries (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          source_type TEXT NOT NULL,
+          github_owner TEXT,
+          github_repo TEXT,
+          github_branch TEXT DEFAULT 'main',
+          github_path TEXT DEFAULT 'skills',
+          icon_url TEXT,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          last_synced_at TEXT,
+          etag TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(github_owner, github_repo)
+        );
+
+        CREATE TABLE skill_registry_entries (
+          id TEXT PRIMARY KEY,
+          registry_id TEXT NOT NULL REFERENCES skill_registries(id) ON DELETE CASCADE,
+          slug TEXT NOT NULL,
+          name TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          content TEXT NOT NULL,
+          version TEXT,
+          category TEXT,
+          author TEXT,
+          tags TEXT DEFAULT '[]',
+          content_hash TEXT NOT NULL,
+          fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(registry_id, slug)
+        );
+        CREATE INDEX idx_skill_registry_entries_registry
+          ON skill_registry_entries(registry_id);
+
+        INSERT INTO skill_registries (id, name, description, source_type)
+          VALUES ('builtin-slayzone', 'SlayZone', 'Built-in skills curated by SlayZone', 'builtin');
+
+        INSERT INTO skill_registries (id, name, description, source_type, github_owner, github_repo, github_branch, github_path)
+          VALUES ('github-anthropics-skills', 'Anthropic Skills', 'Official skills from Anthropic', 'github', 'anthropics', 'skills', 'main', 'skills');
+        INSERT INTO skill_registries (id, name, description, source_type, github_owner, github_repo, github_branch, github_path)
+          VALUES ('github-composio-skills', 'Awesome Claude Skills', 'Curated skills and integrations by ComposioHQ', 'github', 'ComposioHQ', 'awesome-claude-skills', 'master', '');
+        INSERT INTO skill_registries (id, name, description, source_type, github_owner, github_repo, github_branch, github_path)
+          VALUES ('github-mattpocock-skills', 'Matt Pocock Skills', 'Personal skills by Matt Pocock', 'github', 'mattpocock', 'skills', 'main', '');
+        INSERT INTO skill_registries (id, name, description, source_type, github_owner, github_repo, github_branch, github_path)
+          VALUES ('github-huggingface-skills', 'Hugging Face Skills', 'AI/ML skills from Hugging Face', 'github', 'huggingface', 'skills', 'main', 'skills');
+        INSERT INTO skill_registries (id, name, description, source_type, github_owner, github_repo, github_branch, github_path)
+          VALUES ('github-alirezarezvani-skills', 'Claude Skills Collection', '500+ skills for coding agents', 'github', 'alirezarezvani', 'claude-skills', 'main', '.gemini/skills');
+      `)
+    }
+  },
+  {
+    version: 95,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_assets (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          type TEXT NOT NULL DEFAULT 'markdown',
+          language TEXT,
+          "order" INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_assets_task ON task_assets(task_id);
+      `)
+    }
+  },
+  {
+    version: 96,
+    up: (db) => {
+      db.exec(`ALTER TABLE projects ADD COLUMN task_automation_config TEXT DEFAULT NULL`)
+    }
+  },
+  {
+    version: 97,
+    up: (db) => {
+      // Add render_mode column (NULL = infer from file extension in title)
+      db.exec(`ALTER TABLE task_assets ADD COLUMN render_mode TEXT DEFAULT NULL`)
+
+      // Backfill: append extension to title if missing, set render_mode override if needed
+      const typeToExt: Record<string, string> = {
+        markdown: '.md',
+        code: '.txt',
+        html: '.html',
+        svg: '.svg',
+        mermaid: '.mmd'
+      }
+      const typeToRenderMode: Record<string, string> = {
+        markdown: 'markdown',
+        code: 'code',
+        html: 'html-preview',
+        svg: 'svg-preview',
+        mermaid: 'mermaid-preview'
+      }
+      // Extension → inferred render mode (mirrors EXTENSION_RENDER_MODES in types.ts)
+      const extToRenderMode: Record<string, string> = {
+        '.md': 'markdown',
+        '.mdx': 'markdown',
+        '.html': 'html-preview',
+        '.htm': 'html-preview',
+        '.svg': 'svg-preview',
+        '.mmd': 'mermaid-preview',
+        '.mermaid': 'mermaid-preview',
+        '.txt': 'code'
+      }
+
+      const assets = db.prepare('SELECT id, title, type FROM task_assets').all() as {
+        id: string
+        title: string
+        type: string
+      }[]
+      const updateStmt = db.prepare(
+        'UPDATE task_assets SET title = ?, render_mode = ? WHERE id = ?'
+      )
+
+      for (const asset of assets) {
+        const ext = typeToExt[asset.type] ?? '.txt'
+        let newTitle = asset.title
+        const dotIdx = asset.title.lastIndexOf('.')
+        const currentExt = dotIdx > 0 ? asset.title.slice(dotIdx).toLowerCase() : ''
+        if (!currentExt) newTitle = `${asset.title}${ext}`
+
+        const finalExt = newTitle.slice(newTitle.lastIndexOf('.')).toLowerCase()
+        const inferred = extToRenderMode[finalExt] ?? 'code'
+        const oldMode = typeToRenderMode[asset.type] ?? 'code'
+        const renderMode = inferred === oldMode ? null : oldMode
+
+        updateStmt.run(newTitle, renderMode, asset.id)
+      }
+    }
+  },
+  {
+    version: 98,
+    up: (db) => {
+      db.exec(`
+        INSERT OR IGNORE INTO skill_registries (id, name, description, source_type, github_owner, github_repo, github_branch, github_path)
+          VALUES ('github-anthropics-skills', 'Anthropic Skills', 'Official skills from Anthropic', 'github', 'anthropics', 'skills', 'main', 'skills');
+        INSERT OR IGNORE INTO skill_registries (id, name, description, source_type, github_owner, github_repo, github_branch, github_path)
+          VALUES ('github-composio-skills', 'Awesome Claude Skills', 'Curated skills and integrations by ComposioHQ', 'github', 'ComposioHQ', 'awesome-claude-skills', 'master', '');
+        INSERT OR IGNORE INTO skill_registries (id, name, description, source_type, github_owner, github_repo, github_branch, github_path)
+          VALUES ('github-mattpocock-skills', 'Matt Pocock Skills', 'Personal skills by Matt Pocock', 'github', 'mattpocock', 'skills', 'main', '');
+        INSERT OR IGNORE INTO skill_registries (id, name, description, source_type, github_owner, github_repo, github_branch, github_path)
+          VALUES ('github-huggingface-skills', 'Hugging Face Skills', 'AI/ML skills from Hugging Face', 'github', 'huggingface', 'skills', 'main', 'skills');
+        INSERT OR IGNORE INTO skill_registries (id, name, description, source_type, github_owner, github_repo, github_branch, github_path)
+          VALUES ('github-alirezarezvani-skills', 'Claude Skills Collection', '500+ skills for coding agents', 'github', 'alirezarezvani', 'claude-skills', 'main', '.gemini/skills');
+      `)
+    }
+  },
+  {
+    version: 99,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS asset_folders (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          parent_id TEXT REFERENCES asset_folders(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          "order" INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_asset_folders_task ON asset_folders(task_id);
+        CREATE INDEX IF NOT EXISTS idx_asset_folders_parent ON asset_folders(parent_id);
+
+        ALTER TABLE task_assets ADD COLUMN folder_id TEXT DEFAULT NULL REFERENCES asset_folders(id) ON DELETE SET NULL;
+      `)
+    }
+  },
+  {
+    version: 100,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN is_blocked INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE tasks ADD COLUMN blocked_comment TEXT DEFAULT NULL;
+      `)
+    }
+  },
+  {
+    version: 101,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN active_asset_id TEXT DEFAULT NULL`)
+    }
+  },
+  {
+    version: 102,
+    up: (db) => {
+      db.exec(`
+        INSERT OR IGNORE INTO skill_registries (id, name, description, source_type, github_owner, github_repo, github_branch, github_path)
+          VALUES ('github-caveman-skills', 'Caveman', 'Token-optimized output skills by Julius Brussee', 'github', 'JuliusBrussee', 'caveman', 'main', 'skills');
+      `)
+    }
+  },
+  {
+    version: 103,
+    up: (db) => {
+      db.exec(`
+        DELETE FROM skill_registries WHERE id IN (
+          'github-anthropics-skills',
+          'github-huggingface-skills',
+          'github-alirezarezvani-skills'
+        );
+      `)
+    }
+  },
+  {
+    version: 104,
+    up: (db) => {
+      db.exec(`ALTER TABLE task_assets ADD COLUMN view_mode TEXT DEFAULT NULL`)
+    }
+  },
+  {
+    version: 105,
+    up: (db) => {
+      // Rename legacy scope value 'global' → 'library'. "global" historically meant the
+      // shared library store; disambiguate against "computer" (user-level ~/.provider/ files).
+      db.exec(`
+        DROP INDEX IF EXISTS ux_ai_config_items_global_type_slug;
+        UPDATE ai_config_items SET scope = 'library' WHERE scope = 'global';
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_ai_config_items_library_type_slug
+          ON ai_config_items(type, slug)
+          WHERE scope = 'library';
+      `)
+    }
+  },
+  {
+    version: 106,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE projects ADD COLUMN icon_letters TEXT;
+        ALTER TABLE projects ADD COLUMN icon_image_path TEXT;
+      `)
+    }
+  },
+  {
+    version: 107,
+    up: (db) => {
+      // Disable floating agent panel by default — alwaysOnTop + visibleOnAllWorkspaces
+      // broke macOS tiling window managers (Magnet, Rectangle). Reset existing users
+      // who had the old default (true) so they don't stay broken.
+      const row = db.prepare("SELECT value FROM settings WHERE key = 'agentPanelState'").get() as
+        | { value: string }
+        | undefined
+      if (!row) return
+      try {
+        const state = JSON.parse(row.value)
+        if (state.floatingEnabled === true) {
+          state.floatingEnabled = false
+          db.prepare("UPDATE settings SET value = ? WHERE key = 'agentPanelState'").run(
+            JSON.stringify(state)
+          )
+        }
+      } catch {
+        /* malformed JSON, skip */
+      }
+    }
+  },
+  {
+    version: 108,
+    up: (db) => {
+      db.exec(`ALTER TABLE projects ADD COLUMN lock_config TEXT;`)
+    }
+  },
+  {
+    version: 109,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE task_assets ADD COLUMN readability_override TEXT DEFAULT NULL;
+        ALTER TABLE task_assets ADD COLUMN width_override TEXT DEFAULT NULL;
+      `)
+    }
+  },
+  {
+    version: 110,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE terminal_tabs ADD COLUMN display_mode TEXT NOT NULL DEFAULT 'xterm';
+      `)
+    }
+  },
+  {
+    version: 111,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS asset_versions (
+          id TEXT PRIMARY KEY,
+          asset_id TEXT NOT NULL REFERENCES task_assets(id) ON DELETE CASCADE,
+          version_num INTEGER NOT NULL,
+          content_hash TEXT NOT NULL,
+          size INTEGER NOT NULL,
+          name TEXT,
+          author_type TEXT,
+          author_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_versions_num ON asset_versions(asset_id, version_num);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_versions_name ON asset_versions(asset_id, name) WHERE name IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_asset_versions_hash ON asset_versions(content_hash);
+
+        CREATE TABLE IF NOT EXISTS asset_blobs (
+          hash TEXT PRIMARY KEY,
+          size INTEGER NOT NULL
+        );
+      `)
+    }
+  },
+  {
+    version: 112,
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE asset_versions ADD COLUMN parent_id TEXT REFERENCES asset_versions(id) ON DELETE SET NULL;
+        ALTER TABLE task_assets ADD COLUMN current_version_id TEXT REFERENCES asset_versions(id) ON DELETE SET NULL;
+      `)
+      // Backfill parent_id: link each version to its predecessor by version_num
+      db.exec(`
+        UPDATE asset_versions AS v
+        SET parent_id = (
+          SELECT p.id FROM asset_versions AS p
+          WHERE p.asset_id = v.asset_id AND p.version_num = v.version_num - 1
+        )
+        WHERE v.parent_id IS NULL;
+      `)
+      // Backfill current_version_id: latest version per asset
+      db.exec(`
+        UPDATE task_assets AS a
+        SET current_version_id = (
+          SELECT v.id FROM asset_versions AS v
+          WHERE v.asset_id = a.id
+          ORDER BY v.version_num DESC
+          LIMIT 1
+        )
+        WHERE current_version_id IS NULL;
+      `)
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_asset_versions_parent ON asset_versions(parent_id);
+      `)
+    }
+  },
+  {
+    version: 113,
+    up: (db) => {
+      // Persist chat-agent event buffer per terminal_tabs row so chat history
+      // survives Electron app reload (in-memory Map in chat-transport-manager
+      // gets wiped on shutdownChatTransports() at app quit).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS chat_events (
+          tab_id TEXT NOT NULL REFERENCES terminal_tabs(id) ON DELETE CASCADE,
+          seq INTEGER NOT NULL,
+          event TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (tab_id, seq)
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_events_tab_seq ON chat_events(tab_id, seq);
+      `)
+    }
+  },
+  {
+    version: 114,
+    up: (db) => {
+      db.exec(`ALTER TABLE projects ADD COLUMN worktree_submodule_init TEXT DEFAULT NULL`)
+    }
+  },
+  {
+    version: 115,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN progress INTEGER NOT NULL DEFAULT 0`)
+    }
+  },
+  {
+    version: 116,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN manager_mode INTEGER NOT NULL DEFAULT 0`)
+    }
+  },
+  {
+    version: 117,
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE agent_turns (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL,
+          terminal_tab_id TEXT NOT NULL,
+          start_sha TEXT NOT NULL,
+          end_sha TEXT,
+          prompt_preview TEXT NOT NULL,
+          started_at INTEGER NOT NULL,
+          completed_at INTEGER,
+          FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        );
+        CREATE INDEX idx_agent_turns_task ON agent_turns(task_id, started_at DESC);
+      `)
+    }
+  },
+  {
+    version: 118,
+    up: (db) => {
+      // Replace pair-snapshot model (start/end) with single snapshot per turn.
+      // v117 just shipped — table is empty in practice — safe to drop+recreate.
+      db.exec(`
+        DROP TABLE IF EXISTS agent_turns;
+        CREATE TABLE agent_turns (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL,
+          terminal_tab_id TEXT NOT NULL,
+          snapshot_sha TEXT NOT NULL,
+          prompt_preview TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        );
+        CREATE INDEX idx_agent_turns_task ON agent_turns(task_id, created_at ASC);
+      `)
+    }
+  },
+  {
+    version: 119,
+    up: (db) => {
+      // Switch grouping from task → worktree path. task_id retained (nullable)
+      // for attribution: who/which task asked. ON DELETE SET NULL so deleting a
+      // task doesn't lose the turn history that lives with the repo.
+      db.exec(`
+        DROP TABLE IF EXISTS agent_turns;
+        CREATE TABLE agent_turns (
+          id TEXT PRIMARY KEY,
+          worktree_path TEXT NOT NULL,
+          task_id TEXT,
+          terminal_tab_id TEXT NOT NULL,
+          snapshot_sha TEXT NOT NULL,
+          prompt_preview TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL
+        );
+        CREATE INDEX idx_agent_turns_worktree ON agent_turns(worktree_path, created_at ASC);
+      `)
+    }
+  },
+  {
+    version: 120,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN diff_collapsed_files TEXT DEFAULT NULL`)
+    }
+  },
+  {
+    version: 121,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks ADD COLUMN git_active_tab TEXT DEFAULT NULL`)
+    }
+  },
+  {
+    version: 122,
+    up: (db) => {
+      // Add HEAD-at-snap-time column to agent_turns. Stored explicitly so
+      // list-time filter can drop pre-commit ghosts via SQL — replaces the
+      // prior `git rev-parse <sha>^` per-row probe (which had a null-cache
+      // poisoning surface). Backfill via git for existing rows; rows whose
+      // repo can't be reached stay NULL → filter treats as stale (drops).
+      db.exec(`ALTER TABLE agent_turns ADD COLUMN head_sha_at_snap TEXT`)
+      const rows = db
+        .prepare(`SELECT id, worktree_path, snapshot_sha FROM agent_turns`)
+        .all() as Array<{ id: string; worktree_path: string; snapshot_sha: string }>
+      const update = db.prepare(`UPDATE agent_turns SET head_sha_at_snap = ? WHERE id = ?`)
+      for (const row of rows) {
+        const r = spawnSync('git', ['rev-parse', `${row.snapshot_sha}^`], {
+          cwd: row.worktree_path,
+          encoding: 'utf-8'
+        })
+        if (r.status === 0) {
+          const sha = r.stdout.trim()
+          if (sha) update.run(sha, row.id)
+        }
+      }
+    }
+  },
+  {
+    version: 123,
+    up: (db) => {
+      // Enforce per-project uniqueness on (color, text_color) for tags.
+      // Snapshot of TAG_PRESETS at v123 — kept inline so future preset
+      // edits do not re-shape this migration's behavior on replay.
+      const PRESETS: Array<{ bg: string; text: string }> = [
+        { bg: '#fecaca', text: '#991b1b' },
+        { bg: '#ef4444', text: '#ffffff' },
+        { bg: '#991b1b', text: '#fecaca' },
+        { bg: '#fed7aa', text: '#9a3412' },
+        { bg: '#f97316', text: '#ffffff' },
+        { bg: '#9a3412', text: '#fed7aa' },
+        { bg: '#fef08a', text: '#854d0e' },
+        { bg: '#eab308', text: '#422006' },
+        { bg: '#854d0e', text: '#fef9c3' },
+        { bg: '#bbf7d0', text: '#166534' },
+        { bg: '#22c55e', text: '#ffffff' },
+        { bg: '#166534', text: '#bbf7d0' },
+        { bg: '#99f6e4', text: '#115e59' },
+        { bg: '#14b8a6', text: '#ffffff' },
+        { bg: '#115e59', text: '#ccfbf1' },
+        { bg: '#bfdbfe', text: '#1e3a8a' },
+        { bg: '#3b82f6', text: '#ffffff' },
+        { bg: '#1e3a8a', text: '#bfdbfe' },
+        { bg: '#c7d2fe', text: '#3730a3' },
+        { bg: '#6366f1', text: '#ffffff' },
+        { bg: '#3730a3', text: '#c7d2fe' },
+        { bg: '#ddd6fe', text: '#5b21b6' },
+        { bg: '#a855f7', text: '#ffffff' },
+        { bg: '#5b21b6', text: '#ede9fe' },
+        { bg: '#fbcfe8', text: '#9d174d' },
+        { bg: '#ec4899', text: '#ffffff' },
+        { bg: '#9d174d', text: '#fce7f3' },
+        { bg: '#e5e7eb', text: '#1f2937' },
+        { bg: '#6b7280', text: '#ffffff' },
+        { bg: '#374151', text: '#e5e7eb' }
+      ]
+      const presetKey = (bg: string, text: string) => `${bg}:${text}`
+      const presetSet = new Set(PRESETS.map((p) => presetKey(p.bg, p.text)))
+      const parseHex = (hex: string): [number, number, number] | null => {
+        const m = /^#([0-9a-f]{6})$/i.exec(hex)
+        if (!m) return null
+        const v = m[1]
+        return [
+          parseInt(v.slice(0, 2), 16),
+          parseInt(v.slice(2, 4), 16),
+          parseInt(v.slice(4, 6), 16)
+        ]
+      }
+      const nearestPreset = (bg: string): { bg: string; text: string } => {
+        const rgb = parseHex(bg)
+        if (!rgb) return PRESETS[19] // indigo fallback (#6366f1/#ffffff)
+        let best = PRESETS[0]
+        let bestDist = Number.POSITIVE_INFINITY
+        for (const p of PRESETS) {
+          const prgb = parseHex(p.bg)
+          if (!prgb) continue
+          const dr = rgb[0] - prgb[0]
+          const dg = rgb[1] - prgb[1]
+          const db = rgb[2] - prgb[2]
+          const dist = dr * dr + dg * dg + db * db
+          if (dist < bestDist) {
+            bestDist = dist
+            best = p
+          }
+        }
+        return best
+      }
+
+      const updateColor = db.prepare('UPDATE tags SET color = ?, text_color = ? WHERE id = ?')
+
+      // Step 1 — force all custom (non-preset) colors to nearest preset.
+      const allTags = db
+        .prepare(
+          'SELECT id, project_id, color, text_color FROM tags ORDER BY created_at ASC, id ASC'
+        )
+        .all() as Array<{ id: string; project_id: string; color: string; text_color: string }>
+      for (const tag of allTags) {
+        if (!presetSet.has(presetKey(tag.color, tag.text_color))) {
+          const np = nearestPreset(tag.color)
+          updateColor.run(np.bg, np.text, tag.id)
+          tag.color = np.bg
+          tag.text_color = np.text
+        }
+      }
+
+      // Step 2 — per-project dedup. Keep oldest in each color group; reassign
+      // others to next free preset in project. If no free preset (project has
+      // ≥31 colliding tags), warn and leave duplicate — index creation in
+      // step 3 will be skipped to keep boot safe.
+      const tagsByProject = new Map<string, typeof allTags>()
+      for (const tag of allTags) {
+        const arr = tagsByProject.get(tag.project_id) ?? []
+        arr.push(tag)
+        tagsByProject.set(tag.project_id, arr)
+      }
+      for (const [projectId, tags] of tagsByProject) {
+        const used = new Set<string>()
+        const groups = new Map<string, typeof tags>()
+        for (const t of tags) {
+          const k = presetKey(t.color, t.text_color)
+          const g = groups.get(k) ?? []
+          g.push(t)
+          groups.set(k, g)
+        }
+        for (const k of groups.keys()) {
+          // group already sorted (allTags is) — first stays, rest reassign
+          used.add(k)
+        }
+        for (const [, group] of groups) {
+          if (group.length <= 1) continue
+          for (let i = 1; i < group.length; i++) {
+            const tag = group[i]
+            const free = PRESETS.find((p) => !used.has(presetKey(p.bg, p.text)))
+            if (!free) {
+              console.warn(
+                `[migration v123] tag color dedup overflow: project=${projectId} tag=${tag.id} color=${tag.color}/${tag.text_color} — leaving duplicate`
+              )
+              continue
+            }
+            updateColor.run(free.bg, free.text, tag.id)
+            tag.color = free.bg
+            tag.text_color = free.text
+            used.add(presetKey(free.bg, free.text))
+          }
+        }
+      }
+
+      // Step 3 — boot-safe unique index. Skip if collisions remain (overflow).
+      const remaining = db
+        .prepare(
+          `SELECT 1 FROM tags GROUP BY project_id, color, text_color HAVING COUNT(*) > 1 LIMIT 1`
+        )
+        .get() as unknown
+      if (!remaining) {
+        db.exec(
+          `CREATE UNIQUE INDEX IF NOT EXISTS tags_project_color_unique ON tags(project_id, color, text_color)`
+        )
+      } else {
+        console.warn(
+          `[migration v123] collisions remain after dedup — skipping unique index creation`
+        )
+      }
+    }
+  },
+  {
+    version: 124,
+    up: (db) => {
+      db.exec(`ALTER TABLE automations ADD COLUMN catchup_on_start INTEGER NOT NULL DEFAULT 1;`)
+    }
+  },
+  {
+    version: 125,
+    up: (db) => {
+      // Headless command template per terminal mode — recipe for non-interactive
+      // CLI invocation w/ {prompt} + {flags} slots. Powers automations' AI action.
+      // Null = mode does not support headless mode (e.g. plain 'terminal').
+      // Builtins seeded by startup-sync; users can edit per-row for custom modes.
+      const cols = db.prepare('PRAGMA table_info(terminal_modes)').all() as { name: string }[]
+      if (!cols.some((c) => c.name === 'headless_command')) {
+        db.exec(`ALTER TABLE terminal_modes ADD COLUMN headless_command TEXT;`)
+      }
+    }
+  },
+  {
+    version: 126,
+    up: (db) => {
+      // Per-(source,name) usage counter for chat autocomplete ranking. Bumped
+      // on successful chat send for each /token that resolves to a known item.
+      // Used as fzf-tiebreak so most-used entries float above alphabetical.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS autocomplete_usage (
+          source TEXT NOT NULL,
+          name   TEXT NOT NULL,
+          count  INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (source, name)
+        )
+      `)
+    }
+  },
+  {
+    version: 127,
+    up: (db) => {
+      // Rename "assets" feature to "artifacts" — terminology change only.
+      // Tables, columns, and indexes renamed. SQLite >= 3.25 auto-rewrites
+      // foreign-key references in dependent tables on RENAME TO.
+      db.exec(`
+        ALTER TABLE task_assets RENAME TO task_artifacts;
+        ALTER TABLE asset_folders RENAME TO artifact_folders;
+        ALTER TABLE asset_versions RENAME TO artifact_versions;
+        ALTER TABLE asset_blobs RENAME TO artifact_blobs;
+
+        ALTER TABLE artifact_versions RENAME COLUMN asset_id TO artifact_id;
+        ALTER TABLE tasks RENAME COLUMN active_asset_id TO active_artifact_id;
+
+        DROP INDEX IF EXISTS idx_task_assets_task;
+        DROP INDEX IF EXISTS idx_asset_folders_task;
+        DROP INDEX IF EXISTS idx_asset_folders_parent;
+        DROP INDEX IF EXISTS idx_asset_versions_num;
+        DROP INDEX IF EXISTS idx_asset_versions_name;
+        DROP INDEX IF EXISTS idx_asset_versions_hash;
+        DROP INDEX IF EXISTS idx_asset_versions_parent;
+
+        CREATE INDEX IF NOT EXISTS idx_task_artifacts_task ON task_artifacts(task_id);
+        CREATE INDEX IF NOT EXISTS idx_artifact_folders_task ON artifact_folders(task_id);
+        CREATE INDEX IF NOT EXISTS idx_artifact_folders_parent ON artifact_folders(parent_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_versions_num ON artifact_versions(artifact_id, version_num);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_versions_name ON artifact_versions(artifact_id, name) WHERE name IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_artifact_versions_hash ON artifact_versions(content_hash);
+        CREATE INDEX IF NOT EXISTS idx_artifact_versions_parent ON artifact_versions(parent_id);
+      `)
+
+      // Settings keys (idempotent, no-op if no matches).
+      db.exec(`
+        UPDATE settings SET key = REPLACE(key, 'Asset', 'Artifact') WHERE key LIKE '%Asset%';
+        UPDATE settings SET key = REPLACE(key, 'asset', 'artifact') WHERE key LIKE '%asset%';
+      `)
+    }
+  },
+  {
+    version: 128,
+    up: (db) => {
+      // Backend-persisted chat "Up next" queue. Source-of-truth moved out of
+      // React state so queued messages survive reload/crash and stay in sync
+      // across windows. FK ON DELETE CASCADE clears queue when tab deleted.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS chat_queue (
+          id          TEXT PRIMARY KEY,
+          tab_id      TEXT NOT NULL REFERENCES terminal_tabs(id) ON DELETE CASCADE,
+          send        TEXT NOT NULL,
+          original    TEXT NOT NULL,
+          position    INTEGER NOT NULL,
+          created_at  TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_queue_tab ON chat_queue(tab_id, position);
+      `)
+    }
+  },
+  {
+    version: 129,
+    up: (db) => {
+      // v127 renamed assets → artifacts in tables/columns/setting keys, but missed
+      // JSON blobs: settings.panel_config (order[] + viewEnabled.*.assets) and
+      // tasks.panel_visibility ({assets: bool}). Without this, a saved order with
+      // 'assets' is filtered out as unknown and 'artifacts' appended at the end
+      // → Artifacts panel lands on the far right after upgrade.
+
+      // 1. settings.panel_config
+      const cfgRow = db.prepare(`SELECT value FROM settings WHERE key = 'panel_config'`).get() as
+        | { value: string }
+        | undefined
+      if (cfgRow) {
+        try {
+          const cfg = JSON.parse(cfgRow.value) as {
+            order?: string[]
+            viewEnabled?: Record<string, Record<string, boolean>>
+            [k: string]: unknown
+          }
+          let changed = false
+          if (Array.isArray(cfg.order)) {
+            const next = cfg.order.map((id) => (id === 'assets' ? 'artifacts' : id))
+            if (next.some((id, i) => id !== cfg.order![i])) {
+              cfg.order = next
+              changed = true
+            }
+          }
+          if (cfg.viewEnabled) {
+            for (const view of Object.keys(cfg.viewEnabled)) {
+              const v = cfg.viewEnabled[view]
+              if (v && Object.prototype.hasOwnProperty.call(v, 'assets')) {
+                if (!Object.prototype.hasOwnProperty.call(v, 'artifacts')) {
+                  v.artifacts = v.assets
+                }
+                delete v.assets
+                changed = true
+              }
+            }
+          }
+          if (changed) {
+            db.prepare(`UPDATE settings SET value = ? WHERE key = 'panel_config'`).run(
+              JSON.stringify(cfg)
+            )
+          }
+        } catch {
+          /* malformed JSON, skip */
+        }
+      }
+
+      // 2. tasks.panel_visibility per-row
+      const rows = db
+        .prepare(`SELECT id, panel_visibility FROM tasks WHERE panel_visibility LIKE '%assets%'`)
+        .all() as { id: string; panel_visibility: string | null }[]
+      const upd = db.prepare(`UPDATE tasks SET panel_visibility = ? WHERE id = ?`)
+      for (const row of rows) {
+        if (!row.panel_visibility) continue
+        try {
+          const pv = JSON.parse(row.panel_visibility) as Record<string, boolean>
+          if (Object.prototype.hasOwnProperty.call(pv, 'assets')) {
+            if (!Object.prototype.hasOwnProperty.call(pv, 'artifacts')) {
+              pv.artifacts = pv.assets
+            }
+            delete pv.assets
+            upd.run(JSON.stringify(pv), row.id)
+          }
+        } catch {
+          /* skip malformed */
+        }
+      }
+    }
+  },
+  {
+    version: 130,
+    up: (db) => {
+      // Per-task "needs attention" flag. Set when a PTY for the task transitions
+      // running → idle | error and user has not yet focused the task. Cleared on
+      // tab focus. Orthogonal to TerminalState (which is in-memory + per-PTY).
+      db.exec(`ALTER TABLE tasks ADD COLUMN needs_attention INTEGER NOT NULL DEFAULT 0`)
+    }
+  },
+  {
+    version: 131,
+    up: (db) => {
+      // Per-task dismissal of the dev-server URL detected toast. Once dismissed,
+      // the toast never reappears for that task.
+      db.exec(`ALTER TABLE tasks ADD COLUMN dev_url_toast_dismissed INTEGER NOT NULL DEFAULT 0`)
+    }
+  },
+  {
+    version: 132,
+    up: (db) => {
+      // Rename agent panel settings key: agentPanelState → globalAgentPanelState.
+      db.prepare(`
+        UPDATE settings SET key = 'globalAgentPanelState'
+        WHERE key = 'agentPanelState'
+          AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'globalAgentPanelState')
+      `).run()
+      db.prepare("DELETE FROM settings WHERE key = 'agentPanelState'").run()
+    }
+  },
+  {
+    version: 133,
+    up: (db) => {
+      // Rename floating global agent panel settings keys to match the panel rename:
+      //   floatingAgentExpandedSize → floatingGlobalAgentPanelExpandedSize
+      //   floatingAgentConfig       → floatingGlobalAgentPanelConfig
+      const renames: Array<[string, string]> = [
+        ['floatingAgentExpandedSize', 'floatingGlobalAgentPanelExpandedSize'],
+        ['floatingAgentConfig', 'floatingGlobalAgentPanelConfig']
+      ]
+      for (const [from, to] of renames) {
+        db.prepare(`
+          UPDATE settings SET key = ?
+          WHERE key = ?
+            AND NOT EXISTS (SELECT 1 FROM settings WHERE key = ?)
+        `).run(to, from, to)
+        db.prepare('DELETE FROM settings WHERE key = ?').run(from)
+      }
+    }
+  },
+  {
+    version: 134,
+    up: (db) => {
+      const replacements = new Map<string, string>([
+        ['--full-auto', '--sandbox workspace-write'],
+        ['--full-auto --search', '--sandbox workspace-write'],
+        ['--full-auto --disable apps', '--sandbox workspace-write --disable apps'],
+        ['--full-auto --search --disable apps', '--sandbox workspace-write --disable apps']
+      ])
+
+      const migrateFlags = (flags: unknown): string | null => {
+        if (typeof flags !== 'string') return null
+        return replacements.get(flags.trim()) ?? null
+      }
+
+      const updateSetting = db.prepare(`
+        UPDATE settings
+        SET value = ?
+        WHERE key = 'default_codex_flags' AND value = ?
+      `)
+      const updateMode = db.prepare(`
+        UPDATE terminal_modes
+        SET default_flags = ?, updated_at = datetime('now')
+        WHERE id = 'codex' AND default_flags = ?
+      `)
+      const updateTaskFlags = db.prepare(`
+        UPDATE tasks
+        SET codex_flags = ?, updated_at = datetime('now')
+        WHERE codex_flags = ?
+      `)
+
+      for (const [from, to] of replacements) {
+        updateSetting.run(to, from)
+        updateMode.run(to, from)
+        updateTaskFlags.run(to, from)
+      }
+
+      const rows = db
+        .prepare(`
+        SELECT id, provider_config
+        FROM tasks
+        WHERE provider_config LIKE '%--full-auto%'
+      `)
+        .all() as Array<{ id: string; provider_config: string | null }>
+      const updateProviderConfig = db.prepare(`
+        UPDATE tasks
+        SET provider_config = ?, updated_at = datetime('now')
+        WHERE id = ?
+      `)
+
+      for (const row of rows) {
+        if (!row.provider_config) continue
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(row.provider_config)
+        } catch {
+          continue
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+
+        const config = parsed as Record<string, { flags?: unknown } | undefined>
+        const codex = config.codex
+        if (!codex || typeof codex !== 'object') continue
+
+        const migrated = migrateFlags(codex.flags)
+        if (!migrated) continue
+
+        codex.flags = migrated
+        updateProviderConfig.run(JSON.stringify(config), row.id)
+      }
+    }
+  },
+  {
+    version: 135,
+    up: (db) => {
+      db.exec(`ALTER TABLE tasks DROP COLUMN manager_mode`)
+    }
+  },
+  {
+    version: 136,
+    up: (db) => {
+      // Per-tab "subprocess was alive at last touch" flag. Set on spawn,
+      // cleared on user-initiated kill / tab-close / natural subprocess exit.
+      // NOT cleared on app shutdown — that's the whole point: next boot reads
+      // this column to auto-restart agents that were warm when the app died.
+      db.exec(`ALTER TABLE terminal_tabs ADD COLUMN was_spawned INTEGER NOT NULL DEFAULT 0`)
+    }
+  },
+  {
+    version: 137,
+    up: (db) => {
+      // Chat became its own provider (`claude-chat`) — `display_mode` is gone.
+      // Flip tabs that were in chat view to the new mode before dropping the column.
+      db.exec(`
+        UPDATE terminal_tabs SET mode = 'claude-chat'
+          WHERE mode = 'claude-code' AND display_mode = 'chat';
+        ALTER TABLE terminal_tabs DROP COLUMN display_mode;
+        DELETE FROM settings WHERE key = 'default_tab_display_mode';
+      `)
+    }
+  },
+  {
+    version: 138,
+    up: (db) => {
+      // Seed claude-chat's defaultFlags only if the row landed with NULL from
+      // the v137-era introduction. Interactive chat ignores this field; it
+      // matters only for automation headless runs (buildAiHeadlessCommand).
+      db.exec(`
+        UPDATE terminal_modes
+          SET default_flags = '--allow-dangerously-skip-permissions'
+          WHERE id = 'claude-chat' AND default_flags IS NULL;
+      `)
+    }
+  },
+  {
+    version: 139,
+    up: (db) => {
+      // Denormalized "last user-or-agent interaction" epoch-ms. Bumped from
+      // chat user-message events + agent_turns inserts. Sorted by tree-view's
+      // "last interaction" orderBy. Backfill takes MAX across both sources so
+      // chat-only tasks (no git snapshots) and snapshot-only tasks both light
+      // up at migration time. Filter chat_events to 'user-message' kind so
+      // backfill matches the runtime bump path. Sentinel `0` collapses to NULL.
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN last_interaction_at INTEGER;
+        UPDATE tasks SET last_interaction_at = (
+          SELECT MAX(IFNULL(at_max, 0), IFNULL(ce_max, 0))
+          FROM (
+            SELECT
+              (SELECT MAX(at.created_at) FROM agent_turns at WHERE at.task_id = tasks.id) AS at_max,
+              (SELECT CAST(strftime('%s', MAX(ce.created_at)) AS INTEGER) * 1000
+                 FROM chat_events ce
+                 JOIN terminal_tabs tt ON tt.id = ce.tab_id
+                WHERE tt.task_id = tasks.id
+                  AND json_extract(ce.event, '$.kind') = 'user-message') AS ce_max
+          )
+        );
+        UPDATE tasks SET last_interaction_at = NULL WHERE last_interaction_at = 0;
+        CREATE INDEX IF NOT EXISTS idx_tasks_last_interaction ON tasks(last_interaction_at DESC);
+      `)
+    }
+  },
+  {
+    version: 140,
+    up: (db) => {
+      // Move genuinely task-intrinsic UI state out of global settings blobs and
+      // into `tasks` columns, so it travels with the task row and survives the
+      // app's wholesale `viewState` rewrites:
+      //   - viewState.treePinnedTaskIds   → tasks.pinned + tasks.pin_order
+      //   - viewState.treeCollapsedTaskIds → tasks.tree_collapsed
+      //   - settings 'commit_graph:task:<id>' → tasks.commit_graph_config
+      // Window state that merely references a task id (tabs, closedTabs,
+      // projectLastActiveTab) and project-scoped keys stay in their blobs.
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE tasks ADD COLUMN pin_order INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE tasks ADD COLUMN tree_collapsed INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE tasks ADD COLUMN commit_graph_config TEXT DEFAULT NULL;
+      `)
+
+      // Backfill pin/collapse state from the `viewState` blob.
+      const viewStateRow = db.prepare("SELECT value FROM settings WHERE key = 'viewState'").get() as
+        | { value: string }
+        | undefined
+      let viewState: Record<string, unknown> | null = null
+      if (viewStateRow?.value) {
+        try {
+          const parsed = JSON.parse(viewStateRow.value)
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            viewState = parsed as Record<string, unknown>
+          }
+        } catch {
+          viewState = null
+        }
+      }
+
+      if (viewState) {
+        const pinned = viewState.treePinnedTaskIds
+        if (Array.isArray(pinned)) {
+          const setPinned = db.prepare('UPDATE tasks SET pinned = 1, pin_order = ? WHERE id = ?')
+          pinned.forEach((id, index) => {
+            if (typeof id === 'string') setPinned.run(index, id)
+          })
+        }
+
+        const collapsed = viewState.treeCollapsedTaskIds
+        if (Array.isArray(collapsed)) {
+          const setCollapsed = db.prepare('UPDATE tasks SET tree_collapsed = 1 WHERE id = ?')
+          for (const id of collapsed) {
+            if (typeof id === 'string') setCollapsed.run(id)
+          }
+        }
+
+        // Strip the moved fields from the blob.
+        delete viewState.treePinnedTaskIds
+        delete viewState.treeCollapsedTaskIds
+        db.prepare('UPDATE settings SET value = ? WHERE key = ?').run(
+          JSON.stringify(viewState),
+          'viewState'
+        )
+      }
+
+      // Backfill per-task commit-graph config from settings 'commit_graph:task:<id>'.
+      const prefix = 'commit_graph:task:'
+      const graphRows = db
+        .prepare("SELECT key, value FROM settings WHERE key LIKE 'commit_graph:task:%'")
+        .all() as Array<{ key: string; value: string | null }>
+      const setGraphConfig = db.prepare('UPDATE tasks SET commit_graph_config = ? WHERE id = ?')
+      for (const row of graphRows) {
+        const taskId = row.key.slice(prefix.length)
+        if (taskId && row.value) setGraphConfig.run(row.value, taskId)
+      }
+      db.prepare("DELETE FROM settings WHERE key LIKE 'commit_graph:task:%'").run()
+    }
+  },
+  {
+    version: 141,
+    up: (db) => {
+      // Idle-close (hibernation): per-tab flag marking that the agent was
+      // auto-closed while idle. Distinct from `was_spawned` (which hibernation
+      // clears to 0): persists the "sleeping 💤 / Reopen" status across reload
+      // and restart so a stale agent stays visibly distinguishable from a
+      // never-started one. Set on hibernate, cleared on (re)spawn.
+      db.exec(`ALTER TABLE terminal_tabs ADD COLUMN hibernated INTEGER NOT NULL DEFAULT 0`)
+    }
+  },
+  {
+    version: 142,
+    up: (db) => {
+      // CCS provider removed. Convert orphaned ccs tasks to claude-code (CCS ran
+      // Claude underneath, so claude-code is the faithful successor), drop the
+      // now-unused ccs_profile columns, strip dead provider_config.ccs keys, and
+      // clean the CCS settings rows.
+      db.exec(`UPDATE tasks SET terminal_mode = 'claude-code' WHERE terminal_mode = 'ccs'`)
+      db.exec(`ALTER TABLE tasks DROP COLUMN ccs_profile`)
+      db.exec(`ALTER TABLE task_templates DROP COLUMN ccs_profile`)
+      db.exec(
+        `UPDATE tasks SET provider_config = json_remove(provider_config, '$.ccs')
+         WHERE provider_config IS NOT NULL AND json_extract(provider_config, '$.ccs') IS NOT NULL`
+      )
+      db.prepare(`DELETE FROM settings WHERE key IN ('ccs_enabled', 'ccs_default_profile')`).run()
+    }
+  },
+  {
+    version: 143,
+    up: (db) => {
+      // Per-task panel sizes (JSON). Previously panel widths lived in a single
+      // global setting (`taskDetailPanelSizes`) shared across every task, so
+      // resizing one task's panels leaked into all others. Sizes now persist
+      // per task, mirroring panel_visibility. NULL → runtime defaults.
+      db.exec(`ALTER TABLE tasks ADD COLUMN panel_sizes TEXT DEFAULT NULL;`)
+    }
+  },
+  {
+    version: 144,
+    up: (db) => {
+      // Project groups — Discord-style folders (rail view) + labeled collapsible
+      // sections (tree view). One shared entity drives both renderings.
+      //
+      // Ordering model: `project_groups.sort_order` and the `sort_order` of
+      // UNGROUPED projects (group_id IS NULL) share ONE integer space — the
+      // top-level list is the merge of both, sorted by sort_order (Discord's
+      // rail is a single ordered list mixing folders + loose servers). A
+      // GROUPED project's `sort_order` is its position WITHIN its group instead.
+      // `collapsed` persists expand/collapse, shared across both views.
+      db.exec(`
+        CREATE TABLE project_groups (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL DEFAULT '',
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          collapsed INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        ALTER TABLE projects ADD COLUMN group_id TEXT DEFAULT NULL;
+      `)
+    }
+  },
+  {
+    version: 145,
+    up: (db) => {
+      // Append-only ledger of conversation IDs per task per provider. Replaces
+      // the mutable `provider_config.{mode}.conversationId` singleton (which
+      // gets clobbered when slay observes a sessionId without verifying its
+      // provenance — see conversation-id-robustness.md).
+      //
+      // Rows are NEVER updated. "Current" is the latest honored row for a
+      // (task_id, mode) pair, strictly after any `manual-reset` cutoff.
+      //   - slay-spawned-{fresh,resume}: sessionId observed matched what slay
+      //     spawned. Honored.
+      //   - cas-repoint-heal: conversation-healer re-pointed at resume time.
+      //     Honored.
+      //   - legacy-migration: one-time backfill from existing provider_config.
+      //     Honored.
+      //   - foreign-observed: sessionId did NOT match the one slay spawned
+      //     (a manual `--resume X` in the PTY). Recorded for audit, NEVER
+      //     honored on read.
+      //   - manual-reset: user-issued sentinel; conversation_id is NULL.
+      //     Cutoff — every earlier row is irrelevant on read.
+      //   - pending-spawn: hook-driven providers store the expected sessionId
+      //     here at spawn so the REST hook can verify provenance without an
+      //     in-memory map. Pruned by TTL.
+      db.exec(`
+        CREATE TABLE task_conversations (
+          id              TEXT PRIMARY KEY,
+          task_id         TEXT NOT NULL,
+          mode            TEXT NOT NULL,
+          conversation_id TEXT,
+          origin          TEXT NOT NULL,
+          pending_meta    TEXT,
+          created_at      INTEGER NOT NULL,
+          FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+          CHECK (origin IN (
+            'slay-spawned-fresh',
+            'slay-spawned-resume',
+            'cas-repoint-heal',
+            'legacy-migration',
+            'foreign-observed',
+            'manual-reset',
+            'pending-spawn'
+          ))
+        );
+        CREATE INDEX task_conversations_lookup
+          ON task_conversations (task_id, mode, created_at DESC);
+        CREATE INDEX task_conversations_pending
+          ON task_conversations (task_id, mode, conversation_id)
+          WHERE origin = 'pending-spawn';
+      `)
+
+      // Backfill from existing provider_config.{mode}.conversationId +
+      // conversationHistory[]. created_at is derived from the task's own
+      // created_at when available so backfill ordering matches historical
+      // sequence; the history index offsets per-entry so order is preserved.
+      const tasks = db
+        .prepare(
+          `SELECT id, provider_config, created_at FROM tasks WHERE provider_config IS NOT NULL`
+        )
+        .all() as Array<{ id: string; provider_config: string; created_at: string | null }>
+      const insert = db.prepare(
+        `INSERT INTO task_conversations (id, task_id, mode, conversation_id, origin, pending_meta, created_at) VALUES (?, ?, ?, ?, 'legacy-migration', NULL, ?)`
+      )
+      for (const task of tasks) {
+        let cfg: Record<string, unknown>
+        try {
+          cfg = JSON.parse(task.provider_config) as Record<string, unknown>
+        } catch {
+          continue
+        }
+        const baseMs = task.created_at ? Date.parse(task.created_at) : Date.now()
+        const baseValid = Number.isFinite(baseMs) ? baseMs : Date.now()
+        for (const [mode, raw] of Object.entries(cfg)) {
+          if (!raw || typeof raw !== 'object') continue
+          const entry = raw as { conversationId?: unknown; conversationHistory?: unknown }
+          const history = Array.isArray(entry.conversationHistory)
+            ? entry.conversationHistory.filter((v): v is string => typeof v === 'string')
+            : []
+          // Insert history oldest-first; current id last so it wins on read.
+          history.forEach((cid, i) => {
+            insert.run(randomUUID(), task.id, mode, cid, baseValid + i)
+          })
+          if (typeof entry.conversationId === 'string' && entry.conversationId) {
+            // Only insert current if it's not already the most-recent history entry,
+            // to avoid an exact-duplicate row at the same conversation_id.
+            if (history[history.length - 1] !== entry.conversationId) {
+              insert.run(
+                randomUUID(),
+                task.id,
+                mode,
+                entry.conversationId,
+                baseValid + history.length
+              )
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    version: 146,
+    up: (db) => {
+      // User prompts sent to a task's agent, captured from the agent's
+      // UserPromptSubmit hook (clean exact text — unlike raw PTY stdin, which
+      // is deliberately dropped because edit keys / pastes / ↑-history can't be
+      // reconstructed). Powers the agent-terminal "messages" sidebar. Grouped
+      // by task + agent mode; the sidebar shows the main agent by filtering on
+      // its current mode. CASCADE so deleting a task clears its prompt history.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS agent_prompts (
+          id             TEXT PRIMARY KEY,
+          task_id        TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          agent_id       TEXT NOT NULL,
+          cli_session_id TEXT,
+          text           TEXT NOT NULL,
+          created_at     INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_prompts_task
+          ON agent_prompts(task_id, agent_id, created_at ASC);
+      `)
+    }
+  },
+  {
+    version: 147,
+    up: (db) => {
+      // First-class agent-session entity. See plans/agent-sessions.md.
+      //
+      // An agent session is a spawned provider process with its OWN durable
+      // identity (`id`, a UUID we mint), independent of any task. It supersedes
+      // the `taskId:tabId`-encoded session identity and folds in the
+      // `task_conversations` provenance ledger (v145) as the single source of
+      // truth. `task_conversations` is retired in a later migration once reads
+      // have cut over and prod has proven parity (slices 2-4 of the plan).
+      //
+      //   - id              : our minted uuid = the PTY session key.
+      //   - mode            : provider mode (claude-code / codex / ...).
+      //   - cwd             : spawn working dir = pool key. NULL for historical
+      //                       / audit rows that were never live-managed.
+      //   - task_id         : NULL while pooled; set ONCE on assignment; never
+      //                       moves (no reattach).
+      //   - conversation_id : provider thread id; fills in on `turn-init`.
+      //   - origin          : provenance; the HONORED set decides resume. Same
+      //                       semantics as the v145 ledger MINUS `manual-reset`
+      //                       (a reset is now a `session_resets` timeline event,
+      //                       not a session).
+      //   - status          : pooled | bound | dead.
+      //   - pending_meta    : {usedResume, spawnedAt} for the in-flight
+      //                       provenance match (hook-driven providers).
+      //
+      // Reset modeled as an explicit (task, mode) timeline event in
+      // `session_resets` — NOT a flag on old sessions. Normal process exit
+      // (every closed tab) leaves a session resumable; only a user reset means
+      // "forget everything before now". The resolver applies the cutoff
+      // structurally in SQL, identical to the v145 ledger semantics.
+      db.exec(`
+        CREATE TABLE agent_sessions (
+          id              TEXT PRIMARY KEY,
+          mode            TEXT NOT NULL,
+          cwd             TEXT,
+          task_id         TEXT,
+          conversation_id TEXT,
+          origin          TEXT NOT NULL,
+          status          TEXT NOT NULL,
+          pending_meta    TEXT,
+          created_at      INTEGER NOT NULL,
+          bound_at        INTEGER,
+          FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+          CHECK (origin IN (
+            'slay-spawned-fresh',
+            'slay-spawned-resume',
+            'cas-repoint-heal',
+            'legacy-migration',
+            'foreign-observed',
+            'pending-spawn'
+          )),
+          CHECK (status IN ('pooled','bound','dead'))
+        );
+        CREATE INDEX agent_sessions_task
+          ON agent_sessions (task_id, mode, created_at DESC);
+        CREATE INDEX agent_sessions_pool
+          ON agent_sessions (cwd, mode)
+          WHERE status = 'pooled';
+        CREATE INDEX agent_sessions_pending
+          ON agent_sessions (task_id, mode, conversation_id)
+          WHERE origin = 'pending-spawn';
+
+        CREATE TABLE session_resets (
+          id         TEXT PRIMARY KEY,
+          task_id    TEXT NOT NULL,
+          mode       TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        );
+        CREATE INDEX session_resets_lookup
+          ON session_resets (task_id, mode, created_at DESC);
+      `)
+
+      // One-time backfill: shadow every existing `task_conversations` row into
+      // the new tables, preserving id + created_at so the new resolver picks the
+      // exact same "current" conversation the v145 resolver does (parity is
+      // asserted by the slice-2 cutover). Historical rows are audit-only — their
+      // OS processes are long gone — so `status='dead'` and `cwd=NULL`.
+      //   - `manual-reset` rows  → `session_resets` (a reset is not a session).
+      //   - every other origin   → `agent_sessions`.
+      const rows = db
+        .prepare(
+          `SELECT id, task_id, mode, conversation_id, origin, pending_meta, created_at
+             FROM task_conversations`
+        )
+        .all() as Array<{
+        id: string
+        task_id: string
+        mode: string
+        conversation_id: string | null
+        origin: string
+        pending_meta: string | null
+        created_at: number
+      }>
+      const insSession = db.prepare(
+        `INSERT INTO agent_sessions
+           (id, mode, cwd, task_id, conversation_id, origin, status, pending_meta, created_at, bound_at)
+         VALUES (?, ?, NULL, ?, ?, ?, 'dead', ?, ?, ?)`
+      )
+      const insReset = db.prepare(
+        `INSERT INTO session_resets (id, task_id, mode, created_at) VALUES (?, ?, ?, ?)`
+      )
+      for (const r of rows) {
+        if (r.origin === 'manual-reset') {
+          insReset.run(r.id, r.task_id, r.mode, r.created_at)
+        } else {
+          insSession.run(
+            r.id,
+            r.mode,
+            r.task_id,
+            r.conversation_id,
+            r.origin,
+            r.pending_meta,
+            r.created_at,
+            r.created_at
+          )
+        }
+      }
+    }
+  },
+  {
+    version: 148,
+    up: (db) => {
+      // Slice 3 + entity-model B (plans/agent-sessions.md): `agent_sessions`
+      // becomes the SESSION entity — one row per spawn, whose `id` is the
+      // runtime PTY key (a main-minted uuid) instead of the `taskId:tabId`
+      // string. Two additive columns:
+      //   - `tab_id`   : which pane this session belongs to. NULL while pooled
+      //                  (no tab yet) and for v147 backfilled audit rows.
+      //   - `ended_at` : when the session's process exited (status→dead). NULL
+      //                  while live; backfilled audit rows are already dead so
+      //                  this stays NULL for them (exit time unknown).
+      // "Current session for tab T" = the latest live row with that `tab_id`.
+      db.exec(`
+        ALTER TABLE agent_sessions ADD COLUMN tab_id TEXT;
+        ALTER TABLE agent_sessions ADD COLUMN ended_at INTEGER;
+        CREATE INDEX agent_sessions_tab ON agent_sessions (tab_id, created_at DESC);
+      `)
+    }
+  },
+  {
+    version: 149,
+    up: (db) => {
+      // Runner schema for the hub/runner split (wave 1). Lands DARK: purely
+      // additive and all-nullable — nothing reads or writes these until the
+      // @slayzone/computers domain is wired up in the integration wave.
+      //
+      //   - runners                    : one row per enrolled runner (a machine
+      //                                  /process that can host task work).
+      //                                  `capabilities_json` is a JSON object;
+      //                                  `revoked_at` NULL = active.
+      //   - join_tokens                : single-use enrollment tokens. Only
+      //                                  sha256(token) at rest — the plaintext
+      //                                  token is shown once at mint and never
+      //                                  stored. `used_at` NULL = unclaimed;
+      //                                  `runner_id` links the runner that
+      //                                  eventually enrolled with it.
+      //   - runner_project_checkouts  : where each runner has each project
+      //                                  checked out, one row per pair.
+      //   - tasks.runner_id            : NULL = inherit the project default.
+      //   - projects.default_runner_id : NULL = no explicit default (exec falls
+      //     back to the connected default runner, else in-process).
+      db.exec(`
+        CREATE TABLE runners (
+          id                TEXT PRIMARY KEY,
+          name              TEXT NOT NULL,
+          platform          TEXT NOT NULL,
+          version           TEXT NOT NULL,
+          capabilities_json TEXT NOT NULL,
+          auth_key_id       TEXT,
+          last_seen_at      INTEGER,
+          created_at        INTEGER NOT NULL,
+          revoked_at        INTEGER
+        );
+
+        CREATE TABLE join_tokens (
+          id         TEXT PRIMARY KEY,
+          token_hash TEXT NOT NULL UNIQUE,
+          label      TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          used_at    INTEGER,
+          runner_id  TEXT
+        );
+
+        CREATE TABLE runner_project_checkouts (
+          runner_id  TEXT NOT NULL,
+          project_id TEXT NOT NULL,
+          root_path  TEXT NOT NULL,
+          status     TEXT NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (runner_id, project_id)
+        );
+
+        ALTER TABLE tasks ADD COLUMN runner_id TEXT;
+        ALTER TABLE projects ADD COLUMN default_runner_id TEXT;
+      `)
+    }
+  },
+  {
+    version: 150,
+    up: (db) => {
+      // Rename the local-server discovery key `mcp_server_port` → `server_port`.
+      // The "mcp" name was misleading — the value is the single port the sidecar
+      // binds for /trpc+/api+/mcp+/health, unrelated to MCP-the-protocol. The
+      // running server rewrites `server_port` on every boot (claimServerPort), so
+      // this migration only carries the existing value forward for a CLI that runs
+      // before the next boot.
+      //
+      // Copy the OLD value into the NEW key (old wins — it's the source of truth
+      // being migrated from), then drop the old key. INSERT OR REPLACE + a guarded
+      // SELECT keeps this idempotent and collision-safe: if `mcp_server_port` is
+      // absent (already migrated, or a fresh DB), the INSERT's SELECT yields no row
+      // and nothing changes — unlike a bare DELETE, which would wipe a live value
+      // on a second application.
+      db.exec(`
+        INSERT OR REPLACE INTO settings (key, value)
+          SELECT 'server_port', value FROM settings WHERE key = 'mcp_server_port';
+        DELETE FROM settings WHERE key = 'mcp_server_port';
+      `)
+    }
+  },
+  {
+    version: 151,
+    up: (db) => {
+      // Admit the `in-band-clear` provenance origin (see
+      // task/shared/conversation-origins.ts). An agent that rotates its own
+      // session id in place — Claude Code's `/clear` — reports a session id that
+      // differs from the one slay pre-minted at spawn, which the v145/v147 gate
+      // could only read as `foreign-observed` (audit-only, never resumed). The
+      // consequence was silent and load-bearing: after a `/clear` the task kept
+      // resuming the PRE-clear conversation, and the cleared session never
+      // appeared in the sessions sidebar.
+      //
+      // A CHECK constraint can't be altered in place in SQLite, so both tables
+      // are rebuilt. Mechanics that make this safe:
+      //   - `PRAGMA foreign_keys = OFF` for the swap: both tables carry an FK to
+      //     `tasks(id)`, and a DROP of the old table with FKs enforced would
+      //     cascade. Restored immediately after. Same pattern as v?? for
+      //     `integration_connections` / `terminal_modes` above.
+      //   - Columns are enumerated EXPLICITLY (not `SELECT *`) so the copy stays
+      //     correct if a future migration reorders columns.
+      //   - Every index is recreated verbatim — a rebuilt table loses its
+      //     indexes with the old one, and `agent_sessions_pending` /
+      //     `_task` / `_tab` / `_pool` are all on hot resolver paths.
+      // `in-band-clear` is deliberately NOT backfilled onto historical
+      // `foreign-observed` rows: the SessionStart `source` field that
+      // distinguishes a `/clear` from a manual `--resume <foreign>` was only
+      // ever logged to diagnostics, never persisted to these tables, so there is
+      // no owned data to reclassify from. Existing rows keep their recorded
+      // provenance; the first `/clear` after this ships binds correctly.
+      db.exec(`PRAGMA foreign_keys = OFF;`)
+      db.exec(`
+        CREATE TABLE task_conversations_new (
+          id              TEXT PRIMARY KEY,
+          task_id         TEXT NOT NULL,
+          mode            TEXT NOT NULL,
+          conversation_id TEXT,
+          origin          TEXT NOT NULL,
+          pending_meta    TEXT,
+          created_at      INTEGER NOT NULL,
+          FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+          CHECK (origin IN (
+            'slay-spawned-fresh',
+            'slay-spawned-resume',
+            'in-band-clear',
+            'cas-repoint-heal',
+            'legacy-migration',
+            'foreign-observed',
+            'manual-reset',
+            'pending-spawn'
+          ))
+        );
+        INSERT INTO task_conversations_new
+          (id, task_id, mode, conversation_id, origin, pending_meta, created_at)
+          SELECT id, task_id, mode, conversation_id, origin, pending_meta, created_at
+            FROM task_conversations;
+        DROP TABLE task_conversations;
+        ALTER TABLE task_conversations_new RENAME TO task_conversations;
+        CREATE INDEX task_conversations_lookup
+          ON task_conversations (task_id, mode, created_at DESC);
+        CREATE INDEX task_conversations_pending
+          ON task_conversations (task_id, mode, conversation_id)
+          WHERE origin = 'pending-spawn';
+
+        CREATE TABLE agent_sessions_new (
+          id              TEXT PRIMARY KEY,
+          mode            TEXT NOT NULL,
+          cwd             TEXT,
+          task_id         TEXT,
+          conversation_id TEXT,
+          origin          TEXT NOT NULL,
+          status          TEXT NOT NULL,
+          pending_meta    TEXT,
+          created_at      INTEGER NOT NULL,
+          bound_at        INTEGER,
+          tab_id          TEXT,
+          ended_at        INTEGER,
+          FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+          CHECK (origin IN (
+            'slay-spawned-fresh',
+            'slay-spawned-resume',
+            'in-band-clear',
+            'cas-repoint-heal',
+            'legacy-migration',
+            'foreign-observed',
+            'pending-spawn'
+          )),
+          CHECK (status IN ('pooled','bound','dead'))
+        );
+        INSERT INTO agent_sessions_new
+          (id, mode, cwd, task_id, conversation_id, origin, status, pending_meta,
+           created_at, bound_at, tab_id, ended_at)
+          SELECT id, mode, cwd, task_id, conversation_id, origin, status, pending_meta,
+                 created_at, bound_at, tab_id, ended_at
+            FROM agent_sessions;
+        DROP TABLE agent_sessions;
+        ALTER TABLE agent_sessions_new RENAME TO agent_sessions;
+        CREATE INDEX agent_sessions_task
+          ON agent_sessions (task_id, mode, created_at DESC);
+        CREATE INDEX agent_sessions_pool
+          ON agent_sessions (cwd, mode)
+          WHERE status = 'pooled';
+        CREATE INDEX agent_sessions_pending
+          ON agent_sessions (task_id, mode, conversation_id)
+          WHERE origin = 'pending-spawn';
+        CREATE INDEX agent_sessions_tab
+          ON agent_sessions (tab_id, created_at DESC);
+      `)
+      db.exec(`PRAGMA foreign_keys = ON;`)
+    }
+  },
+  {
+    version: 152,
+    up: (db) => {
+      // Per-artifact document zoom, as an integer percent. NULL = 100% so the
+      // column stays empty for the overwhelming majority of rows — same
+      // "override only when it differs from the default" shape as
+      // readability_override / width_override (v109).
+      db.exec(`ALTER TABLE task_artifacts ADD COLUMN zoom_pct INTEGER DEFAULT NULL;`)
+    }
+  },
+  {
+    version: 153,
+    up: (db) => {
+      // Starred projects are exempt from the sidebar tree's "hide inactive
+      // projects" collapse — same non-nullable default-0 boolean shape as
+      // tasks.pinned (v140).
+      db.exec(`ALTER TABLE projects ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;`)
+    }
+  },
+  {
+    version: 154,
+    up: (db) => {
+      // Last known top-level pid of a managed process's spawn. Lets the manager
+      // reap a leftover process (still holding its port) that survived an
+      // uncontrolled app/sidecar exit — the previous run never had a chance to
+      // send it a kill signal, so nothing on disk remembered its pid at all.
+      db.exec(`ALTER TABLE processes ADD COLUMN pid INTEGER DEFAULT NULL;`)
+    }
+  },
+  {
+    version: 155,
+    up: (db) => {
+      // One-time reset of `was_spawned`. The flag is set on spawn and cleared on
+      // exit by a recorder that, since the pty runtime moved to the side-car,
+      // nothing installed — so no live agent was ever flagged, and the only rows
+      // left at 1 are strays written directly by the REST `pty/start-main` path
+      // that nothing has cleared since. Left alone, the now-working restore
+      // would resurrect those long-dead tasks as background tabs on first boot.
+      //
+      // Safe to blanket-clear: migrations run at hub boot, before any session
+      // exists in this process, so a `1` here can only be stale by construction.
+      // Cost is exactly one boot without auto-restore; every boot after this
+      // reflects real spawn/exit.
+      db.exec(`UPDATE terminal_tabs SET was_spawned = 0 WHERE was_spawned = 1;`)
+    }
+  },
+  {
+    version: 156,
+    up: (db) => {
+      // Admit the `user-selected` provenance origin (see
+      // task/shared/conversation-origins.ts). The sessions sidebar can now switch
+      // the task back to an EARLIER session; the switch is durable only if it
+      // appends an honored row naming that conversation, because the resume hint
+      // (`currentConversationByMode`) is the newest honored row. Reusing
+      // `slay-spawned-resume` would have worked mechanically but asserts a spawn
+      // slay observed — a lie in the one table whose whole job is answering
+      // "where did this conversation id come from?".
+      //
+      // Mechanically identical to v151 (`in-band-clear`), because it is the same
+      // problem: SQLite cannot ALTER a CHECK in place, so both tables are
+      // rebuilt. The same three things make that safe —
+      //   - `PRAGMA foreign_keys = OFF` around the swap: both tables carry an FK
+      //     to `tasks(id)`, and a DROP with FKs enforced would cascade.
+      //   - columns enumerated EXPLICITLY (never `SELECT *`), so the copy stays
+      //     correct if a later migration reorders columns.
+      //   - every index recreated verbatim — a rebuilt table loses the old one's
+      //     indexes, and four of these sit on hot resolver paths.
+      // No backfill: no historical row was ever a user selection.
+      db.exec(`PRAGMA foreign_keys = OFF;`)
+      db.exec(`
+        CREATE TABLE task_conversations_new (
+          id              TEXT PRIMARY KEY,
+          task_id         TEXT NOT NULL,
+          mode            TEXT NOT NULL,
+          conversation_id TEXT,
+          origin          TEXT NOT NULL,
+          pending_meta    TEXT,
+          created_at      INTEGER NOT NULL,
+          FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+          CHECK (origin IN (
+            'slay-spawned-fresh',
+            'slay-spawned-resume',
+            'in-band-clear',
+            'user-selected',
+            'cas-repoint-heal',
+            'legacy-migration',
+            'foreign-observed',
+            'manual-reset',
+            'pending-spawn'
+          ))
+        );
+        INSERT INTO task_conversations_new
+          (id, task_id, mode, conversation_id, origin, pending_meta, created_at)
+          SELECT id, task_id, mode, conversation_id, origin, pending_meta, created_at
+            FROM task_conversations;
+        DROP TABLE task_conversations;
+        ALTER TABLE task_conversations_new RENAME TO task_conversations;
+        CREATE INDEX task_conversations_lookup
+          ON task_conversations (task_id, mode, created_at DESC);
+        CREATE INDEX task_conversations_pending
+          ON task_conversations (task_id, mode, conversation_id)
+          WHERE origin = 'pending-spawn';
+
+        CREATE TABLE agent_sessions_new (
+          id              TEXT PRIMARY KEY,
+          mode            TEXT NOT NULL,
+          cwd             TEXT,
+          task_id         TEXT,
+          conversation_id TEXT,
+          origin          TEXT NOT NULL,
+          status          TEXT NOT NULL,
+          pending_meta    TEXT,
+          created_at      INTEGER NOT NULL,
+          bound_at        INTEGER,
+          tab_id          TEXT,
+          ended_at        INTEGER,
+          FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+          CHECK (origin IN (
+            'slay-spawned-fresh',
+            'slay-spawned-resume',
+            'in-band-clear',
+            'user-selected',
+            'cas-repoint-heal',
+            'legacy-migration',
+            'foreign-observed',
+            'pending-spawn'
+          )),
+          CHECK (status IN ('pooled','bound','dead'))
+        );
+        INSERT INTO agent_sessions_new
+          (id, mode, cwd, task_id, conversation_id, origin, status, pending_meta,
+           created_at, bound_at, tab_id, ended_at)
+          SELECT id, mode, cwd, task_id, conversation_id, origin, status, pending_meta,
+                 created_at, bound_at, tab_id, ended_at
+            FROM agent_sessions;
+        DROP TABLE agent_sessions;
+        ALTER TABLE agent_sessions_new RENAME TO agent_sessions;
+        CREATE INDEX agent_sessions_task
+          ON agent_sessions (task_id, mode, created_at DESC);
+        CREATE INDEX agent_sessions_pool
+          ON agent_sessions (cwd, mode)
+          WHERE status = 'pooled';
+        CREATE INDEX agent_sessions_pending
+          ON agent_sessions (task_id, mode, conversation_id)
+          WHERE origin = 'pending-spawn';
+        CREATE INDEX agent_sessions_tab
+          ON agent_sessions (tab_id, created_at DESC);
+      `)
+      db.exec(`PRAGMA foreign_keys = ON;`)
+    }
+  },
+  {
+    version: 157,
+    up: (db) => {
+      // Session DELETE, as a tombstone rather than a `DELETE FROM`. Every table
+      // in this subsystem is append-only on purpose: the provenance rows are the
+      // only evidence available when a task resumes the wrong conversation, and
+      // a hard delete would destroy exactly the rows you need to diagnose that.
+      // So a deleted session keeps its history and gains a marker that every
+      // reader excludes — structurally, in SQL, the same shape `session_resets`
+      // (v147) uses for the reset cutoff.
+      //
+      // Scoped to (task, mode, conversation): the same provider conversation id
+      // can legitimately appear under two modes for one task, and deleting it in
+      // the sidebar of one must not silently hide the other.
+      db.exec(`
+        CREATE TABLE session_deletions (
+          id              TEXT PRIMARY KEY,
+          task_id         TEXT NOT NULL,
+          mode            TEXT NOT NULL,
+          conversation_id TEXT NOT NULL,
+          created_at      INTEGER NOT NULL,
+          FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        );
+        CREATE INDEX session_deletions_lookup
+          ON session_deletions (task_id, mode, conversation_id);
+      `)
+    }
+  },
+  {
+    version: 158,
+    up: (db) => {
+      // Resumability proof for a session.
+      //
+      // A provider writes its transcript at the FIRST TURN, not at startup:
+      // `claude --session-id <uuid>` boots, fires SessionStart, and writes
+      // NOTHING until someone submits a prompt. So between spawn and first turn
+      // the id exists in slay but not on disk, and `--resume <id>` can only
+      // answer "No conversation found with session ID:".
+      //
+      // That window used to be seconds. The warm pool made it unbounded: an
+      // agent is pre-booted per (runner, project) and can sit turn-less for
+      // hours before a task adopts it — at which point its id became the task's
+      // resume target. Restarting the terminal then failed, and the recovery
+      // path RESET the task, which cut off the conversation that was actually
+      // doing the work. Measured on one day of this machine: 186 of 214 minted
+      // ids had no transcript, and every one of them had taken zero turns.
+      //
+      // A SEPARATE append-only table, not a column on `agent_sessions` — the same
+      // shape `session_resets` (v147) and `session_deletions` (v157) already use
+      // for facts about a session that arrive later than the session row. It also
+      // keeps the two table-rebuild migrations (v151/v156) and their column-drift
+      // guard untouched: a fact recorded elsewhere cannot be dropped by a rebuild
+      // that enumerates columns.
+      //
+      // Keyed by conversation id, because that is the only identifier shared by a
+      // task-spawned agent and a warm-pool one (whose env was fixed before any
+      // task existed) — and it is what the provider's own hook payload carries.
+      //
+      // Backfill marks every existing session proven, so an upgrade changes
+      // nothing for tasks that already resume correctly; only sessions spawned
+      // after this migration can be born unproven.
+      db.exec(`
+        CREATE TABLE session_turns (
+          conversation_id TEXT PRIMARY KEY,
+          first_turn_at   INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO session_turns (conversation_id, first_turn_at)
+        SELECT conversation_id, coalesce(bound_at, created_at)
+          FROM agent_sessions
+         WHERE conversation_id IS NOT NULL
+           AND origin <> 'pending-spawn';
+      `)
+    }
+  },
+  {
+    version: 159,
+    up: (db) => {
+      // Reverse lookup: which project contains this directory?
+      //
+      // `runner_project_checkouts` (v149) already models "where each runner has
+      // each project checked out", and this is the change that starts using it.
+      // The index serves `resolveProjectByPath`, which is how `slay` turns the
+      // directory it is running in into a project — a scan per invocation would
+      // be the one hot path on this table.
+      db.exec(`
+        CREATE INDEX idx_runner_checkouts_path ON runner_project_checkouts(root_path);
+      `)
+    }
+  },
+  {
+    version: 161,
+    up: (db) => {
+      // Who a runner belongs to.
+      //
+      // `runners.owner_user_id`: a runner process runs as exactly ONE OS account,
+      // so two SlayZone users sharing one runner share a filesystem, a credential
+      // set, and a process owner. Per-user subfolders inside it would be
+      // organisation, not isolation, and rotating credentials by time does not
+      // help — a long-running agent outlives the rotation. A shared machine is
+      // still fine; it just runs one runner per OS account, which is the unit that
+      // actually carries an identity.
+      //
+      // NULL = pre-existing / unclaimed, which every runner is today. Not
+      // backfilled: inventing an owner would be a claim about who a machine
+      // belongs to that nothing here knows.
+      db.exec(`
+        ALTER TABLE runners ADD COLUMN owner_user_id TEXT;
+      `)
+    }
+  },
+  {
+    version: 162,
+    up: (db) => {
+      // Who minted a join token, so the runner that redeems it can inherit an
+      // owner. A token is the only thing that crosses from "a user clicked mint"
+      // to "a machine enrolled", so it is the only place the attribution can be
+      // carried without asking the runner to assert an identity it cannot prove.
+      //
+      // NULL on every existing token and on any mint from an unauthenticated
+      // loopback hub, which is the normal local case — an unowned runner stays
+      // unowned rather than being attributed to a guess.
+      db.exec(`ALTER TABLE join_tokens ADD COLUMN minted_by_user_id TEXT;`)
+    }
+  },
+  {
+    version: 163,
+    up: (db) => {
+      // "Runner" was CI vocabulary — ephemeral, fungible, job-scoped — for a thing
+      // that holds your checkouts, your credentials and your ptys across restarts.
+      // The unit is a machine you own and keep, so it is a COMPUTER.
+      //
+      // Renames rather than a rebuild: SQLite's RENAME COLUMN rewrites the stored
+      // schema text, so `runner_project_checkouts`' composite PRIMARY KEY
+      // (runner_id, project_id) follows automatically, and RENAME TO carries the
+      // table's indexes. Nothing here declares a foreign key and no view or
+      // trigger references these tables, so there is no dependency to repair.
+      //
+      // `project_placements` rather than `..._checkouts`: with provisioning gone
+      // the row is not a checkout lifecycle, it is "this project sits at this path
+      // on this computer" — one placement per pair.
+      //
+      // The index cannot be renamed in place (SQLite has no RENAME INDEX), so it
+      // is dropped and recreated under the new name.
+      db.exec(`
+        ALTER TABLE runners RENAME TO computers;
+        ALTER TABLE runner_project_checkouts RENAME TO project_placements;
+
+        ALTER TABLE project_placements RENAME COLUMN runner_id TO computer_id;
+        ALTER TABLE join_tokens RENAME COLUMN runner_id TO computer_id;
+        ALTER TABLE tasks RENAME COLUMN runner_id TO computer_id;
+        ALTER TABLE projects RENAME COLUMN default_runner_id TO default_computer_id;
+
+        DROP INDEX IF EXISTS idx_runner_checkouts_path;
+        CREATE INDEX idx_project_placements_path ON project_placements(root_path);
+      `)
+    }
+  },
+  {
+    version: 164,
+    up: (db) => {
+      // A MACHINE is the physical box; a COMPUTER is one OS user's environment on
+      // it. Several computers share a machine — one per OS account — and this is
+      // what lets the UI group them.
+      //
+      // `host_id` is a MUTABLE ATTRIBUTE, not an identity. A box's id is discovered
+      // from a world-writable file (see computer/host-id.ts) and a computer can
+      // ADOPT a peer's value, so it changes under you. Two consequences the schema
+      // encodes deliberately:
+      //
+      //   - no foreign key, and no computer ever stores a machine id. Association
+      //     is a value join on `host_id`. A merge DELETES the losing machine row,
+      //     so any stored reference to it would dangle.
+      //   - `host_id` is UNIQUE on machines, which makes "two machine rows for one
+      //     box" unrepresentable going forward. The merge case arises only when a
+      //     computer flips onto an id another row already holds.
+      //
+      // `name` NULL = never named. A named machine is the only thing here a user
+      // authored, which is why the merge rule keeps the named row.
+      db.exec(`
+        CREATE TABLE machines (
+          id         TEXT PRIMARY KEY,
+          host_id    TEXT NOT NULL UNIQUE,
+          name       TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        ALTER TABLE computers ADD COLUMN host_id TEXT;
+        CREATE INDEX idx_computers_host_id ON computers(host_id);
+      `)
+    }
+  },
+  {
+    version: 165,
+    up: (db) => {
+      // Private by default — but only for a computer that HAS an owner.
+      //
+      // An unowned computer stays visible to every authenticated user. Hiding it
+      // would strand every existing install behind a claim nobody knows to
+      // perform: `owner_user_id` is NULL on every row today (v161 deliberately did
+      // not backfill, because inventing an owner is a claim about whose machine it
+      // is that nothing here knows). `computers.claim` is how a NULL becomes a
+      // real owner.
+      //
+      // `visibility` only means anything once owned:
+      //   private — owner + explicit grants + hub admins
+      //   hub     — every authenticated user on this hub
+      //   shared  — reserved for cross-hub sharing; treated as `private` for now
+      db.exec(`
+        ALTER TABLE computers ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private';
+
+        CREATE TABLE computer_grants (
+          computer_id        TEXT NOT NULL,
+          user_id            TEXT NOT NULL,
+          role               TEXT NOT NULL DEFAULT 'use',
+          granted_by_user_id TEXT,
+          created_at         INTEGER NOT NULL,
+          PRIMARY KEY (computer_id, user_id)
+        );
+        CREATE INDEX idx_computer_grants_user ON computer_grants(user_id);
+      `)
+    }
+  },
+  {
+    version: 166,
+    up: (db) => {
+      // A scoped browser session, distinct from a better-auth session.
+      //
+      // WHY A SEPARATE TABLE, in the APP db rather than hub-auth's own
+      // better-auth sqlite file: hub-auth's schema is better-auth's to own, and
+      // this concept — "a narrower credential than the account it was minted
+      // from" — has no equivalent there. `user_id` is a LOOSE reference to a
+      // better-auth user id, not a foreign key: this app db has no `users`
+      // table of its own (that lives in hub-auth's separate file), so nothing
+      // here can enforce referential integrity across the two databases. A row
+      // whose user was later removed via `slay hub users rm` simply verifies
+      // against nothing (the login flow re-checks the user still exists) and
+      // is harmless dead weight until it expires or is revoked.
+      //
+      // `token_hash`, never the raw token — this table is queried on every
+      // `/trpc` connect and every `/api/*` request from a browser, so the
+      // token itself must never be recoverable from a DB read the way a
+      // stolen backup or a compromised replica could produce one.
+      //
+      // `scopes_json` is a JSON array of `Scope` values (see
+      // `@slayzone/transport/server`'s scopes.ts) — TEXT, not a join table,
+      // because the vocabulary is deliberately tiny and closed; a session's
+      // scopes never need to be queried independently of the session itself.
+      //
+      // `revoked_at` gives real server-side logout: `expires_at` alone would
+      // leave a stolen token valid until it naturally expired.
+      db.exec(`
+        CREATE TABLE web_sessions (
+          id           TEXT PRIMARY KEY,
+          user_id      TEXT NOT NULL,
+          token_hash   TEXT NOT NULL UNIQUE,
+          scopes_json  TEXT NOT NULL,
+          label        TEXT,
+          created_at   INTEGER NOT NULL,
+          expires_at   INTEGER NOT NULL,
+          revoked_at   INTEGER
+        );
+        CREATE INDEX idx_web_sessions_user ON web_sessions(user_id);
+      `)
+    }
+  },
+  {
+    version: 167,
+    up: (db) => {
+      // Per-artifact forced color scheme for HTML preview. NULL = no
+      // override (follow whatever `prefers-color-scheme` resolves to inside
+      // the iframe) — same "override only when it differs from the default"
+      // shape as zoom_pct (v152) / readability_override / width_override
+      // (v109).
+      db.exec(`ALTER TABLE task_artifacts ADD COLUMN html_theme_override TEXT DEFAULT NULL;`)
+    }
+  }
+]
+
+export const LATEST_MIGRATION_VERSION = migrations[migrations.length - 1].version
+
+export function runMigrations(db: Database.Database): void {
+  const currentVersion = db.pragma('user_version', { simple: true }) as number
+
+  for (const migration of migrations) {
+    if (migration.version > currentVersion) {
+      db.transaction(() => {
+        migration.up(db)
+        db.pragma(`user_version = ${migration.version}`)
+      })()
+      console.log(`Migration ${migration.version} applied`)
+    }
+  }
+}

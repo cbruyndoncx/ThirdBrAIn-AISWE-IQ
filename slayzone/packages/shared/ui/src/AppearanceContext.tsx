@@ -1,0 +1,102 @@
+import { createContext, useContext } from 'react'
+
+export interface BrowserDeviceDefaults {
+  desktop: { enabled: boolean; width: number; height: number }
+  tablet: { enabled: boolean; width: number; height: number }
+  mobile: { enabled: boolean; width: number; height: number }
+}
+
+export interface AppearanceSettings {
+  terminalFontSize: number
+  editorFontSize: number
+  reduceMotion: boolean
+  colorTintsEnabled: boolean
+  // Editor
+  editorWordWrap: 'on' | 'off'
+  editorTabSize: 2 | 4
+  editorIndentTabs: boolean
+  editorRenderWhitespace: 'none' | 'all'
+  // Terminal
+  terminalFontFamily: string
+  terminalScrollback: number
+  /**
+   * Force the DOM-based xterm renderer instead of the WebGL renderer.
+   *
+   * Default false (WebGL on). Set true to permanently opt out of WebGL for
+   * users repeatedly hit by atlas-scramble / context-loss issues — bypasses
+   * the auto-detector's session-scoped fallback so the DOM renderer is
+   * picked on every fresh terminal in this session and every future one.
+   */
+  terminalForceCompatibilityRenderer: boolean
+  // Diff
+  diffContextLines: '0' | '3' | '5' | 'all'
+  diffIgnoreWhitespace: boolean
+  diffContinuousFlow: boolean
+  diffTreeCollapsed: boolean
+  diffSideBySide: boolean
+  diffWrap: boolean
+  // Browser
+  browserDefaultZoom: number
+  browserDefaultUrl: string
+  browserDeviceDefaults: BrowserDeviceDefaults | null
+  // Editor
+  notesFontFamily: 'sans' | 'mono'
+  notesReadability: 'compact' | 'normal'
+  notesWidth: 'narrow' | 'wide'
+  notesCheckedHighlight: boolean
+  notesShowToolbar: boolean
+  notesSpellcheck: boolean
+  // Chat
+  chatWidth: 'narrow' | 'wide'
+  chatShowTools: boolean
+  chatShowLastMessageTools: boolean
+  chatFileEditsOpenByDefault: boolean
+  chatShowMessageMeta: boolean
+  // Markdown
+  editorMarkdownViewMode: 'rich' | 'split' | 'code'
+  editorMinimapEnabled: boolean
+  editorTocEnabled: boolean
+}
+
+export const appearanceDefaults: AppearanceSettings = {
+  terminalFontSize: 13,
+  editorFontSize: 13,
+  reduceMotion: false,
+  colorTintsEnabled: true,
+  editorWordWrap: 'off',
+  editorTabSize: 2,
+  editorIndentTabs: false,
+  editorRenderWhitespace: 'none',
+  terminalFontFamily: 'Menlo, Monaco, "Courier New", monospace',
+  terminalScrollback: 2000,
+  terminalForceCompatibilityRenderer: false,
+  diffContextLines: '3',
+  diffIgnoreWhitespace: false,
+  diffContinuousFlow: false,
+  diffTreeCollapsed: false,
+  diffSideBySide: false,
+  diffWrap: false,
+  browserDefaultZoom: 100,
+  browserDefaultUrl: '',
+  browserDeviceDefaults: null,
+  notesFontFamily: 'sans',
+  notesReadability: 'normal',
+  notesWidth: 'narrow',
+  notesCheckedHighlight: false,
+  notesShowToolbar: false,
+  notesSpellcheck: true,
+  chatWidth: 'narrow',
+  chatShowTools: true,
+  chatShowLastMessageTools: true,
+  chatFileEditsOpenByDefault: true,
+  chatShowMessageMeta: true,
+  editorMarkdownViewMode: 'rich',
+  editorMinimapEnabled: false,
+  editorTocEnabled: false
+}
+
+export const AppearanceContext = createContext<AppearanceSettings>(appearanceDefaults)
+
+export function useAppearance(): AppearanceSettings {
+  return useContext(AppearanceContext)
+}

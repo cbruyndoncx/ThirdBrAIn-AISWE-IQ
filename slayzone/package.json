@@ -1,0 +1,98 @@
+{
+  "name": "slayzone-monorepo",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "electron",
+      "esbuild",
+      "node-pty",
+      "posix"
+    ],
+    "overrides": {
+      "zod": "^4",
+      "d3-shape>d3-path": "^3.1.0",
+      "node-abi": "^4.28.0"
+    },
+    "patchedDependencies": {
+      "@convex-dev/auth@0.0.90": "patches/@convex-dev__auth@0.0.90.patch",
+      "posix@4.2.0": "patches/posix@4.2.0.patch"
+    }
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js",
+    "dev": "pnpm --filter @slayzone/app dev",
+    "dev:protocol": "pnpm --filter @slayzone/app dev:protocol",
+    "dev:chromium": "pnpm build:chromium && pnpm run:chromium",
+    "build:chromium": "pnpm --filter @slayzone/hub build && pnpm --filter @slayzone/chromium-shell build",
+    "run:chromium": "scripts/chromium/run.sh -- about:blank",
+    "generate-icons": "node scripts/generate-icons.js",
+    "patch-electron-name": "node scripts/patch-electron-name.js",
+    "reset-mac-icon-cache": "bash scripts/reset-mac-icon-cache.sh",
+    "build": "pnpm --filter @slayzone/app build",
+    "build:mac": "pnpm --filter @slayzone/app build:mac",
+    "build:win": "pnpm --filter @slayzone/app build:win",
+    "build:win:x64": "pnpm --filter @slayzone/app build:win:x64",
+    "build:win:arm64": "pnpm --filter @slayzone/app build:win:arm64",
+    "build:win:all": "pnpm --filter @slayzone/app build:win:all",
+    "build:linux": "pnpm --filter @slayzone/app build:linux",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm lint:versions && pnpm lint:theme && pnpm lint:server-boundary && pnpm lint:trpc-deps && pnpm lint:window-api && pnpm lint:e2e-guardrails && pnpm lint:format && pnpm lint:biome && pnpm lint:eslint",
+    "lint:versions": "node scripts/sync-versions.mjs --check",
+    "sync-versions": "node scripts/sync-versions.mjs",
+    "lint:server-boundary": "bash scripts/check-server-electron-free.sh",
+    "lint:trpc-deps": "bash scripts/check-trpc-stable-deps.sh",
+    "lint:window-api": "bash scripts/check-renderer-window-api.sh",
+    "lint:e2e-guardrails": "node scripts/check-e2e-guardrails.mjs",
+    "lint:deps": "knip --include dependencies,unlisted",
+    "lint:biome": "biome lint .",
+    "lint:format": "NODE_OPTIONS=--max-old-space-size=8192 biome format .",
+    "lint:eslint": "eslint . --max-warnings=301",
+    "lint:theme": "bash scripts/lint-theme.sh",
+    "format": "biome format --write .",
+    "check": "biome check --write .",
+    "test:unit": "bash packages/shared/test-utils/run-all.sh",
+    "test:chat:perf": "npx tsx packages/domains/task-terminals/src/client/chat/__perf__/baseline.test.ts",
+    "test:e2e": "pnpm --filter @slayzone/app test:e2e",
+    "test:e2e:browser-modified-link": "npx playwright test --config packages/apps/app/playwright.config.ts packages/apps/app/e2e/24-browser-panel.spec.ts -g \"prefilled task draft\" --repeat-each=5",
+    "test:e2e:loop": "pnpm --filter @slayzone/app test:e2e:loop",
+    "test:e2e:loop:stop": "pnpm --filter @slayzone/app test:e2e:loop:stop",
+    "changelog": "changelogen --output CHANGELOG.md --hideAuthorEmail",
+    "release:patch": "pnpm --filter @slayzone/app exec npm version patch && pnpm release:tag",
+    "release:minor": "pnpm --filter @slayzone/app exec npm version minor && pnpm release:tag",
+    "release:major": "pnpm --filter @slayzone/app exec npm version major && pnpm release:tag",
+    "release:tag": "bash scripts/tag-release.sh",
+    "release:beta": "node scripts/release/cut-beta.mjs",
+    "build:website": "pnpm --filter @slayzone/website build",
+    "dev:website": "pnpm --filter @slayzone/website dev"
+  },
+  "devDependencies": {
+    "@auth/core": "^0.37.4",
+    "@biomejs/biome": "^2.4.15",
+    "@convex-dev/auth": "^0.0.90",
+    "@types/node": "^22.19.7",
+    "@typescript/native-preview": "beta",
+    "changelogen": "^0.6.2",
+    "convex": "^1.32.0",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "knip": "^5.83.1",
+    "png-to-ico": "^3.0.1",
+    "sharp": "^0.34.5",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.59.3"
+  },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "version": "0.36.0-beta.17",
+  "packageManager": "pnpm@10.30.3+sha512.c961d1e0a2d8e354ecaa5166b822516668b7f44cb5bd95122d590dd81922f606f5473b6d23ec4a5be05e7fcd18e8488d47d978bbe981872f1145d06e9a740017",
+  "dependencies": {
+    "@tabler/icons-react": "^3.40.0"
+  }
+}

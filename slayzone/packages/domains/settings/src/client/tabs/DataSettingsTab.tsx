@@ -1,0 +1,162 @@
+import { useState } from 'react'
+import { useQuery, useMutation } from '@tanstack/react-query'
+import { useTRPC } from '@slayzone/transport/client'
+import { FolderOpen } from 'lucide-react'
+import {
+  Button,
+  IconButton,
+  Input,
+  Label,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  toast
+} from '@slayzone/ui'
+import { WorkspaceDirPicker } from '@slayzone/file-editor/client/WorkspaceDirPicker'
+import { SettingsTabIntro } from './SettingsTabIntro'
+
+export function DataSettingsTab() {
+  const trpc = useTRPC()
+  const projectsQuery = useQuery(trpc.projects.list.queryOptions())
+  const projects = projectsQuery.data ?? []
+  const [exportProjectId, setExportProjectId] = useState('')
+  const [importedProjects, setImportedProjects] = useState<
+    Array<{ id: string; name: string; path: string }>
+  >([])
+  // One picker for the whole list — which row it is filling. An imported project
+  // has no computer binding yet, so it browses the connected default computer, which
+  // is also where its tasks will run until someone binds it elsewhere.
+  const [browsingIndex, setBrowsingIndex] = useState<number | null>(null)
+
+  const exportProjectMutation = useMutation(trpc.app.exportImport.exportProject.mutationOptions())
+  const importMutation = useMutation(trpc.app.exportImport.import.mutationOptions())
+  const updateProjectMutation = useMutation(trpc.projects.update.mutationOptions())
+
+  return (
+    <div className="space-y-6">
+      <SettingsTabIntro
+        title="Import & Export"
+        description="Back up your local data or migrate tasks between projects. Data is exported as a .slay file for portability."
+      />
+      <div className="space-y-3">
+        <Label className="text-base font-semibold">Export</Label>
+        <div className="flex items-center gap-3">
+          <Select value={exportProjectId} onValueChange={setExportProjectId}>
+            <SelectTrigger className="w-full max-w-sm">
+              <SelectValue placeholder="Select project" />
+            </SelectTrigger>
+            <SelectContent>
+              {projects.map((p) => (
+                <SelectItem key={p.id} value={p.id}>
+                  {p.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button
+            variant="outline"
+            disabled={!exportProjectId}
+            onClick={async () => {
+              const result = await exportProjectMutation.mutateAsync({ projectId: exportProjectId })
+              if (result.canceled) return
+              if (result.success) {
+                toast.success(`Exported to ${result.path}`)
+              } else toast.error(`Export failed: ${result.error}`)
+            }}
+          >
+            Export Project
+          </Button>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        <Label className="text-base font-semibold">Import</Label>
+        <Button
+          variant="outline"
+          onClick={async () => {
+            const result = await importMutation.mutateAsync()
+            if (result.canceled) return
+            if (result.success) {
+              toast.success(
+                `Imported ${result.projectCount} project(s), ${result.taskCount} task(s)`
+              )
+              if (result.importedProjects?.length) {
+                setImportedProjects(result.importedProjects.map((p) => ({ ...p, path: '' })))
+              }
+            } else {
+              toast.error(`Import failed: ${result.error}`)
+            }
+          }}
+        >
+          Import .slay
+        </Button>
+      </div>
+
+      {importedProjects.length > 0 && (
+        <div className="space-y-3">
+          <Label className="text-base font-semibold">Set Project Paths</Label>
+          {importedProjects.map((p, i) => (
+            <div key={p.id} className="space-y-1">
+              <span className="text-sm font-medium">{p.name}</span>
+              <div className="flex items-center gap-2">
+                <Input
+                  className="flex-1 max-w-lg"
+                  placeholder="/path/to/repo"
+                  value={p.path}
+                  onChange={(e) => {
+                    setImportedProjects((prev) =>
+                      prev.map((proj, j) => (j === i ? { ...proj, path: e.target.value } : proj))
+                    )
+                  }}
+                />
+                <IconButton
+                  type="button"
+                  variant="outline"
+                  aria-label="Browse folder"
+                  onClick={() => setBrowsingIndex(i)}
+                >
+                  <FolderOpen className="size-4" />
+                </IconButton>
+              </div>
+            </div>
+          ))}
+          <WorkspaceDirPicker
+            open={browsingIndex !== null}
+            onOpenChange={(open) => !open && setBrowsingIndex(null)}
+            onSelect={(picked) =>
+              setImportedProjects((prev) =>
+                prev.map((proj, j) => (j === browsingIndex ? { ...proj, path: picked } : proj))
+              )
+            }
+            target={{ projectId: importedProjects[browsingIndex ?? 0]?.id }}
+            title="Select project directory"
+            defaultPath={
+              browsingIndex !== null ? (importedProjects[browsingIndex]?.path ?? null) : null
+            }
+          />
+          <div className="flex gap-2">
+            <Button
+              onClick={async () => {
+                for (const p of importedProjects) {
+                  if (p.path.trim()) {
+                    await updateProjectMutation.mutateAsync({ id: p.id, path: p.path.trim() })
+                  }
+                }
+                const saved = importedProjects.filter((p) => p.path.trim()).length
+                if (saved > 0) toast.success(`Set paths for ${saved} project(s)`)
+                setImportedProjects([])
+              }}
+            >
+              Save Paths
+            </Button>
+            <Button variant="ghost" onClick={() => setImportedProjects([])}>
+              Skip
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

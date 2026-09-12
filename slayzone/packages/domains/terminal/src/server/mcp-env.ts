@@ -1,0 +1,249 @@
+import type { SlayzoneDb } from '@slayzone/platform'
+import { getSlayzoneReleaseChannel, getSlayzoneHomeDir } from '@slayzone/platform'
+import { readBootstrapOwner } from '@slayzone/platform/hub-owner-file'
+import { HOOK_SUPPORTED_AGENT_IDS, type AgentId, type TerminalMode } from '../shared'
+
+/** Path the agent lifecycle hook (notify.sh) POSTs to — see agent-hook.ts. */
+export const AGENT_HOOK_PATH = '/api/agent-hook'
+
+/**
+ * A resolved REMOTE hub target for a task whose PTY runs on a computer
+ * (hub/computer split, Model A). Built by the caller (pty-manager, via an injected
+ * provider) and passed IN so `buildMcpEnv` stays a pure function of its inputs.
+ *
+ * `null`/absent (today's only path, and every local spawn) => the loopback env
+ * below is byte-identical to before this seam existed.
+ */
+export interface RemoteMcpEnv {
+  /** Non-empty computer id this session's OS process spawns on. */
+  computerId: string
+  /**
+   * The hub's externally-reachable HTTP base URL (e.g. `https://hub:8443`), no
+   * trailing slash. The `slay` CLI inside the remote pty dials THIS to reach the
+   * hub's REST surface (loopback resolves on the computer machine, where no hub
+   * runs). The provider MUST return `null` rather than an empty/invalid base.
+   *
+   * NOTE: the AGENT HOOK no longer uses this. The hook posts to the COMPUTER's own
+   * loopback `/api/agent-hook`, and the computer relays to the hub over its
+   * authenticated ws channel (so the agent env is byte-identical local vs
+   * remote and carries no per-agent hub bearer). This field remains only for the
+   * `slay` CLI's hub REST access.
+   */
+  hubBaseUrl: string
+}
+
+/**
+ * Resolves the remote hub target (base URL) for a session that spawns on a
+ * computer. Injected by the composition root; UNSET by default (so
+ * `resolveRemoteMcpEnv` short-circuits to `null` and every spawn keeps today's
+ * loopback env). Kept a plain function so `buildMcpEnv` itself stays a pure
+ * function of its inputs — the impurity (read the hub URL) lives behind this
+ * seam.
+ */
+export type RemoteMcpEnvProvider = (args: {
+  taskId: string | undefined
+  computerId: string
+  mode?: TerminalMode
+}) => Promise<RemoteMcpEnv | null> | RemoteMcpEnv | null
+
+/**
+ * Resolve the remote target for a spawn: `null` for a hub-local session
+ * (`computerId == null` — today's only path) or when no provider is wired. Only a
+ * `computerId != null` session with a provider mints/reads a target. Never throws
+ * — a provider error degrades to `null` (spawn continues; the remote backend's
+ * own routing surfaces a hard failure if the computer is truly unreachable).
+ */
+export async function resolveRemoteMcpEnv(
+  provider: RemoteMcpEnvProvider | null | undefined,
+  args: { taskId: string | undefined; computerId: string | null; mode?: TerminalMode }
+): Promise<RemoteMcpEnv | null> {
+  if (args.computerId == null || !provider) return null
+  try {
+    const resolved = await provider({
+      taskId: args.taskId,
+      computerId: args.computerId,
+      mode: args.mode
+    })
+    if (!resolved) return null
+    // Enforce the provider contract defensively: a blank base URL would yield an
+    // empty hub target + a relative hook URL (both broken on the computer), so
+    // treat it as "no valid remote target" rather than emit a poisoned env.
+    if (resolved.hubBaseUrl.trim() === '') return null
+    return resolved
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Build MCP env vars for AI agent subprocesses (PTY shells + chat-mode SDK spawns).
+ * Both transports must inject the same set so `slay` CLI and MCP tools resolve the
+ * current task identically. Keep PTY + chat in sync by routing through this helper.
+ *
+ * When `mode` is supplied AND the agent supports hook lifecycle events
+ * (claude-code initially; see HOOK_SUPPORTED_AGENT_IDS), also injects:
+ *   SLAYZONE_AGENT_HOOK_URL  - URL for POST /api/agent-hook. LOCAL only: the
+ *                              loopback URL. On a REMOTE computer it is NOT set
+ *                              here — the computer overlays its OWN loopback URL at
+ *                              spawn (see computer handlers/pty.ts) and relays to
+ *                              the hub over its ws channel, so the agent env is
+ *                              byte-identical local vs remote.
+ *   SLAYZONE_AGENT_ID        - the mode itself (passed back in the hook envelope)
+ *   SLAYZONE_ROOT            - resolved on-disk anchor, set for EVERY spawn (not
+ *                              just hook-capable ones): the `slay` CLI inside the
+ *                              child finds the DB directly in `<ROOT>` (same one
+ *                              the hub uses). See the note at the assignment for
+ *                              why the child can no longer derive this itself.
+ *   SLAYZONE_AGENT_HOOK_CONTEXT
+ *                            - an OPAQUE JSON blob carrying every identity field
+ *                              the server needs to attribute a hook (taskId,
+ *                              slaySessionId, projectId, agentId, channel). The
+ *                              benign `notify.sh` forwards it VERBATIM without
+ *                              naming any field — so adding a new identity field
+ *                              later touches only this function + the server,
+ *                              never the shared shell script (the file that rots
+ *                              when an older channel clobbers it). Pairs with
+ *                              `SLAYZONE_AGENT_HOOK_URL`: same subsystem prefix,
+ *                              one says WHERE to post, one says WHO is posting.
+ *                              (Renamed from `SLAYZONE_HOOK_CONTEXT`; notify.sh
+ *                              still reads the old name as a fallback so an
+ *                              older release channel's app can feed a newer
+ *                              shared script — see notify.sh v4.)
+ *
+ * `remote` (a task's pty routed to a computer) only suppresses the loopback hook
+ * URL (the computer supplies it). It injects NO hub URL and NO bearer: the hook
+ * posts to computer loopback, and the `slay` CLI reaches the hub via its own
+ * `cli-hub-target.json` (see apps/cli/hub-config.ts). With no `remote` (the default)
+ * nothing about the local env changes.
+ *
+ * `SLAYZONE_HUB_ADDRESS` IS injected for a local spawn — this hub's own loopback
+ * address. It is infra-scoped, so sanitizeSpawnEnv strips whatever the parent held
+ * and this re-adds the correct per-spawn value, which is exactly the contract
+ * `buildBaseEnv` describes ("per-spawn identity is re-added afterward via mcpEnv").
+ *
+ * This used to say the CLI resolved the port from `settings.server_port` in the DB.
+ * That contract is dead: the CLI stopped reading that row, so a `slay` inside a pty
+ * had NO pinned address and fell through to probing the fixed per-channel port —
+ * which answers for whichever install happens to hold it. Under e2e that is the
+ * developer's live app, so a test could mutate real data. Telling the child its
+ * address is the fix; `probeFixedPort` additionally verifies the responder's root
+ * (apps/cli/local-hub.ts) so the derive path fails closed rather than guessing.
+ */
+export async function buildMcpEnv(
+  db: SlayzoneDb | null | undefined,
+  taskId: string | undefined,
+  mode?: TerminalMode,
+  /** Runtime session id for a pre-warmed POOLED agent (plans/agent-sessions.md
+   *  slice 4/B). Such an agent has NO task at launch, so `SLAYZONE_TASK_ID` is
+   *  absent; the `slay` CLI + the conversation hook fall back to this id to
+   *  resolve the task once the pool binds the session. Harmless to set for a
+   *  normal agent too (the task env wins), but only pooled spawns pass it. */
+  sessionId?: string,
+  /** Explicit project id — set when the caller already knows it without a task
+   *  (the warm pool spawns per-project, before any task exists). Takes priority
+   *  over the task-derived lookup so `SLAYZONE_PROJECT_ID` is always present,
+   *  regardless of whether a task is bound yet. */
+  projectId?: string,
+  /** Resolved remote hub target when this session runs on a computer.
+   *  Absent/`null` => local loopback env (byte-identical to before the seam). */
+  remote?: RemoteMcpEnv | null
+): Promise<Record<string, string>> {
+  const env: Record<string, string> = {}
+  if (taskId) env.SLAYZONE_TASK_ID = taskId
+  const resolvedProjectId =
+    projectId ??
+    (taskId
+      ? (
+          await db?.get<{ project_id?: string }>('SELECT project_id FROM tasks WHERE id = ?', [
+            taskId
+          ])
+        )?.project_id
+      : undefined)
+  if (resolvedProjectId) env.SLAYZONE_PROJECT_ID = resolvedProjectId
+  if (sessionId) env.SLAYZONE_SESSION_ID = sessionId
+
+  const hookCapable = Boolean(mode && HOOK_SUPPORTED_AGENT_IDS.has(mode as AgentId))
+
+  // On-disk anchor for EVERY spawn, hook-capable or not — this hub's own root,
+  // which the `slay` CLI inside the child uses to find the DB (post-flattening
+  // the DB sits directly in `<ROOT>`, no `storage/` level).
+  //
+  // Unconditional on purpose. The hub is the only process that knows where its
+  // state lives, and a child can no longer derive it: with the desktop app's
+  // supervised roles channel-scoped (`~/.slayzone/<dev|stable>/hub`), the old
+  // "everyone falls through to ~/.slayzone" assumption is dead. Worse, a pty
+  // routed through the co-located LOCAL COMPUTER inherits that computer's own
+  // (different, role-scoped) SLAYZONE_ROOT through the base env — the manifest
+  // tags the var `global`, so sanitizeSpawnEnv keeps it. Setting it here means
+  // the hub's value always overrides that inherited one at the spawn boundary
+  // (the computer applies these overrides last), so a plain shell resolves the same
+  // DB an agent does instead of pointing at the computer's credential dir.
+  env.SLAYZONE_ROOT = getSlayzoneHomeDir()
+
+  // The opaque identity blob the benign notify.sh forwards verbatim. Built ONLY
+  // for hook-capable spawns (it rides the hook env). Carries every field the
+  // server needs to resolve/attribute a hook — the per-field list lives HERE, in
+  // TypeScript, never in the shared shell script (which is what rotted). `v` is
+  // the envelope version; `releaseChannel` is attribution-only (which release
+  // channel fired the hook), so a future cross-release-channel clobber is
+  // visible in Diagnostics.
+  function setHookIdentity(): void {
+    env.SLAYZONE_AGENT_ID = mode as string
+    const ctx: Record<string, unknown> = {
+      v: 1,
+      agentId: mode,
+      releaseChannel: getSlayzoneReleaseChannel()
+    }
+    if (taskId) ctx.taskId = taskId
+    if (sessionId) ctx.slaySessionId = sessionId
+    if (resolvedProjectId) ctx.projectId = resolvedProjectId
+    env.SLAYZONE_AGENT_HOOK_CONTEXT = JSON.stringify(ctx)
+  }
+
+  if (remote) {
+    // Remote computer: the agent posts to the COMPUTER's own loopback /api/agent-hook
+    // (the computer overlays SLAYZONE_AGENT_HOOK_URL at spawn and relays to the hub
+    // over its ws channel). So we set NO hub URL, NO bearer, and NO hook URL here
+    // — the identity env is byte-identical to a local spawn. `remote.hubBaseUrl`
+    // is used only by the `slay` CLI's own cli-hub-target.json path, not the hook.
+    if (hookCapable) setHookIdentity()
+    return env
+  }
+
+  // Local (hub-local — today's only path): loopback.
+  const serverPort = (globalThis as Record<string, unknown>).__serverPort as number | undefined
+
+  if (serverPort) {
+    // Tell every child WHICH app it belongs to — plain shells included, not just
+    // hook-capable agents: `slay` is run by hand in a terminal far more often than
+    // by an agent, and an unpinned `slay` is precisely the one that goes probing.
+    // Authority only (host:port), per the env naming rules — the scheme derives
+    // from SLAYZONE_MODE, and this hub is loopback.
+    env.SLAYZONE_HUB_ADDRESS = `127.0.0.1:${serverPort}`
+
+    // A standalone hub requires auth from every caller now, including one on this
+    // same box (`hubAuthRequired = !supervised` in server.ts) — so an in-task
+    // `slay`, or the CLI a hook-capable agent shells out to, needs a bearer to do
+    // anything. The hub's own bootstrap-owner file is that credential: it is a
+    // real user session, provisioned specifically so a co-located caller is never
+    // locked out (see bootstrap-owner.ts). Reusing SLAYZONE_HUB_TOKEN means the
+    // CLI's EXISTING env-var resolution (hub-config.ts, checked before discovery)
+    // picks it up with no new code path — and the var is already tagged `secret`
+    // in ENV_MANIFEST, so sanitizeSpawnEnv strips any inherited copy first.
+    //
+    // Absent on a supervised hub: no auth is required there, and there is no
+    // owner file to read (ensureBootstrapOwner never runs for one) — so this
+    // block is a no-op and every existing supervised spawn is unchanged.
+    if (process.env.SLAYZONE_SUPERVISED !== '1') {
+      const owner = await readBootstrapOwner(getSlayzoneHomeDir())
+      if (owner?.token) env.SLAYZONE_HUB_TOKEN = owner.token
+    }
+  }
+
+  if (serverPort && hookCapable) {
+    env.SLAYZONE_AGENT_HOOK_URL = `http://127.0.0.1:${serverPort}${AGENT_HOOK_PATH}`
+    setHookIdentity()
+  }
+
+  return env
+}

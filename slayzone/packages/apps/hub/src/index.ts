@@ -1,0 +1,35 @@
+import type { SlayzoneDb } from '@slayzone/platform'
+
+export type StartServerConfig = {
+  /** Override the derived `<ROOT>/storage` data root. Defaults to ensureDataRoot(). */
+  storeDir?: string
+  /** Override the port from SLAYZONE_HUB_ADDRESS. 0 = OS-assigned. Defaults to env-or-0. */
+  port?: number
+  /** Override the host from SLAYZONE_HUB_ADDRESS. Defaults to 127.0.0.1. */
+  host?: string
+  /** Unused: MCP + REST are muxed onto the single tRPC/health port. Kept for
+   *  config-shape compat until the supervisor's env contract drops it. */
+  mcpPort?: number
+  /**
+   * Pre-opened DB handle. When provided the side-car does NOT open its own
+   * (used by tests). Production passes undefined → db.ts opens its own.
+   */
+  db?: SlayzoneDb
+}
+
+export type ServerHandle = {
+  /** Bound port (resolved from listen()). */
+  port: number
+  /** Bound host. */
+  host: string
+  /** Resolved data root used to open the DB. */
+  dataRoot: string
+  /** Absolute path of the SQLite file the side-car opened. */
+  dbPath: string
+  /** True once /health responds 200 OK. */
+  healthCheck: () => Promise<boolean>
+  /** Graceful shutdown. Idempotent. */
+  stop: () => Promise<void>
+}
+
+export { startServer } from './server.js'

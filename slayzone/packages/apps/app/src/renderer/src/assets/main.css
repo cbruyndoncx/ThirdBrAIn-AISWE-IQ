@@ -1,0 +1,54 @@
+/*
+ * Electron app theme entry. Pulls the shared token/`.mk-doc`/utility layer
+ * from @slayzone/theme-css (packages/shared/theme-css) — the same file the
+ * Chromium fork's main.css and the web shell's main.css import. Everything
+ * below is genuinely Electron-app-specific: the xyflow stylesheet, the
+ * Tailwind typography plugin + legacy `.prose` task-list rules (GhMarkdown's
+ * GitHub PR view in the worktrees panel), and the frameless-window drag
+ * regions — none of which the fork or the web shell need.
+ */
+@import "@slayzone/theme-css";
+@import "@xyflow/react/dist/style.css";
+@plugin "@tailwindcss/typography";
+
+/* Window drag region for frameless window */
+.window-drag-region {
+  -webkit-app-region: drag;
+}
+
+.window-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* ==========================================================================
+   Legacy .prose task list styling (kept for GhMarkdown — the GitHub PR
+   renderer in the worktrees panel uses Tailwind prose with custom class
+   overrides and is intentionally outside the .mk-doc system).
+   ========================================================================== */
+
+.prose ul.contains-task-list {
+  list-style: none;
+  padding-left: 0;
+}
+.prose li.task-list-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  list-style: none;
+  margin-top: 0;
+  margin-bottom: 0;
+}
+.prose li.task-list-item input[type="checkbox"] {
+  flex-shrink: 0;
+  cursor: default;
+  margin-top: 0.3em;
+  accent-color: var(--color-primary);
+}
+.prose li.task-list-item > ul.contains-task-list {
+  flex: 1;
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+/* Milkdown frontmatter styles are inline in milkdown-frontmatter.ts
+   to avoid Tailwind prose overrides. */

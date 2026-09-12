@@ -1,0 +1,68 @@
+node_modules
+dist
+out
+.DS_Store
+.eslintcache
+*.log*
+*.tsbuildinfo
+bundle-report.html
+graph-visual-report.html
+logs/
+website/.astro-public/
+website/.astro/
+
+# Environment
+.env
+.env.local
+convex/.env.local
+
+# Auto Claude data directory
+.auto-claude/
+
+# Local Claude settings
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+
+# Superpowers specs and plans (local only)
+docs/superpowers/
+.plans/
+
+# Generated icon intermediates
+packages/apps/app/build/icon.iconset/
+
+# Playwright
+test-results/
+playwright-report/
+.e2e-userdata/
+.e2e-runtime/
+# Also match dirs moved aside for deletion (.e2e-runtime-old-*): the plain
+# pattern above missed them and 145k scratch files were committed once.
+.e2e-runtime-*/
+
+# Performance profiling artifacts
+*.cpuprofile
+
+# Working notes (scratch)
+working-notes/
+
+# Antigravity CLI local runtime symlinks
+.antigravitycli/
+
+# Chromium fork build tree (local only — binary + source, never committed)
+chromium/src/
+chromium/_gclient_src_*/
+chromium/.gclient
+chromium/.gclient_entries
+chromium/.gclient_previous_sync_commits
+chromium/.gcs_entries
+chromium/.cipd/
+chromium/.git_cache/
+chromium/out/
+
+# depot_tools — fetched via git clone, not vendored (see scripts/chromium/env.sh)
+tools/depot_tools/
+
+# Throwaway second-hub stores from the multi-hub e2e specs (mkdtemp under the
+# app package). Normally removed in teardown; they survive a run that dies.
+packages/apps/app/e2e-second-hub-*/

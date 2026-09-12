@@ -1,0 +1,33 @@
+{
+  "name": "@slayzone/search",
+  "version": "0.36.0-beta.17",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@slayzone/icons": "workspace:*",
+    "@slayzone/projects": "workspace:*",
+    "@slayzone/settings": "workspace:*",
+    "@slayzone/task": "workspace:*",
+    "@slayzone/telemetry": "workspace:*",
+    "@slayzone/transport": "workspace:*",
+    "@slayzone/ui": "workspace:*",
+    "fzf": "^0.5.2",
+    "lucide-react": "^0.562.0"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "typescript": "^5.9.3"
+  }
+}

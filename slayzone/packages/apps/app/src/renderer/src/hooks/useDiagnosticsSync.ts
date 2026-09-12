@@ -1,0 +1,74 @@
+import { useEffect, useRef } from 'react'
+import { recordDiagnosticsTimeline, updateDiagnosticsContext } from '@/lib/diagnosticsClient'
+import type { Tab, ActiveView } from '@slayzone/settings'
+
+export function useDiagnosticsSync({
+  tabs,
+  activeTabIndex,
+  activeView,
+  selectedProjectId,
+  projects,
+  tasks,
+  displayTaskCount,
+  projectPathMissing
+}: {
+  tabs: Tab[]
+  activeTabIndex: number
+  activeView: ActiveView
+  selectedProjectId: string
+  projects: { id: string; name: string }[]
+  tasks: { length: number }
+  displayTaskCount: number
+  projectPathMissing: boolean
+}): void {
+  useEffect(() => {
+    const activeTab = tabs[activeTabIndex]
+    updateDiagnosticsContext({
+      activeTabIndex,
+      activeTabType: activeTab?.type ?? 'unknown',
+      activeTaskId: activeTab?.type === 'task' ? activeTab.taskId : null,
+      openTaskTabs: tabs.filter((t) => t.type === 'task').length,
+      selectedProjectId,
+      selectedProjectName: projects.find((p) => p.id === selectedProjectId)?.name ?? null,
+      taskCount: tasks.length,
+      visibleTaskCount: displayTaskCount,
+      projectPathMissing
+    })
+  }, [
+    activeTabIndex,
+    tabs,
+    selectedProjectId,
+    projects,
+    tasks.length,
+    displayTaskCount,
+    projectPathMissing
+  ])
+
+  const previousProjectRef = useRef(selectedProjectId)
+  useEffect(() => {
+    if (previousProjectRef.current === selectedProjectId) return
+    recordDiagnosticsTimeline('project_changed', {
+      from: previousProjectRef.current,
+      to: selectedProjectId
+    })
+    previousProjectRef.current = selectedProjectId
+  }, [selectedProjectId])
+
+  const previousActiveTabRef = useRef('home')
+  useEffect(() => {
+    let nextTabKey: string
+    if (activeView !== 'tabs') {
+      nextTabKey = activeView
+    } else {
+      const activeTab = tabs[activeTabIndex]
+      nextTabKey = activeTab?.type === 'task' ? `task:${activeTab.taskId}` : 'home'
+    }
+    if (previousActiveTabRef.current === nextTabKey) return
+    recordDiagnosticsTimeline('tab_changed', {
+      from: previousActiveTabRef.current,
+      to: nextTabKey,
+      activeTabIndex
+    })
+    previousActiveTabRef.current = nextTabKey
+  }, [tabs, activeTabIndex, activeView])
+}

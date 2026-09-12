@@ -1,0 +1,78 @@
+import {
+  defaultEncodeSubmit,
+  type TerminalAdapter,
+  type PromptInfo,
+  type ActivityState,
+  type ErrorInfo
+} from './types'
+
+/**
+ * Adapter for raw terminal/shell and custom providers.
+ * Detection-only — command construction handled by template interpolation in pty-manager.
+ */
+export class ShellAdapter implements TerminalAdapter {
+  readonly mode = 'terminal' as const
+  readonly idleTimeoutMs = null // use default 60s
+  // Output-driven idle: a tail-style stream w/o a working pattern should keep
+  // the session "active". `detectActivity` only fires when a user-defined
+  // pattern matches, so we can't gate the idle clock on it. Opt out → every
+  // output chunk refreshes lastOutputTime (legacy behavior).
+  readonly transitionOnInput = false
+
+  constructor(
+    private readonly patterns?: {
+      working?: string | null
+      error?: string | null
+    }
+  ) {}
+
+  // Plain shell — \r is Enter; line discipline handles any LF-vs-CR translation.
+  encodeSubmit = defaultEncodeSubmit
+
+  private static stripAnsi(data: string): string {
+    return data
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+      .replace(/\x1b\[[?0-9;:]*[ -/]*[@-~]/g, '')
+      .replace(/\x1b[()][AB012]/g, '')
+  }
+
+  private static safeRegexTest(pattern: string | null | undefined, text: string): boolean {
+    if (!pattern) return false
+    try {
+      return new RegExp(pattern, 'm').test(text)
+    } catch (err) {
+      console.error(`[ShellAdapter] Invalid regex pattern "${pattern}":`, err)
+      return false
+    }
+  }
+
+  detectActivity(data: string, _current: ActivityState): ActivityState | null {
+    if (!this.patterns) return null
+    const stripped = ShellAdapter.stripAnsi(data)
+
+    if (ShellAdapter.safeRegexTest(this.patterns.working, stripped)) {
+      return 'working'
+    }
+
+    return null
+  }
+
+  detectError(data: string): ErrorInfo | null {
+    if (!this.patterns?.error) return null
+    const stripped = ShellAdapter.stripAnsi(data)
+
+    if (ShellAdapter.safeRegexTest(this.patterns.error, stripped)) {
+      return {
+        code: 'CUSTOM_ERROR',
+        message: 'Error detected by pattern',
+        recoverable: true
+      }
+    }
+
+    return null
+  }
+
+  detectPrompt(_data: string): PromptInfo | null {
+    return null
+  }
+}

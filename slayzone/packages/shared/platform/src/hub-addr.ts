@@ -1,0 +1,198 @@
+/**
+ * The hub-address grammar: parse, validate and compose `SLAYZONE_HUB_ADDRESS`.
+ *
+ * ONE CONCEPT, TWO ROLES. `SLAYZONE_HUB_ADDRESS` means "the hub's address" —
+ * `host[:port]`, no scheme, no path. Its VALUE differs by which app holds it:
+ *   - the hub        BINDS it       → {@link parseHubAddress} (host + port)
+ *   - computer / `slay` CONNECT to it → {@link hubUrlFromAddr} (full URL)
+ * Different processes holding different values under one name is intended, not a
+ * collision: `sanitizeSpawnEnv` strips the var at every terminal-spawn boundary,
+ * so a value can never bleed from one role into the other.
+ *
+ * WHY NO SCHEME IN THE ENV CHANNEL: the two dial-side consumers need different
+ * schemes (the computer `ws(s)://…/computers`, the CLI `http(s)://…`), so a stored
+ * scheme meant one of them was always reading the wrong shape — the retired
+ * `SLAYZONE_HUB_URL` bug (a computer-hosted `slay` inheriting a `ws://` url and
+ * hard-exiting). Both now DERIVE the scheme from the single `SLAYZONE_MODE`
+ * lever, which makes the mismatch unrepresentable rather than merely unlikely.
+ *
+ * PORT GRAMMAR: a bare host means "port unspecified". Bind side → the OS assigns
+ * a free port (`port === undefined`, callers default to 0); an explicit `:0` says
+ * the same outright. Dial side → the scheme's default port stays implicit (the
+ * normal published-DNS / reverse-proxy shape for a remote hub).
+ *
+ * Lean leaf (only ./slayzone-mode + node builtins) so the computer bundle can
+ * import it via `@slayzone/platform/hub-addr` WITHOUT the platform barrel.
+ *
+ * @module platform/hub-addr
+ */
+
+import { getSlayzoneMode, type SlayzoneMode } from './slayzone-mode'
+
+// Re-exported so a consumer importing this lean subpath can name the mode type
+// without also depending on a separate slayzone-mode subpath export.
+export type { SlayzoneMode } from './slayzone-mode'
+
+/**
+ * Host literals that name THIS machine. Single source of truth for both readers
+ * of a hub address that care: the bind side (warn when binding wider than
+ * loopback) and the CLI (a non-loopback address must not be mistaken for the
+ * local app's port). Matched against {@link HubBindAddress.host}, so IPv6 is
+ * UNBRACKETED here.
+ */
+export const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['127.0.0.1', 'localhost', '::1'])
+
+/**
+ * True when a SOCKET PEER ADDRESS names this machine.
+ *
+ * Distinct from {@link LOOPBACK_HOSTS} on purpose, and the distinction is
+ * load-bearing:
+ *   - `LOOPBACK_HOSTS` matches a CONFIGURED HOST STRING — a value a human typed
+ *     into `SLAYZONE_HUB_ADDRESS` or a config file — so it accepts `'localhost'`.
+ *   - This matches `req.socket.remoteAddress`, which the kernel fills in. A
+ *     socket address is an IP, never a hostname, so `'localhost'` here would only
+ *     ever be a bug or a spoof attempt and is deliberately NOT accepted.
+ *
+ * Covers the three forms node reports: IPv6 loopback, the IPv4-mapped-IPv6 form,
+ * and all of `127.0.0.0/8` (the whole block is loopback, not just `127.0.0.1`).
+ *
+ * Fails CLOSED: an absent or unparseable address is not loopback. Callers grant
+ * access on a `true` here, so "unknown" must never mean "trusted".
+ *
+ * Consolidates three previously-duplicated copies (hub `rest-auth`, the
+ * computers join-token route, and the hub users route), each of which had drifted
+ * its own docstring while claiming to be the same predicate.
+ */
+export function isLoopbackPeer(addr: string | undefined | null): boolean {
+  if (!addr) return false
+  if (addr === '::1') return true
+  // Node reports an IPv4 peer on a dual-stack socket as `::ffff:127.0.0.1`.
+  const bare = addr.startsWith('::ffff:') ? addr.slice('::ffff:'.length) : addr
+  return bare === '127.0.0.1' || bare.startsWith('127.')
+}
+
+/**
+ * Build a hub URL from an authority (`host` or `host:port`, NO scheme, NO path).
+ *
+ * @param addr  the hub authority — `host[:port]`, exactly as carried in
+ *              `SLAYZONE_HUB_ADDRESS`. Used verbatim; a host-only value keeps the
+ *              scheme's default port implicit (the normal published-DNS / reverse
+ *              proxy shape for a remote hub).
+ * @param kind  `'ws'` for the computer transport (ws/wss) or `'http'` for the CLI
+ *              REST base (http/https).
+ * @param path  optional path to append (e.g. `'/computers'`). Empty by default.
+ * @param mode  the deployment mode. Defaults to `getSlayzoneMode()` (reads
+ *              `process.env`); pass an explicit mode to stay hermetic under a
+ *              test that supplies its own env (e.g. `loadComputerConfig(customEnv)`).
+ * @returns     `<scheme>://<addr><path>`, where scheme is secure (`wss`/`https`)
+ *              in `remote` mode and plaintext (`ws`/`http`) otherwise.
+ */
+export function hubUrlFromAddr(
+  addr: string,
+  kind: 'ws' | 'http',
+  path = '',
+  mode: SlayzoneMode = getSlayzoneMode()
+): string {
+  const secure = mode === 'remote'
+  const scheme = kind === 'ws' ? (secure ? 'wss' : 'ws') : secure ? 'https' : 'http'
+  return `${scheme}://${addr}${path}`
+}
+
+/**
+ * True when `addr` is a bare hub AUTHORITY — `host` or `host:port`, with NO
+ * scheme (`://`), NO path (`/`), no userinfo and no whitespace.
+ *
+ * This is the env-channel guard: it is what keeps a scheme or a path from
+ * sneaking into `SLAYZONE_HUB_ADDRESS` / `SLAYZONE_HUB_PUBLIC_ADDRESS` (carrying
+ * authority only is the entire point). Verifies by composing a throwaway URL
+ * whose `host` must round-trip back to the input — which also rejects embedded
+ * userinfo and stray characters, and (unlike a plain URL parse) catches a
+ * double-scheme like `http://http://x`.
+ *
+ * IPv6 must be given in URL-authority form (bracketed): `[::1]` / `[::1]:8080`.
+ */
+export function isBareAuthority(addr: string): boolean {
+  if (addr === '' || /[/\s]/.test(addr) || addr.includes('://')) return false
+  try {
+    const u = new URL(`http://${addr}`)
+    // `host` preserves an explicit port; everything else must be empty.
+    return (
+      u.host === addr &&
+      u.pathname === '/' &&
+      u.search === '' &&
+      u.hash === '' &&
+      u.username === '' &&
+      u.password === ''
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
+ * True when a `ws(s)://…/computers` URL names THIS machine — so a join token
+ * carrying it is only usable by a computer on the SAME box.
+ *
+ * WHY THIS EXISTS: a hub in local mode derives its computer URL as
+ * `ws://<loopback>:<hubPort>/computers` unconditionally (see the hub's
+ * `deriveComputerHubUrl`). That is right for the co-located computer the desktop app
+ * auto-enrolls, and useless for any other machine — an off-box computer handed such
+ * a token dials its own loopback and silently never connects. Minting cannot
+ * refuse (the loopback case is legitimate and common), so the surfaces that hand a
+ * token to a human — the UI's mint dialog, `slay computer mint`, `slay computer
+ * create` — use this to SAY so.
+ *
+ * Reuses {@link LOOPBACK_HOSTS}, the single source of truth for "names this
+ * machine", so this predicate can never drift from the bind-side checks.
+ *
+ * A wildcard bind (`0.0.0.0` / `::`) is deliberately NOT loopback: such a token is
+ * broken for every computer including a local one, so reporting it as a
+ * same-machine URL would send the operator to the wrong fix.
+ *
+ * Returns false for anything unparseable — never claim loopback without knowing.
+ */
+export function isLoopbackComputerUrl(url: string): boolean {
+  let host: string
+  try {
+    // `hostname` never carries the port, but DOES keep IPv6 brackets — strip them
+    // to match LOOPBACK_HOSTS, which holds unbracketed literals (same convention
+    // as parseHubAddress).
+    host = new URL(url).hostname.replace(/^\[|\]$/g, '')
+  } catch {
+    return false
+  }
+  // The whole 127.0.0.0/8 block is loopback, not just 127.0.0.1 — a hub bound to
+  // e.g. 127.0.0.53 is every bit as unreachable from another machine.
+  return LOOPBACK_HOSTS.has(host) || host.startsWith('127.')
+}
+
+/** A hub address split for the BIND side. `port === undefined` = OS-assigned. */
+export interface HubBindAddress {
+  /** Bare host literal, IPv6 UNBRACKETED (what `server.listen(host)` wants). */
+  host: string
+  /** Explicit port, or undefined when the address named no port. `0` = OS-assigned. */
+  port: number | undefined
+}
+
+/**
+ * Parse a hub address into `{host, port}` for the BIND side (the hub itself).
+ *
+ * Returns null for anything that is not a bare authority with a valid port, so a
+ * caller falls back to its own default rather than binding something the operator
+ * never asked for. IPv6 comes back UNBRACKETED: node's `listen(host)` wants the
+ * bare literal, while the URL authority form requires the brackets.
+ *
+ * @param addr the raw env value (surrounding whitespace is trimmed); `undefined`
+ *             or empty resolves to null.
+ */
+export function parseHubAddress(addr: string | undefined): HubBindAddress | null {
+  const trimmed = addr?.trim()
+  if (!trimmed || !isBareAuthority(trimmed)) return null
+  const u = new URL(`http://${trimmed}`)
+  // `u.port` is '' when the authority named no port → OS-assigned. The URL parser
+  // already rejected an out-of-range or non-numeric port (isBareAuthority's
+  // round-trip fails, since `host` would not match the input).
+  const port = u.port === '' ? undefined : Number(u.port)
+  // hostname drops IPv6 brackets; unlike `host` it never carries the port.
+  return { host: u.hostname.replace(/^\[|\]$/g, ''), port }
+}

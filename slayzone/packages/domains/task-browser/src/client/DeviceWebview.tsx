@@ -1,0 +1,242 @@
+import { useRef, useState, useEffect } from 'react'
+import { useMutation } from '@tanstack/react-query'
+import { useTRPC } from '@slayzone/transport/client'
+import { fileUrlToSlzFileUrl } from '@slayzone/platform/slz-file-url'
+import type { DeviceEmulation } from '../shared'
+
+interface WebviewElement extends HTMLElement {
+  reload(): void
+  reloadIgnoringCache(): void
+  stop(): void
+  loadURL(url: string): void
+  getURL(): string
+  getWebContentsId(): number
+}
+
+export interface DeviceLayout {
+  topOffset: number
+  scaledHeight: number
+  width: number
+}
+
+interface DeviceWebviewProps {
+  url: string
+  preset: DeviceEmulation
+  partition: string
+  isResizing?: boolean
+  reloadTrigger?: number
+  forceReloadTrigger?: number
+  onLayout?: (layout: DeviceLayout) => void
+}
+
+export function DeviceWebview({
+  url,
+  preset,
+  partition,
+  isResizing,
+  reloadTrigger,
+  forceReloadTrigger,
+  onLayout
+}: DeviceWebviewProps) {
+  const trpc = useTRPC()
+  const enableEmulation = useMutation(
+    trpc.app.webview.enableDeviceEmulation.mutationOptions()
+  ).mutateAsync
+  const disableEmulation = useMutation(
+    trpc.app.webview.disableDeviceEmulation.mutationOptions()
+  ).mutate
+  const webviewRef = useRef<WebviewElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [webviewReady, setWebviewReady] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [containerSize, setContainerSize] = useState<{ width: number; height: number } | null>(null)
+  const prevEmulationRef = useRef<{
+    w: number
+    h: number
+    dpr: number
+    mobile: boolean
+    ua?: string
+  } | null>(null)
+
+  const [initialSrc] = useState(() => fileUrlToSlzFileUrl(url || 'about:blank'))
+  const loadedUrlRef = useRef(url)
+
+  // Track container size
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(([entry]) => {
+      setContainerSize({ width: entry.contentRect.width, height: entry.contentRect.height })
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // Webview dom-ready
+  useEffect(() => {
+    const wv = webviewRef.current
+    if (!wv) return
+    const handleDomReady = () => {
+      setWebviewReady(true)
+      setLoadError(null)
+    }
+    const handleFailLoad = (e: Event) => {
+      const detail = (e as CustomEvent).detail
+      if ((detail?.errorCode ?? 0) === -3) return
+      setLoadError(detail?.errorDescription ?? 'Load failed')
+    }
+    const handleCrashed = () => setLoadError('Webview crashed')
+    wv.addEventListener('dom-ready', handleDomReady)
+    wv.addEventListener('did-fail-load', handleFailLoad)
+    wv.addEventListener('crashed', handleCrashed)
+    return () => {
+      wv.removeEventListener('dom-ready', handleDomReady)
+      wv.removeEventListener('did-fail-load', handleFailLoad)
+      wv.removeEventListener('crashed', handleCrashed)
+    }
+  }, [containerSize !== null])
+
+  const widthScale = containerSize ? Math.min(1, containerSize.width / preset.width) : 1
+
+  // Apply device emulation — viewSize {0,0} means no viewport override.
+  // The viewport comes naturally from the CSS layout size of the webview element.
+  // We only use emulation for DPR, screen dimensions, mobile flag, and user agent.
+  useEffect(() => {
+    const wv = webviewRef.current
+    if (!wv || !webviewReady) return
+
+    const cur = {
+      w: preset.width,
+      h: preset.height,
+      dpr: preset.deviceScaleFactor,
+      mobile: preset.mobile,
+      ua: preset.userAgent
+    }
+    const prev = prevEmulationRef.current
+    if (
+      prev &&
+      cur.w === prev.w &&
+      cur.h === prev.h &&
+      cur.dpr === prev.dpr &&
+      cur.mobile === prev.mobile &&
+      cur.ua === prev.ua
+    )
+      return
+
+    const prevUa = prev?.ua
+    prevEmulationRef.current = cur
+
+    const wcId = wv.getWebContentsId()
+    void enableEmulation({
+      webviewId: wcId,
+      params: {
+        screenSize: { width: preset.width, height: preset.height },
+        viewSize: { width: 0, height: 0 },
+        deviceScaleFactor: preset.deviceScaleFactor,
+        screenPosition: preset.mobile ? 'mobile' : 'desktop',
+        userAgent: preset.userAgent
+      }
+    }).then(() => {
+      if (preset.userAgent !== prevUa) wv.reload()
+    })
+  }, [preset, webviewReady, enableEmulation])
+
+  // Navigate only when parent URL actually changes
+  useEffect(() => {
+    const wv = webviewRef.current
+    if (!wv || !webviewReady || !url || url === 'about:blank') return
+    if (url === loadedUrlRef.current) return
+    loadedUrlRef.current = url
+    wv.loadURL(fileUrlToSlzFileUrl(url))
+  }, [url, webviewReady])
+
+  // Reload when trigger increments
+  const prevReloadRef = useRef(reloadTrigger)
+  useEffect(() => {
+    if (reloadTrigger !== prevReloadRef.current) {
+      prevReloadRef.current = reloadTrigger
+      if (webviewReady) webviewRef.current?.reload()
+    }
+  }, [reloadTrigger, webviewReady])
+
+  // Force reload (ignore cache) when trigger increments
+  const prevForceReloadRef = useRef(forceReloadTrigger)
+  useEffect(() => {
+    if (forceReloadTrigger !== prevForceReloadRef.current) {
+      prevForceReloadRef.current = forceReloadTrigger
+      if (webviewReady) webviewRef.current?.reloadIgnoringCache()
+    }
+  }, [forceReloadTrigger, webviewReady])
+
+  // Disable emulation on unmount
+  const disableEmulationRef = useRef(disableEmulation)
+  disableEmulationRef.current = disableEmulation
+  useEffect(() => {
+    return () => {
+      const wv = webviewRef.current
+      if (wv) {
+        try {
+          const wcId = wv.getWebContentsId()
+          disableEmulationRef.current({ webviewId: wcId })
+        } catch {
+          /* webview may be destroyed */
+        }
+      }
+    }
+  }, [])
+
+  const scaledWidth = preset.width * widthScale
+  const scaledHeight = preset.height * widthScale
+  const topOffset = containerSize ? Math.max(0, (containerSize.height - scaledHeight) / 2) : 0
+  const leftOffset = containerSize ? Math.max(0, (containerSize.width - scaledWidth) / 2) : 0
+
+  const onLayoutRef = useRef(onLayout)
+  useEffect(() => {
+    onLayoutRef.current = onLayout
+  })
+  const containerW = containerSize?.width ?? 0
+  useEffect(() => {
+    if (containerW) onLayoutRef.current?.({ topOffset, scaledHeight, width: containerW })
+  }, [topOffset, scaledHeight, containerW])
+
+  return (
+    <div
+      id="dw-container"
+      ref={containerRef}
+      className="relative flex-1 overflow-hidden bg-surface-0"
+    >
+      <div
+        id="dw-viewport"
+        className="absolute origin-top-left overflow-hidden"
+        style={{
+          width: preset.width,
+          height: preset.height,
+          borderRadius: 4 / widthScale,
+          outline: `${1 / widthScale}px solid rgba(255, 255, 255, 0.7)`,
+          transform: widthScale < 1 ? `scale(${widthScale})` : undefined,
+          top: topOffset,
+          left: leftOffset
+        }}
+      >
+        {containerSize && (
+          <webview
+            ref={webviewRef}
+            src={initialSrc}
+            // eslint-disable-next-line react/no-unknown-property
+            partition={partition}
+            className="absolute inset-0"
+            // @ts-expect-error - webview attributes not in React types
+            // eslint-disable-next-line react/no-unknown-property
+            allowpopups="true"
+          />
+        )}
+        {loadError && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-surface-0/80 text-muted-foreground text-[11px] text-center p-2">
+            {loadError}
+          </div>
+        )}
+      </div>
+      {isResizing && <div id="dw-resize-overlay" className="absolute inset-0 z-10" />}
+    </div>
+  )
+}

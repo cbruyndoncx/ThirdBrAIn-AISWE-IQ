@@ -1,0 +1,43 @@
+{
+  "name": "@slayzone/renderer-app",
+  "version": "0.36.0-beta.17",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@slayzone/agent-panels": "workspace:*",
+    "@slayzone/ai-config": "workspace:*",
+    "@slayzone/app-shell": "workspace:*",
+    "@slayzone/feedback": "workspace:*",
+    "@slayzone/home": "workspace:*",
+    "@slayzone/layout": "workspace:*",
+    "@slayzone/leaderboard": "workspace:*",
+    "@slayzone/onboarding": "workspace:*",
+    "@slayzone/projects": "workspace:*",
+    "@slayzone/search": "workspace:*",
+    "@slayzone/settings": "workspace:*",
+    "@slayzone/sidebar": "workspace:*",
+    "@slayzone/tabs": "workspace:*",
+    "@slayzone/task": "workspace:*",
+    "@slayzone/tasks": "workspace:*",
+    "@slayzone/telemetry": "workspace:*",
+    "@slayzone/terminal": "workspace:*",
+    "@slayzone/transport": "workspace:*",
+    "@slayzone/ui": "workspace:*",
+    "@slayzone/usage-analytics": "workspace:*",
+    "@trpc/client": "^11.17.0",
+    "@trpc/server": "^11.17.0",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.9.3"
+  }
+}

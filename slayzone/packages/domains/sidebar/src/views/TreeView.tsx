@@ -1,0 +1,1625 @@
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type MouseEvent as ReactMouseEvent
+} from 'react'
+import { BookOpen, ChevronDown, FolderPlus, Home, Plus, Search, Settings, Star } from 'lucide-react'
+import * as Collapsible from '@radix-ui/react-collapsible'
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  closestCenter,
+  pointerWithin,
+  useSensor,
+  useSensors,
+  type CollisionDetection,
+  type DragEndEvent,
+  type DragMoveEvent,
+  type DragStartEvent
+} from '@dnd-kit/core'
+import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
+import { cn, Tooltip, TooltipContent, TooltipTrigger, useShortcutDisplay } from '@slayzone/ui'
+import { type Task } from '@slayzone/task/shared'
+import { useDialogStore, useTabStore } from '@slayzone/settings'
+import { groupTreeRows, orderTreeRows, PINNED_GROUP_KEY, type TreeGroup } from './treeGrouping'
+import { useStaleSkillCounts } from '@slayzone/ai-config/client'
+import { TreeDisplaySettings } from '../TreeDisplaySettings'
+import { buildTopLevelEntries, entriesToRefs } from './projectGrouping'
+import { resolveProjectDrop, applyProjectDrop } from './projectDrop'
+import logo from '../assets/logo.svg'
+import type { SidebarViewContext } from './types'
+import {
+  TreeGroupHeader,
+  ContextStaleDot,
+  TaskRow,
+  HeaderRow,
+  TaskDragPreview,
+  ProjectDragPreview,
+  SortableProject,
+  noShiftStrategy,
+  treeProjectDropMode,
+  rowGroupValue,
+  type TaskBranchCtx,
+  type ProjDropMode,
+  type TaskRowDragData,
+  type GroupDropData,
+  type ProjectDragData
+} from './tree-view'
+
+type RowItem =
+  | { kind: 'header'; rowId: string; group: TreeGroup; padTopClass: string }
+  | {
+      kind: 'task'
+      rowId: string
+      task: Task
+      depth: number
+      ancestorFlags: boolean[]
+      // True for every row inside the temporary group, including non-temp
+      // subtasks of a temp root — so the whole subtree stays out of DnD.
+      inTempGroup: boolean
+    }
+
+const EMPTY_SESSION_TASK_IDS = new Set<string>()
+
+export function TreeView({
+  projects,
+  tasks,
+  sessionTaskIds = EMPTY_SESSION_TASK_IDS,
+  selectedProjectId,
+  onSelectProject,
+  onProjectSettings,
+  onTaskClick,
+  onCloseTab,
+  onOpenTaskInBackground,
+  onCreateTemporaryTask,
+  taskContextMenuRender,
+  taskBulkContextMenuRender,
+  taskProgress,
+  doneTaskIds,
+  columnsByProjectId,
+  onTaskReorder,
+  onTaskMove,
+  onTaskReparent,
+  onTaskBulkReparent,
+  onTaskFieldUpdate,
+  onTaskBulkFieldUpdate,
+  onReorderTopLevel,
+  onCreateFolderWithProjects,
+  onMoveProjectToGroup,
+  onReorderProjectsInGroup,
+  onSetGroupCollapsed,
+  onDeleteProjectGroup,
+  projectGroups,
+  onSetTasksPinned,
+  onSetCollapsed,
+  onPinnedReorder,
+  onSetProjectStarred
+}: SidebarViewContext) {
+  const sortedProjects = useMemo(
+    () => [...projects].sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)),
+    [projects]
+  )
+
+  const treeStatusFilter = useTabStore((s) => s.treeStatusFilter)
+  const statusFilter = useMemo(() => new Set(treeStatusFilter), [treeStatusFilter])
+  const treePriorityFilter = useTabStore((s) => s.treePriorityFilter)
+  const priorityFilter = useMemo(() => new Set(treePriorityFilter), [treePriorityFilter])
+  const treeShowStatus = useTabStore((s) => s.treeShowStatus)
+  const treeShowPriority = useTabStore((s) => s.treeShowPriority)
+  const treeShowSubtasks = useTabStore((s) => s.treeShowSubtasks)
+  const treeIncludeAllSubtasks = useTabStore((s) => s.treeShowAllSubtasks)
+  const treeIncludeAllUndoneSubtasks = useTabStore((s) => s.treeShowAllUndoneSubtasks)
+  const treeCrossOutDone = useTabStore((s) => s.treeCrossOutDone)
+  const treeShowOnlyActive = useTabStore((s) => s.treeShowOnlyActive)
+  const treeShowTemporary = useTabStore((s) => s.treeShowTemporary)
+  const treeShowBlocked = useTabStore((s) => s.treeShowBlocked)
+  const treeShowSnoozed = useTabStore((s) => s.treeShowSnoozed)
+  const treeShowAllOpen = useTabStore((s) => s.treeShowAllOpen)
+  const treeShowWorktree = useTabStore((s) => s.treeShowWorktree)
+  // Pinned / collapsed are task-intrinsic columns (tasks.pinned / tree_collapsed)
+  // — derived straight from the task list so optimistic updates flow through.
+  const pinnedSet = useMemo(() => new Set(tasks.filter((t) => t.pinned).map((t) => t.id)), [tasks])
+  const collapsedSet = useMemo(
+    () => new Set(tasks.filter((t) => t.tree_collapsed).map((t) => t.id)),
+    [tasks]
+  )
+  const handleToggleCollapse = useCallback(
+    (taskId: string) => {
+      onSetCollapsed?.(taskId, !collapsedSet.has(taskId))
+    },
+    [onSetCollapsed, collapsedSet]
+  )
+  // Hoisted above `childrenByParent` memo so it can react to drag start —
+  // dragging a parent transiently collapses its sub-tasks.
+  const [activeDragTaskId, setActiveDragTaskId] = useState<string | null>(null)
+  // Project id (not prefixed) currently being drag-reordered, or null.
+  const [activeDragProjectId, setActiveDragProjectId] = useState<string | null>(null)
+  // Group id currently being drag-reordered (folder label dragged), or null.
+  const [activeDragGroupId, setActiveDragGroupId] = useState<string | null>(null)
+  // Drop indicator for project drags: over sortable/header id + mode.
+  const [projectDrop, setProjectDrop] = useState<{ overId: string; mode: ProjDropMode } | null>(
+    null
+  )
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(() => new Set())
+  const selectedTaskIdArr = useMemo(() => [...selectedTaskIds], [selectedTaskIds])
+
+  // Esc clears the row selection (current/active task is separate — it lives in
+  // the tab store and is untouched). Listener only runs while something is
+  // selected, and bails when focus sits in a text-input surface (rename/search
+  // input, terminal xterm textarea, editor) so we never steal their Esc.
+  const hasSelection = selectedTaskIds.size > 0
+  useEffect(() => {
+    if (!hasSelection) return
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      const el = document.activeElement as HTMLElement | null
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable))
+        return
+      setSelectedTaskIds(new Set())
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [hasSelection])
+  const treeGroupBy = useTabStore((s) => s.treeGroupBy)
+  const treeOrderBy = useTabStore((s) => s.treeOrderBy)
+  const treeOrderDir = useTabStore((s) => s.treeOrderDir)
+  const treeGroupTemporary = useTabStore((s) => s.treeGroupTemporary)
+  const treeGroupPinned = useTabStore((s) => s.treeGroupPinned)
+  const treeShowEmptyGroups = useTabStore((s) => s.treeShowEmptyGroups)
+
+  const tabs = useTabStore((s) => s.tabs)
+  const openTabTaskIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const t of tabs) if (t.type === 'task') ids.add(t.taskId)
+    return ids
+  }, [tabs])
+
+  const passesFilter = useCallback(
+    (t: Task) => {
+      if (t.archived_at) return false
+      // Priority filter is universal — applies even to pinned/open-tab/session
+      // tasks. Empty set = no constraint.
+      const priorityOk = priorityFilter.size === 0 || priorityFilter.has(t.priority)
+      if (!priorityOk) return false
+      // Shortcuts: any of these passes the task straight through, bypassing
+      // temp/blocked/snoozed, show-only-active, and status filters.
+      if (pinnedSet.has(t.id)) return true
+      if (sessionTaskIds.has(t.id)) return true
+      if (treeShowAllOpen && openTabTaskIds.has(t.id)) return true
+      if (!treeShowTemporary && t.is_temporary) return false
+      if (!treeShowBlocked && t.is_blocked) return false
+      if (!treeShowSnoozed && !!t.snoozed_until && new Date(t.snoozed_until) > new Date())
+        return false
+      if (treeShowOnlyActive) return false
+      return statusFilter.has(t.status)
+    },
+    [
+      statusFilter,
+      priorityFilter,
+      pinnedSet,
+      openTabTaskIds,
+      sessionTaskIds,
+      treeShowOnlyActive,
+      treeShowTemporary,
+      treeShowBlocked,
+      treeShowSnoozed,
+      treeShowAllOpen
+    ]
+  )
+
+  // A task is "visible" if it passes the filter OR if any descendant in the same
+  // project does (so the hierarchy stays connected when only sub-tasks match).
+  // Walk parents from each matching task up to the project root.
+  //
+  // When `treeIncludeAllSubtasks` is on (and sub-tasks are shown), the filter is
+  // applied at the root level only — any root that passes pulls its entire
+  // descendant subtree along, regardless of sub-task status.
+  const visibleTaskIds = useMemo(() => {
+    const taskById = new Map(tasks.map((t) => [t.id, t]))
+    const set = new Set<string>()
+
+    // `treeShowOnlyActive` takes precedence — when on, skip the all-subtasks
+    // expansion so only bypass tasks (pinned/session/open-tab) + parent chain
+    // remain visible, regardless of root status match.
+    if (
+      treeShowSubtasks &&
+      !treeShowOnlyActive &&
+      (treeIncludeAllSubtasks || treeIncludeAllUndoneSubtasks)
+    ) {
+      const excludeDone = !treeIncludeAllSubtasks && treeIncludeAllUndoneSubtasks
+      const childrenOf = new Map<string, Task[]>()
+      for (const t of tasks) {
+        if (!t.parent_id) continue
+        const list = childrenOf.get(t.parent_id) ?? []
+        list.push(t)
+        childrenOf.set(t.parent_id, list)
+      }
+      const isSnoozed = (x: Task) => !!x.snoozed_until && new Date(x.snoozed_until) > new Date()
+      for (const t of tasks) {
+        if (t.parent_id) continue
+        if (t.archived_at) continue
+        if (!treeShowTemporary && t.is_temporary) continue
+        if (!treeShowBlocked && t.is_blocked) continue
+        if (!treeShowSnoozed && isSnoozed(t)) continue
+        // Strict root check — must directly match status + priority. Bypasses
+        // (open tab, pinned, session) don't qualify a root to pull in its
+        // subtree.
+        if (priorityFilter.size > 0 && !priorityFilter.has(t.priority)) continue
+        if (!statusFilter.has(t.status)) continue
+        const stack: Task[] = [t]
+        while (stack.length > 0) {
+          const cur = stack.pop()!
+          if (set.has(cur.id) || cur.archived_at) continue
+          // Root passes filter, so include regardless of done. Descendants only
+          // gated by excludeDone — keeps a matching root visible even if done.
+          if (excludeDone && cur.id !== t.id && doneTaskIds?.has(cur.id)) continue
+          // Priority filter applies to descendants too.
+          if (cur.id !== t.id && priorityFilter.size > 0 && !priorityFilter.has(cur.priority))
+            continue
+          // Blocked/snoozed filters apply to descendants too.
+          if (cur.id !== t.id && !treeShowBlocked && cur.is_blocked) continue
+          if (cur.id !== t.id && !treeShowSnoozed && isSnoozed(cur)) continue
+          set.add(cur.id)
+          const kids = childrenOf.get(cur.id)
+          if (kids) for (const k of kids) stack.push(k)
+        }
+      }
+      // Individual tasks (root or sub-task) that pass via bypass (e.g.
+      // open-tab) but whose strict-root subtree wasn't pulled in. Include the
+      // task itself + parent chain so the row shows and stays connected.
+      for (const t of tasks) {
+        if (set.has(t.id) || t.archived_at) continue
+        if (!passesFilter(t)) continue
+        let cur: Task | undefined = t
+        while (cur && !set.has(cur.id) && !cur.archived_at) {
+          set.add(cur.id)
+          cur = cur.parent_id ? taskById.get(cur.parent_id) : undefined
+        }
+      }
+      return set
+    }
+
+    for (const t of tasks) {
+      if (!passesFilter(t)) continue
+      // When sub-tasks hidden, only top-level tasks are eligible.
+      if (!treeShowSubtasks && t.parent_id) continue
+      let cur: Task | undefined = t
+      while (cur && !set.has(cur.id)) {
+        set.add(cur.id)
+        if (!treeShowSubtasks) break
+        cur = cur.parent_id ? taskById.get(cur.parent_id) : undefined
+      }
+    }
+    return set
+  }, [
+    tasks,
+    passesFilter,
+    treeShowSubtasks,
+    treeIncludeAllSubtasks,
+    treeIncludeAllUndoneSubtasks,
+    treeShowOnlyActive,
+    doneTaskIds,
+    priorityFilter,
+    statusFilter,
+    treeShowTemporary,
+    treeShowBlocked,
+    treeShowSnoozed
+  ])
+
+  // Visible tasks bucketed and sorted per project using the tree-local order
+  // (no coupling to kanban filter). orderTreeRows always tiebreaks by `order`
+  // col so manual drag-reorder persists under any orderBy.
+  const tasksByProject = useMemo(() => {
+    const grouped = new Map<string, Task[]>()
+    for (const t of tasks) {
+      if (!visibleTaskIds.has(t.id)) continue
+      const arr = grouped.get(t.project_id) ?? []
+      arr.push(t)
+      grouped.set(t.project_id, arr)
+    }
+    const sorted = new Map<string, Task[]>()
+    for (const [pid, arr] of grouped) {
+      sorted.set(pid, orderTreeRows(arr, treeOrderBy, treeOrderDir))
+    }
+    return sorted
+  }, [tasks, visibleTaskIds, treeOrderBy, treeOrderDir])
+
+  // For each in-progress task id → its in-progress children, in the
+  // per-project sort order. Subtasks whose parent is not in-progress are
+  // promoted to the project root.
+  //
+  // Two maps: `allChildrenByParent` is collapse-agnostic (drives the chevron
+  // visibility — collapsed parent still has a chevron). `childrenByParent`
+  // drops entries for collapsed parents so render + drag-flat skip those
+  // subtrees in one sweep.
+  const allChildrenByParent = useMemo(() => {
+    if (!treeShowSubtasks) return new Map<string, Task[]>()
+    const m = new Map<string, Task[]>()
+    for (const arr of tasksByProject.values()) {
+      for (const t of arr) {
+        const pid = t.parent_id
+        if (pid && visibleTaskIds.has(pid)) {
+          const list = m.get(pid) ?? []
+          list.push(t)
+          m.set(pid, list)
+        }
+      }
+    }
+    return m
+  }, [tasksByProject, visibleTaskIds, treeShowSubtasks])
+
+  const tasksWithChildren = useMemo(() => {
+    const s = new Set<string>()
+    for (const [pid, kids] of allChildrenByParent) if (kids.length > 0) s.add(pid)
+    return s
+  }, [allChildrenByParent])
+
+  // Transient collapse set: while a row with sub-tasks is being dragged,
+  // hide its children so the drag preview + sortable list stay compact.
+  // Restored on drag end/cancel (state cleared in those handlers).
+  const dragCollapseSet = useMemo(() => {
+    if (!activeDragTaskId) return null
+    const isMulti = selectedTaskIds.has(activeDragTaskId) && selectedTaskIds.size > 1
+    const ids = isMulti ? selectedTaskIds : new Set([activeDragTaskId])
+    const s = new Set<string>()
+    for (const id of ids) if (tasksWithChildren.has(id)) s.add(id)
+    return s.size > 0 ? s : null
+  }, [activeDragTaskId, selectedTaskIds, tasksWithChildren])
+
+  const childrenByParent = useMemo(() => {
+    if (collapsedSet.size === 0 && !dragCollapseSet) return allChildrenByParent
+    const m = new Map<string, Task[]>()
+    for (const [pid, kids] of allChildrenByParent) {
+      if (collapsedSet.has(pid)) continue
+      if (dragCollapseSet?.has(pid)) continue
+      m.set(pid, kids)
+    }
+    return m
+  }, [allChildrenByParent, collapsedSet, dragCollapseSet])
+
+  const rootTasksByProject = useMemo(() => {
+    const m = new Map<string, Task[]>()
+    for (const [pid, arr] of tasksByProject) {
+      const roots: Task[] = []
+      for (const t of arr) {
+        // When subtasks hidden, render every matched task at the root level.
+        const isOrphan = !treeShowSubtasks || !t.parent_id || !visibleTaskIds.has(t.parent_id)
+        if (isOrphan) roots.push(t)
+      }
+      m.set(pid, roots)
+    }
+    return m
+  }, [tasksByProject, visibleTaskIds, treeShowSubtasks])
+
+  // Root tasks grouped by treeGroupBy per project. groupTreeRows handles
+  // temp segregation + empty-group rendering.
+  const rootGroupsByProject = useMemo(() => {
+    const result = new Map<string, TreeGroup[]>()
+    for (const [pid, roots] of rootTasksByProject) {
+      const cols = columnsByProjectId?.get(pid) ?? null
+      const groups = groupTreeRows(roots, treeGroupBy, cols, {
+        showEmpty: treeShowEmptyGroups,
+        statusFilter,
+        groupTemporary: treeGroupTemporary,
+        groupPinned: treeGroupPinned,
+        pinnedIds: pinnedSet
+      })
+      // The pinned group's manual order is task-intrinsic (`pin_order`), not the
+      // shared `order` col — re-sort it on that key.
+      const pinnedGroup = groups.find((g) => g.isPinned)
+      if (pinnedGroup) {
+        pinnedGroup.tasks = orderTreeRows(pinnedGroup.tasks, treeOrderBy, treeOrderDir, 'pin_order')
+      }
+      result.set(pid, groups)
+    }
+    return result
+  }, [
+    rootTasksByProject,
+    columnsByProjectId,
+    treeGroupBy,
+    treeShowEmptyGroups,
+    statusFilter,
+    treeGroupTemporary,
+    treeGroupPinned,
+    pinnedSet,
+    treeOrderBy,
+    treeOrderDir
+  ])
+
+  const activeTaskId = useTabStore((s) => {
+    const tab = s.tabs[s.activeTabIndex]
+    return tab?.type === 'task' ? tab.taskId : null
+  })
+  const activeTabType = useTabStore((s) => s.tabs[s.activeTabIndex]?.type)
+  const activeView = useTabStore((s) => s.activeView)
+  const projectIsActive = (pid: string) =>
+    selectedProjectId === pid && (activeTabType === 'home' || activeView === 'context')
+
+  const activeProjectIds = useMemo(() => {
+    const taskById = new Map(tasks.map((t) => [t.id, t]))
+    const set = new Set<string>()
+    for (const id of openTabTaskIds) {
+      const pid = taskById.get(id)?.project_id
+      if (pid) set.add(pid)
+    }
+    for (const id of sessionTaskIds) {
+      const pid = taskById.get(id)?.project_id
+      if (pid) set.add(pid)
+    }
+    return set
+  }, [tasks, openTabTaskIds, sessionTaskIds])
+
+  // Persisted in the tab store (not component state) so a remount — renderer
+  // reload, wake from sleep — doesn't reset every project row to collapsed.
+  const openProjects = useTabStore((s) => s.treeOpenProjects)
+  const setTreeProjectOpen = useTabStore((s) => s.setTreeProjectOpen)
+
+  const [showAll, setShowAll] = useState(false)
+
+  const activeProjects = useMemo(
+    () => sortedProjects.filter((p) => activeProjectIds.has(p.id) || p.starred),
+    [sortedProjects, activeProjectIds]
+  )
+  const hiddenProjects = useMemo(
+    () => sortedProjects.filter((p) => !activeProjectIds.has(p.id) && !p.starred),
+    [sortedProjects, activeProjectIds]
+  )
+  const visibleProjects = showAll ? sortedProjects : activeProjects
+
+  // Top-level entries (ungrouped projects + groups) for the visible set. Empty
+  // groups (no visible member) fold away — they reappear via "Show all".
+  const treeEntries = useMemo(
+    () =>
+      buildTopLevelEntries(visibleProjects, projectGroups).filter(
+        (e) => e.kind === 'project' || e.projects.length > 0
+      ),
+    [visibleProjects, projectGroups]
+  )
+  const renderedProjectIds = useMemo(
+    () => treeEntries.flatMap((e) => (e.kind === 'project' ? [e.id] : e.projects.map((p) => p.id))),
+    [treeEntries]
+  )
+  // pid → its group id (null = top level). Used to keep the "one line per gap"
+  // normalization within a single sibling scope.
+  const groupIdByProject = useMemo(
+    () => new Map(projects.map((p) => [p.id, p.group_id ?? null])),
+    [projects]
+  )
+  // FULL top-level set (ignores the active/visible filter) — drag/reorder needs
+  // every slot so a move stays complete even when some projects are hidden.
+  const fullEntries = useMemo(
+    () => buildTopLevelEntries(sortedProjects, projectGroups),
+    [sortedProjects, projectGroups]
+  )
+  const allTopLevelRefs = useMemo(() => entriesToRefs(fullEntries), [fullEntries])
+  const fullGroupMembers = useCallback(
+    (gid: string): string[] => {
+      const g = fullEntries.find((e) => e.kind === 'group' && e.id === gid)
+      return g && g.kind === 'group' ? g.projects.map((p) => p.id) : []
+    },
+    [fullEntries]
+  )
+
+  const { counts: staleSkillCounts } = useStaleSkillCounts(visibleProjects)
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
+
+  // `closestCenter` resolves `over` per pointer position. Headers ARE
+  // valid drop targets (kind='group'): when pointer is closest to a
+  // header, that header becomes `over`, the strategy slides just the
+  // header (not the first/last task of the adjacent group), and the
+  // visible gap appears at the inter-group boundary — matching user
+  // mental model "drop between groups lands between groups".
+  const collisionDetection = useCallback<CollisionDetection>((args) => {
+    const kind = (args.active.data.current as { kind?: string } | undefined)?.kind
+    // A project/folder drag may land on a project row or a group header —
+    // never a task row. Prefer pointerWithin (precise, no jitter); fall back to
+    // closestCenter for gaps so reorder lines resolve.
+    if (kind === 'project' || kind === 'group') {
+      const containers = args.droppableContainers.filter((c) => {
+        const k = (c.data.current as { kind?: string } | undefined)?.kind
+        return k === 'project' || k === 'group'
+      })
+      const within = pointerWithin({ ...args, droppableContainers: containers })
+      return within.length > 0
+        ? within
+        : closestCenter({ ...args, droppableContainers: containers })
+    }
+    return closestCenter(args)
+  }, [])
+
+  const handleDragStart = useCallback((event: DragStartEvent) => {
+    // Project / group drags get their own overlay preview, not task bookkeeping.
+    const kind = (event.active.data.current as { kind?: string } | undefined)?.kind
+    if (kind === 'project') {
+      setActiveDragProjectId((event.active.id as string).replace(/^project:/, ''))
+      return
+    }
+    if (kind === 'group') {
+      setActiveDragGroupId((event.active.id as string).replace(/^group:/, ''))
+      return
+    }
+    setActiveDragTaskId(event.active.id as string)
+  }, [])
+
+  // Track the project-drop indicator (insertion line / merge ring). Only for
+  // project drags — task drags keep their existing slide behavior untouched.
+  const handleDragMove = useCallback(
+    (event: DragMoveEvent) => {
+      const { active, over } = event
+      const activeKind = (active.data.current as { kind?: string } | undefined)?.kind
+      if (activeKind !== 'project' && activeKind !== 'group') return
+      if (!over || active.id === over.id) {
+        setProjectDrop(null)
+        return
+      }
+      const overKind = (over.data.current as { kind?: string } | undefined)?.kind
+      // A dragged FOLDER only reorders (never merges) → always a line.
+      // A dragged project onto a group header = join (whole header target).
+      if (overKind === 'group' && activeKind === 'project') {
+        setProjectDrop({ overId: String(over.id), mode: 'merge' })
+        return
+      }
+      let mode = treeProjectDropMode(event)
+      // Folders never merge → coerce the middle zone to a reorder line.
+      if (activeKind === 'group' && mode === 'merge') mode = 'before'
+      let overId = String(over.id)
+      // ONE line per gap: a gap between rows X and Y can resolve as either
+      // "after X" or "before Y" depending on cursor side. Normalize every
+      // 'after' to 'before next-row' so both map to the SAME single line (no
+      // double indicator). Last row keeps 'after' (its trailing edge).
+      if (mode === 'after') {
+        const pid = overId.replace(/^project:/, '')
+        const i = renderedProjectIds.indexOf(pid)
+        const next = i >= 0 ? renderedProjectIds[i + 1] : undefined
+        // Collapse only within the same scope (both top-level, or same group) —
+        // the last row of a scope keeps its own 'after' line.
+        if (next && groupIdByProject.get(pid) === groupIdByProject.get(next)) {
+          overId = `project:${next}`
+          mode = 'before'
+        }
+      }
+      setProjectDrop({ overId, mode })
+    },
+    [renderedProjectIds, groupIdByProject]
+  )
+
+  const handleDragCancel = useCallback(() => {
+    setActiveDragTaskId(null)
+    setActiveDragProjectId(null)
+    setActiveDragGroupId(null)
+    setProjectDrop(null)
+  }, [])
+
+  // Multi-selection — Shift = sibling range, Cmd/Ctrl = toggle individual,
+  // plain click = open + clear selection. anchor is the last single/cmd-click
+  // target, used as the base point for shift-range expansion. `activeDragTaskId`
+  // + `selectedTaskIds` are hoisted above so `childrenByParent` can collapse
+  // sub-tasks on drag start.
+  const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null)
+
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null)
+  const handleStartEdit = useCallback((id: string) => setEditingTaskId(id), [])
+  const handleCancelEdit = useCallback(() => setEditingTaskId(null), [])
+
+  // Full task lookup (all tasks, not just visible) for cycle detection +
+  // orderBy field comparison. Visible-only maps would miss collapsed parents
+  // and yield false negatives on cycle check.
+  const tasksById = useMemo(() => {
+    const m = new Map<string, Task>()
+    for (const t of tasks) m.set(t.id, t)
+    return m
+  }, [tasks])
+
+  const handleCommitEdit = useCallback(
+    (id: string, value: string) => {
+      setEditingTaskId(null)
+      const trimmed = value.trim()
+      if (trimmed.length === 0) return
+      const current = (tasksById.get(id)?.title ?? '').trim()
+      if (trimmed === current) return
+      onTaskFieldUpdate?.(id, { title: trimmed })
+    },
+    [tasksById, onTaskFieldUpdate]
+  )
+
+  // Drop into descendant of source = cycle. Walk parent chain from target
+  // upward; if it hits source, abort the reparent.
+  const wouldCycle = useCallback(
+    (sourceId: string, targetId: string): boolean => {
+      if (sourceId === targetId) return true
+      let cur: string | null | undefined = targetId
+      const seen = new Set<string>()
+      while (cur && !seen.has(cur)) {
+        if (cur === sourceId) return true
+        seen.add(cur)
+        cur = tasksById.get(cur)?.parent_id ?? null
+      }
+      return false
+    },
+    [tasksById]
+  )
+
+  // When sorting by a meaningful field (priority/due_date), dropping above or
+  // below a sibling with a different value implies the user wants the dragged
+  // task to inherit that value — otherwise sort would snap it back to its old
+  // position and the drop would feel ignored.
+  const inheritOrderByField = useCallback(
+    (sourceId: string, targetId: string): void => {
+      if (sourceId === targetId) return
+      const source = tasksById.get(sourceId)
+      const target = tasksById.get(targetId)
+      if (!source || !target) return
+      if (treeOrderBy === 'priority') {
+        if (source.priority !== target.priority) {
+          onTaskFieldUpdate?.(sourceId, { priority: target.priority })
+        }
+      } else if (treeOrderBy === 'due_date') {
+        const a = source.due_date ?? null
+        const b = target.due_date ?? null
+        if (a !== b) onTaskFieldUpdate?.(sourceId, { due_date: b })
+      }
+      // 'manual' / 'created' / 'title' — no inheritance.
+    },
+    [treeOrderBy, tasksById, onTaskFieldUpdate]
+  )
+
+  // Sibling list of `taskId` in tree render order, scoped to project.
+  // Subtask → parent's children; root → all roots across groups (parent=null).
+  const getSiblings = useCallback(
+    (taskId: string): Task[] => {
+      const t = tasksById.get(taskId)
+      if (!t) return []
+      if (t.parent_id) return childrenByParent.get(t.parent_id) ?? []
+      const groups = rootGroupsByProject.get(t.project_id) ?? []
+      return groups.flatMap((g) => g.tasks)
+    },
+    [tasksById, childrenByParent, rootGroupsByProject]
+  )
+
+  const handleRowSelectClick = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>, taskId: string) => {
+      const isShift = event.shiftKey
+      const isCmd = event.metaKey || event.ctrlKey
+
+      if (isShift && selectionAnchorId && selectionAnchorId !== taskId) {
+        event.preventDefault()
+        const anchor = tasksById.get(selectionAnchorId)
+        const target = tasksById.get(taskId)
+        if (!anchor || !target) return
+        // Range only when same parent (true siblings). Different-parent shift
+        // falls back to "add target" semantics.
+        if ((anchor.parent_id ?? null) !== (target.parent_id ?? null)) {
+          setSelectedTaskIds((prev) => new Set([...prev, taskId]))
+          return
+        }
+        const siblings = getSiblings(selectionAnchorId)
+        const aIdx = siblings.findIndex((s) => s.id === selectionAnchorId)
+        const tIdx = siblings.findIndex((s) => s.id === taskId)
+        if (aIdx === -1 || tIdx === -1) return
+        const [lo, hi] = aIdx < tIdx ? [aIdx, tIdx] : [tIdx, aIdx]
+        setSelectedTaskIds(new Set(siblings.slice(lo, hi + 1).map((s) => s.id)))
+        // Anchor stays — subsequent shift-clicks pivot from same point.
+        return
+      }
+
+      if (isCmd) {
+        event.preventDefault()
+        setSelectedTaskIds((prev) => {
+          const next = new Set(prev)
+          if (next.has(taskId)) next.delete(taskId)
+          else next.add(taskId)
+          return next
+        })
+        setSelectionAnchorId(taskId)
+        return
+      }
+
+      // Plain click — clear selection, set anchor, open task.
+      setSelectedTaskIds(new Set([taskId]))
+      setSelectionAnchorId(taskId)
+      onTaskClick?.(taskId)
+    },
+    [selectionAnchorId, tasksById, getSiblings, onTaskClick]
+  )
+
+  // Render-order list of moved task ids — the dragged set, in tree visual
+  // order. Used so a multi-drag reinserts moved tasks in their original
+  // relative order rather than selection iteration order.
+  const getMovedIdsInRenderOrder = useCallback(
+    (projectId: string, ids: Set<string>): string[] => {
+      if (ids.size === 0) return []
+      const groups = rootGroupsByProject.get(projectId) ?? []
+      const ordered: string[] = []
+      const walk = (t: Task) => {
+        if (ids.has(t.id) && t.project_id === projectId) ordered.push(t.id)
+        const kids = childrenByParent.get(t.id) ?? []
+        for (const k of kids) walk(k)
+      }
+      for (const g of groups) for (const root of g.tasks) walk(root)
+      return ordered
+    },
+    [rootGroupsByProject, childrenByParent]
+  )
+
+  // Drop semantics: dragged set always becomes SIBLINGS of the target row.
+  // Never children. Multi-drag (selection size > 1, drag handle row is in
+  // selection) moves all selected; otherwise just the dragged row.
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      setActiveDragTaskId(null)
+      setActiveDragProjectId(null)
+      setActiveDragGroupId(null)
+      setProjectDrop(null)
+      const { active, over } = event
+      if (!over) return
+      const activeData = active.data.current as
+        | TaskRowDragData
+        | GroupDropData
+        | ProjectDragData
+        | { kind: 'group'; groupId: string }
+        | undefined
+
+      // === Project drag (top-level / member) OR folder drag. Geometry computed
+      // here; the membership/reorder decision is the shared resolver (unit-
+      // tested, shared with the rail). A dragged folder (kind='group') only
+      // reorders the top level (isGroup → resolver ignores merge).
+      if (activeData?.kind === 'project' || activeData?.kind === 'group') {
+        if (active.id === over.id) return
+        const isGroup = activeData.kind === 'group'
+        const od = over.data.current as
+          | ProjectDragData
+          | { kind: 'group'; groupId: string }
+          | undefined
+        const action = resolveProjectDrop({
+          active: isGroup
+            ? { id: (activeData as { groupId: string }).groupId, group: null, isGroup: true }
+            : { id: activeData.projectId, group: activeData.groupId },
+          over:
+            od?.kind === 'group'
+              ? { kind: 'group', id: od.groupId, group: null }
+              : {
+                  kind: 'project',
+                  id:
+                    od?.kind === 'project'
+                      ? od.projectId
+                      : (over.id as string).replace(/^project:/, ''),
+                  group: od?.kind === 'project' ? od.groupId : null
+                },
+          mode: treeProjectDropMode(event),
+          topLevel: allTopLevelRefs,
+          members: fullGroupMembers
+        })
+        applyProjectDrop(action, {
+          onCreateFolderWithProjects,
+          onMoveProjectToGroup,
+          onReorderProjectsInGroup,
+          onReorderTopLevel
+        })
+        return
+      }
+
+      if (!activeData || activeData.kind !== 'task') return
+      const sourceId = active.id as string
+
+      const overData = over.data.current as TaskRowDragData | GroupDropData | undefined
+      if (!overData) return
+
+      if (overData.projectId !== activeData.projectId) return
+
+      const groups = rootGroupsByProject.get(activeData.projectId)
+      if (!groups) return
+      const groupByKey = new Map(groups.map((g) => [g.key, g]))
+
+      // Build the moved set. Multi-drag only when the dragged row is part of a
+      // multi-selection; otherwise treat as single (don't sweep up selection
+      // unrelated to this drag).
+      const isMulti = selectedTaskIds.has(sourceId) && selectedTaskIds.size > 1
+      const movedIds = isMulti
+        ? getMovedIdsInRenderOrder(activeData.projectId, selectedTaskIds)
+        : [sourceId]
+      if (movedIds.length === 0) return
+
+      // === Drop on a header. Use arrayMove(active, over) on the flat row
+      // order to compute source's new position; source's new group =
+      // nearest header above the new position. This matches the pre-slide
+      // visual (the verticalListSortingStrategy uses the same arrayMove).
+      // For drag DOWN onto a header → source lands at top of header's group.
+      // For drag UP onto a header → source lands at end of group ABOVE the
+      // header (i.e. above the header in flat order).
+      if (overData.kind === 'group') {
+        const projectId = activeData.projectId
+        const projectGroups = rootGroupsByProject.get(projectId) ?? []
+        // Build flat row order (matches render order).
+        const flatIds: string[] = []
+        const flatIsHeader: boolean[] = []
+        const flatGroupOfRow: string[] = []
+        const hasCompanions = projectGroups.length > 1
+        for (const grp of projectGroups) {
+          const showHeader = !grp.isNone || hasCompanions
+          if (showHeader) {
+            flatIds.push(`header:${projectId}:${grp.key}`)
+            flatIsHeader.push(true)
+            flatGroupOfRow.push(grp.key)
+          }
+          const walk = (t: Task): void => {
+            flatIds.push(t.id)
+            flatIsHeader.push(false)
+            flatGroupOfRow.push(grp.key)
+            const kids = childrenByParent.get(t.id) ?? []
+            for (const k of kids) walk(k)
+          }
+          for (const t of grp.tasks) walk(t)
+        }
+        const activeIdx = flatIds.indexOf(sourceId)
+        const overIdx = flatIds.indexOf(over.id as string)
+        if (activeIdx === -1 || overIdx === -1) return
+
+        // arrayMove(flat, activeIdx, overIdx) — source's new position.
+        const newFlatIds = [...flatIds]
+        const newFlatIsHeader = [...flatIsHeader]
+        const newFlatGroupOfRow = [...flatGroupOfRow]
+        const [movedHeaderFlag] = newFlatIsHeader.splice(activeIdx, 1)
+        const [movedGroupTag] = newFlatGroupOfRow.splice(activeIdx, 1)
+        newFlatIds.splice(activeIdx, 1)
+        newFlatIds.splice(overIdx, 0, sourceId)
+        newFlatIsHeader.splice(overIdx, 0, movedHeaderFlag)
+        newFlatGroupOfRow.splice(overIdx, 0, movedGroupTag)
+        const newSourceIdx = newFlatIds.indexOf(sourceId)
+
+        // Walk backward to find source's new group (nearest header above).
+        let newGroupKey: string | null = null
+        for (let i = newSourceIdx - 1; i >= 0; i--) {
+          if (newFlatIsHeader[i]) {
+            newGroupKey = newFlatGroupOfRow[i]
+            break
+          }
+        }
+        // No header above the source's new position. Reached when the source
+        // lands at flat index 0 — i.e. it was dragged UP onto the FIRST header,
+        // so the arrayMove placed it above every header there is.
+        //
+        // The nearest-header-above walk encodes "drop on a header from below =
+        // land at the end of the group ABOVE it", which has no answer here:
+        // there is no group above the first one. The drop target itself is the
+        // only expression of intent left, so use it. Falling back to the
+        // source's own group (as this did) made the gesture a silent no-op —
+        // dropping onto the topmost header never changed status.
+        //
+        // Safe for the 'none' bucket too: none/pinned/temp headers set
+        // `droppable: false`, so they can never be `over` and never reach here.
+        if (!newGroupKey) newGroupKey = overData.groupValue
+
+        const newGroup = groupByKey.get(newGroupKey)
+        if (!newGroup || newGroup.isTemp) return
+
+        // Drop into the pinned bucket → pin the moved task(s). Status /
+        // priority unchanged (pinning is independent). For sources already
+        // pinned, toggle would unpin — guard with pinnedSet check.
+        if (newGroup.isPinned) {
+          const toPin = movedIds.filter((id) => !pinnedSet.has(id))
+          if (toPin.length > 0) onSetTasksPinned?.(toPin, true)
+          return
+        }
+        // Source leaving the pinned bucket → unpin (status/priority change
+        // applied by the dispatch below).
+        if (activeData.groupValue === PINNED_GROUP_KEY) {
+          const toUnpin = movedIds.filter((id) => pinnedSet.has(id))
+          if (toUnpin.length > 0) onSetTasksPinned?.(toUnpin, false)
+        }
+
+        // No-op: same group AND insertion at source's original position.
+        if (newGroupKey === activeData.groupValue && newSourceIdx === activeIdx) {
+          return
+        }
+
+        // Find next root in newGroupKey AFTER source's new idx — used to
+        // translate root-only insertion idx into moveTask's status-filtered
+        // targetIndex (which counts subtasks too).
+        let nextRootId: string | null = null
+        for (let i = newSourceIdx + 1; i < newFlatIds.length; i++) {
+          if (newFlatIsHeader[i]) break
+          if (newFlatGroupOfRow[i] !== newGroupKey) break
+          nextRootId = newFlatIds[i]
+          break
+        }
+        const statusFiltered = tasks.filter((t) => {
+          if (t.project_id !== projectId) return false
+          if (t.id === sourceId) return false
+          const key = treeGroupBy === 'status' ? t.status : `p${t.priority}`
+          return key === newGroupKey
+        })
+        const moveIdxStatus = nextRootId
+          ? statusFiltered.findIndex((t) => t.id === nextRootId)
+          : statusFiltered.length
+
+        const fieldUpdate: Partial<Task> =
+          treeGroupBy === 'status'
+            ? { status: newGroupKey as Task['status'] }
+            : { priority: parseInt(newGroupKey.slice(1), 10) }
+
+        // Root-only newSiblings for bulk reparent + subtask source reparent.
+        const movedSet = new Set(movedIds)
+        const rootOnlyMoveIdx = (() => {
+          let count = 0
+          for (let i = 0; i < newSourceIdx; i++) {
+            if (newFlatIsHeader[i]) continue
+            if (newFlatGroupOfRow[i] !== newGroupKey) continue
+            count++
+          }
+          return count
+        })()
+        const newSiblings = newGroup.tasks.map((t) => t.id).filter((id) => !movedSet.has(id))
+        newSiblings.splice(rootOnlyMoveIdx, 0, ...movedIds)
+
+        if (movedIds.length === 1) {
+          if (activeData.parentId !== null) {
+            onTaskReparent?.(sourceId, null, newSiblings)
+            onTaskFieldUpdate?.(sourceId, fieldUpdate)
+          } else {
+            onTaskMove?.(sourceId, newGroupKey, moveIdxStatus, treeGroupBy)
+          }
+        } else {
+          onTaskBulkReparent?.(movedIds, null, newSiblings)
+          onTaskBulkFieldUpdate?.(movedIds, fieldUpdate)
+        }
+        return
+      }
+
+      // === Drop on a task row — moved set becomes siblings of target. ===
+      const targetId = over.id as string
+      if (movedIds.includes(targetId) && movedIds.length === 1) return
+      const target = tasksById.get(targetId)
+      if (!target) return
+      const targetParent = target.parent_id ?? null
+
+      // Cycle check — none of the moved tasks may be ancestor of targetParent.
+      if (targetParent !== null) {
+        for (const m of movedIds) {
+          if (wouldCycle(m, targetParent)) return
+        }
+      }
+
+      let siblings: Task[]
+      let targetGroupKey: string | null = null
+      if (targetParent === null) {
+        targetGroupKey = rowGroupValue(target, treeGroupBy, treeGroupPinned, pinnedSet)
+        const g = groupByKey.get(targetGroupKey)
+        if (!g || g.isTemp) return
+        // Drop on a row in the pinned bucket:
+        //   - If any moved task isn't pinned yet → pin them (no reorder).
+        //     Status/priority preserved (pinning is independent).
+        //   - If all moved are already pinned → fall through to standard
+        //     same-group reorder (arrayMove on pinned siblings).
+        if (g.isPinned) {
+          const allPinned = movedIds.every((id) => pinnedSet.has(id))
+          if (!allPinned) {
+            const toPin = movedIds.filter((id) => !pinnedSet.has(id))
+            if (toPin.length > 0) onSetTasksPinned?.(toPin, true)
+            return
+          }
+        }
+        // Source leaving the pinned bucket → unpin (status change still
+        // applied by the cross-group dispatch below).
+        if (activeData.groupValue === PINNED_GROUP_KEY && targetGroupKey !== PINNED_GROUP_KEY) {
+          const toUnpin = movedIds.filter((id) => pinnedSet.has(id))
+          if (toUnpin.length > 0) onSetTasksPinned?.(toUnpin, false)
+        }
+        siblings = g.tasks
+      } else {
+        siblings = childrenByParent.get(targetParent) ?? []
+      }
+
+      const movedSet = new Set(movedIds)
+      const filtered = siblings.filter((s) => !movedSet.has(s.id))
+      const filteredTargetIdx = filtered.findIndex((s) => s.id === targetId)
+      if (filteredTargetIdx === -1) return
+      const sourceOrigIdx = siblings.findIndex((s) => s.id === sourceId)
+      const sameGroup = sourceOrigIdx !== -1
+      // Drop direction splits by whether source and target share a sibling list:
+      //
+      //   Same-group: arrayMove(srcIdx, overIdx) semantic. Source ends at
+      //   over's pre-shift slot. Direction by source-vs-target original index:
+      //     - source above target → insert AFTER target (over slid up under source)
+      //     - source below target → insert AT target (over slid down)
+      //
+      //   Cross-group: pointer position relative to target's current visual
+      //   center decides. Above (or exactly at) center → insert BEFORE (source
+      //   replaces over's slot). Below center → insert AFTER. This is what
+      //   makes "drop just above target's first row" reachable on cross-group
+      //   drags, since pre-slide doesn't show a gap above the first row of
+      //   the target group via the same-group convention.
+      let insertIdx: number
+      if (sameGroup) {
+        // Same-group: arrayMove(srcIdx, overIdx) semantic. Source ends at
+        // over's pre-shift slot in the new array.
+        //   srcIdx < overIdx (drag DOWN): over slides up under source →
+        //     insert AFTER over in filtered.
+        //   srcIdx > overIdx (drag UP): over slides down past source →
+        //     insert AT over in filtered.
+        const origTargetIdx = siblings.findIndex((s) => s.id === targetId)
+        insertIdx = sourceOrigIdx < origTargetIdx ? filteredTargetIdx + 1 : filteredTargetIdx
+      } else {
+        // Cross-group: pure arrayMove convention so landing matches the
+        // pre-slide visual (verticalListSortingStrategy uses arrayMove).
+        //   Drag DOWN (source above target in flat): source AFTER target.
+        //   Drag UP (source below target in flat): source AT target's slot
+        //     (= BEFORE target in flat).
+        // "Insert at top of group" semantics route through a header drop
+        // (`kind: 'group'` branch) — collision detection picks the header
+        // when pointer is in the inter-group gap.
+        const flat: string[] = []
+        {
+          const projectGroups = rootGroupsByProject.get(activeData.projectId) ?? []
+          const walk = (t: Task): void => {
+            flat.push(t.id)
+            const kids = childrenByParent.get(t.id) ?? []
+            for (const k of kids) walk(k)
+          }
+          for (const g of projectGroups) for (const t of g.tasks) walk(t)
+        }
+        const srcFlatIdx = flat.indexOf(sourceId)
+        const tgtFlatIdx = flat.indexOf(targetId)
+        const sourceAboveOver =
+          srcFlatIdx !== -1 && tgtFlatIdx !== -1 ? srcFlatIdx < tgtFlatIdx : true
+        insertIdx = sourceAboveOver ? filteredTargetIdx + 1 : filteredTargetIdx
+      }
+      const newSiblingIds = [
+        ...filtered.slice(0, insertIdx).map((s) => s.id),
+        ...movedIds,
+        ...filtered.slice(insertIdx).map((s) => s.id)
+      ]
+
+      // Single-source no-op guard. Source's new index in the result is exactly
+      // `insertIdx` (in the source-removed `filtered` list). If that equals
+      // its original slot, the reorder is a no-op.
+      if (movedIds.length === 1 && activeData.parentId === targetParent) {
+        if (sourceOrigIdx !== -1 && insertIdx === sourceOrigIdx) return
+      }
+
+      // Decide: do all moved already share the new parent? (Pure reorder vs reparent.)
+      const allSameParent = movedIds.every(
+        (id) => (tasksById.get(id)?.parent_id ?? null) === targetParent
+      )
+
+      if (movedIds.length === 1) {
+        const sameParent = activeData.parentId === targetParent
+        if (sameParent) {
+          if (
+            targetParent === null &&
+            targetGroupKey !== null &&
+            activeData.groupValue !== targetGroupKey
+          ) {
+            // `moveTask`'s targetIndex is in the STATUS-filtered task list
+            // (subtasks included). `insertIdx` here is in the ROOT-only
+            // siblings list. Translate by finding the next root's position
+            // in the status-filtered list — or append (statusCount) when
+            // inserting past the end.
+            const statusFiltered = tasks.filter((t) => {
+              if (t.project_id !== activeData.projectId) return false
+              if (t.id === sourceId) return false
+              const key = treeGroupBy === 'status' ? t.status : `p${t.priority}`
+              return key === targetGroupKey
+            })
+            const nextRootId = insertIdx < filtered.length ? filtered[insertIdx].id : null
+            const moveIdx = nextRootId
+              ? statusFiltered.findIndex((t) => t.id === nextRootId)
+              : statusFiltered.length
+            onTaskMove?.(
+              sourceId,
+              targetGroupKey,
+              moveIdx >= 0 ? moveIdx : statusFiltered.length,
+              treeGroupBy
+            )
+            if (!(treeOrderBy === 'priority' && treeGroupBy === 'priority')) {
+              inheritOrderByField(sourceId, targetId)
+            }
+            return
+          }
+          if (targetGroupKey === PINNED_GROUP_KEY) onPinnedReorder?.(newSiblingIds)
+          else onTaskReorder?.(newSiblingIds)
+          inheritOrderByField(sourceId, targetId)
+          return
+        }
+        onTaskReparent?.(sourceId, targetParent, newSiblingIds)
+        if (targetParent === null && targetGroupKey !== null) {
+          const fieldUpdate: Partial<Task> =
+            treeGroupBy === 'status'
+              ? { status: targetGroupKey as Task['status'] }
+              : { priority: parseInt(targetGroupKey.slice(1), 10) }
+          onTaskFieldUpdate?.(sourceId, fieldUpdate)
+        }
+        inheritOrderByField(sourceId, targetId)
+        return
+      }
+
+      // Multi-drag dispatch.
+      if (allSameParent) {
+        if (targetGroupKey === PINNED_GROUP_KEY) onPinnedReorder?.(newSiblingIds)
+        else onTaskReorder?.(newSiblingIds)
+      } else {
+        onTaskBulkReparent?.(movedIds, targetParent, newSiblingIds)
+      }
+      // Inherit groupBy field if becoming root in a group different from any
+      // moved task's current value. Apply uniformly to all moved.
+      if (targetParent === null && targetGroupKey !== null) {
+        const fieldUpdate: Partial<Task> =
+          treeGroupBy === 'status'
+            ? { status: targetGroupKey as Task['status'] }
+            : { priority: parseInt(targetGroupKey.slice(1), 10) }
+        onTaskBulkFieldUpdate?.(movedIds, fieldUpdate)
+      }
+      // orderBy inheritance per moved task — they all snap to target's value.
+      if (treeOrderBy === 'priority' || treeOrderBy === 'due_date') {
+        const fieldUpdate: Partial<Task> =
+          treeOrderBy === 'priority'
+            ? { priority: target.priority }
+            : { due_date: target.due_date ?? null }
+        // Skip when groupBy already wrote the same field.
+        const skipOverlap =
+          targetParent === null &&
+          targetGroupKey !== null &&
+          treeOrderBy === 'priority' &&
+          treeGroupBy === 'priority'
+        if (!skipOverlap) onTaskBulkFieldUpdate?.(movedIds, fieldUpdate)
+      }
+    },
+    [
+      childrenByParent,
+      rootGroupsByProject,
+      onTaskReorder,
+      onTaskMove,
+      onTaskReparent,
+      onTaskBulkReparent,
+      onTaskFieldUpdate,
+      onTaskBulkFieldUpdate,
+      treeGroupBy,
+      treeGroupPinned,
+      treeOrderBy,
+      pinnedSet,
+      selectedTaskIds,
+      getMovedIdsInRenderOrder,
+      tasksById,
+      tasks,
+      wouldCycle,
+      inheritOrderByField,
+      sortedProjects,
+      onReorderTopLevel,
+      onCreateFolderWithProjects,
+      onMoveProjectToGroup,
+      onReorderProjectsInGroup,
+      allTopLevelRefs,
+      fullEntries,
+      fullGroupMembers,
+      onSetTasksPinned,
+      onPinnedReorder
+    ]
+  )
+
+  // Flatten groups → linear row list interleaving headers and tasks (DFS for
+  // sub-tasks). Render order = sortable measurement order. Solo-`none` group
+  // skips its header — no companions to disambiguate, so the rows just look
+  // like the project's default list.
+  const buildRowList = (
+    groups: TreeGroup[],
+    projectId: string
+  ): { rows: RowItem[]; sortableRowIds: string[] } => {
+    const rows: RowItem[] = []
+    // Ids that participate in `SortableContext`. The temporary group is
+    // excluded wholesale — its rows render plain and never slide during a drag.
+    const sortableRowIds: string[] = []
+    const hasCompanions = groups.length > 1
+    for (let gi = 0; gi < groups.length; gi++) {
+      const g = groups[gi]
+      const inDnd = !g.isTemp
+      const showHeader = !g.isNone || hasCompanions
+      if (showHeader) {
+        const headerRowId = `header:${projectId}:${g.key}`
+        rows.push({
+          kind: 'header',
+          rowId: headerRowId,
+          group: g,
+          padTopClass: gi === 0 ? 'pt-2' : 'pt-4'
+        })
+        if (inDnd) sortableRowIds.push(headerRowId)
+      }
+      const walk = (t: Task, depth: number, ancestorFlags: boolean[]): void => {
+        rows.push({
+          kind: 'task',
+          rowId: t.id,
+          task: t,
+          depth,
+          ancestorFlags,
+          inTempGroup: g.isTemp
+        })
+        if (inDnd) sortableRowIds.push(t.id)
+        const kids = childrenByParent.get(t.id) ?? []
+        kids.forEach((k, i) => walk(k, depth + 1, [...ancestorFlags, i < kids.length - 1]))
+      }
+      g.tasks.forEach((t, i) => walk(t, 1, [i < g.tasks.length - 1]))
+    }
+    return { rows, sortableRowIds }
+  }
+
+  const renderProject = (
+    project: (typeof sortedProjects)[number],
+    opts?: { groupId?: string | null }
+  ) => {
+    const projectTasks = tasksByProject.get(project.id) ?? []
+    const groups = rootGroupsByProject.get(project.id) ?? []
+    // No stored preference yet → fall back to the old mount-time default of
+    // "the selected project is open". An explicit stored value always wins.
+    const isOpen = openProjects[project.id] ?? project.id === selectedProjectId
+    const isContextActive = selectedProjectId === project.id && activeView === 'context'
+    const isHomeActive =
+      selectedProjectId === project.id && activeTabType === 'home' && !isContextActive
+    const dragEnabled = Boolean(onTaskReorder) && Boolean(onTaskMove)
+    const cols = columnsByProjectId?.get(project.id) ?? null
+    // Flat row list: headers + tasks in DFS order. Non-temp header rows
+    // participate in the SortableContext so they tween together with
+    // surrounding rows, but their drag listeners are disabled — they slide,
+    // they don't drag. The temporary group is excluded from `sortableRowIds`.
+    const { rows, sortableRowIds } = buildRowList(groups, project.id)
+    const branchCtx: TaskBranchCtx = {
+      childrenByParent,
+      activeTaskId,
+      openTabTaskIds,
+      doneTaskIds,
+      taskProgress,
+      columnsByProjectId,
+      pinnedSet,
+      selectedTaskIds,
+      selectedTaskIdArr,
+      activeDragTaskId,
+      treeShowStatus,
+      treeShowPriority,
+      treeShowWorktree,
+      treeCrossOutDone,
+      treeGroupBy,
+      treeGroupPinned,
+      onTaskClick,
+      onRowSelectClick: handleRowSelectClick,
+      onCloseTab,
+      onOpenTaskInBackground,
+      taskContextMenuRender,
+      taskBulkContextMenuRender,
+      dragEnabled,
+      editingTaskId,
+      onStartEdit: handleStartEdit,
+      onCommitEdit: handleCommitEdit,
+      onCancelEdit: handleCancelEdit,
+      tasksWithChildren,
+      collapsedTaskIds: collapsedSet,
+      onToggleCollapse: handleToggleCollapse
+    }
+    // Every non-temp element (group headers, root rows, sub-rows) is a
+    // sortable item in one flat list, so `verticalListSortingStrategy` slides
+    // them uniformly. Headers are sortable participants with drag DISABLED —
+    // they tween with surrounding rows during pre-slide but can't be dragged
+    // as a source. Drop on a header routes through `kind: 'group'` → insert at
+    // index 0 of that group. The temporary group is excluded entirely: its
+    // rows render plain (no `useSortable`) and never drag, drop, or slide.
+    return (
+      <SortableProject
+        key={project.id}
+        projectId={project.id}
+        groupId={opts?.groupId ?? null}
+        disabled={false}
+      >
+        {({ setNodeRef, style, listeners }) => (
+          <Collapsible.Root
+            ref={setNodeRef}
+            style={style}
+            open={isOpen}
+            onOpenChange={(open) => setTreeProjectOpen(project.id, open)}
+            className="rounded-lg overflow-hidden bg-surface-1"
+          >
+            <div
+              {...listeners}
+              style={{
+                backgroundColor: `color-mix(in oklch, ${project.color} ${projectIsActive(project.id) ? 22 : 10}%, transparent)`
+              }}
+              className="group/projectrow relative flex h-10 items-center transition-[filter] hover:brightness-125"
+            >
+              <Collapsible.Trigger
+                aria-label={isOpen ? `Collapse ${project.name}` : `Expand ${project.name}`}
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground"
+              >
+                <ChevronDown
+                  className={cn(
+                    'size-3.5 transition-transform duration-200',
+                    !isOpen && '-rotate-90'
+                  )}
+                />
+              </Collapsible.Trigger>
+              <Collapsible.Trigger asChild>
+                <button
+                  type="button"
+                  className="flex flex-1 items-center gap-2 rounded-md py-1.5 text-sm font-semibold min-w-0"
+                >
+                  <span className="truncate flex-1 text-left">{project.name}</span>
+                </button>
+              </Collapsible.Trigger>
+              <button
+                type="button"
+                onClick={() => onSetProjectStarred?.(project.id, !project.starred)}
+                aria-label={project.starred ? `Unstar ${project.name}` : `Star ${project.name}`}
+                className={cn(
+                  'inline-flex size-7 shrink-0 items-center justify-center rounded-md transition-colors',
+                  project.starred
+                    ? 'text-foreground'
+                    : 'text-muted-foreground/70 hover:text-foreground'
+                )}
+              >
+                <Star className={cn('size-3.5', project.starred && 'fill-current')} />
+              </button>
+              <button
+                type="button"
+                onClick={() => onSelectProject(project.id, { home: true })}
+                aria-label={`Open ${project.name} home`}
+                className={cn(
+                  'inline-flex size-7 shrink-0 items-center justify-center rounded-md transition-[color,background-color]',
+                  isHomeActive
+                    ? 'bg-foreground text-background shadow-sm hover:bg-foreground/90'
+                    : 'text-muted-foreground/70 hover:text-foreground'
+                )}
+              >
+                <Home className="size-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  useTabStore.getState().setSelectedProjectId(project.id)
+                  useTabStore.getState().setActiveView('context')
+                }}
+                aria-label={`Context Manager for ${project.name}`}
+                className={cn(
+                  'relative inline-flex size-7 shrink-0 items-center justify-center rounded-md transition-[color,background-color]',
+                  isContextActive
+                    ? 'bg-foreground text-background shadow-sm hover:bg-foreground/90'
+                    : 'text-muted-foreground/70 hover:text-foreground'
+                )}
+              >
+                <BookOpen className="size-3.5" />
+                <ContextStaleDot count={staleSkillCounts.get(project.id) ?? 0} />
+              </button>
+              <button
+                type="button"
+                onClick={() => onProjectSettings(project)}
+                aria-label={`Settings for ${project.name}`}
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 hover:text-foreground transition-colors mr-0.5"
+              >
+                <Settings className="size-3.5" />
+              </button>
+            </div>
+            <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
+              <div className="flex flex-col pr-2 pt-2 pb-3">
+                {projectTasks.length === 0 && groups.length === 0 ? (
+                  <span className="text-xs italic text-muted-foreground/60 px-2 py-1">
+                    No active tasks
+                  </span>
+                ) : (
+                  <SortableContext items={sortableRowIds} strategy={verticalListSortingStrategy}>
+                    {rows.map((r) =>
+                      r.kind === 'header' ? (
+                        <HeaderRow
+                          key={r.rowId}
+                          rowId={r.rowId}
+                          projectId={project.id}
+                          group={r.group}
+                          padTopClass={r.padTopClass}
+                          cols={cols}
+                          treeGroupBy={treeGroupBy}
+                          onCreateTemporaryTask={onCreateTemporaryTask}
+                        />
+                      ) : (
+                        <TaskRow
+                          key={r.rowId}
+                          task={r.task}
+                          depth={r.depth}
+                          ancestorFlags={r.ancestorFlags}
+                          inTempGroup={r.inTempGroup}
+                          ctx={branchCtx}
+                        />
+                      )
+                    )}
+                  </SortableContext>
+                )}
+              </div>
+            </Collapsible.Content>
+          </Collapsible.Root>
+        )}
+      </SortableProject>
+    )
+  }
+
+  const openSearch = useDialogStore((s) => s.openSearch)
+  const searchShortcut = useShortcutDisplay('search')
+
+  return (
+    <div className="@container flex flex-col gap-3 px-1">
+      {/* Top icon row — sits in same horizontal hierarchy as project rows so
+          rightmost button aligns with project Settings icon by construction.
+          pl clears macOS traffic lights (80px total - SidebarGroup p-2 (8) -
+          this wrapper's px-1 (4) = 68px). */}
+      <div
+        className="relative flex items-center h-11 window-drag-region"
+        style={{ paddingLeft: 68, marginTop: 6 }}
+      >
+        <div
+          aria-hidden
+          className="pointer-events-none absolute left-1/2 -translate-x-1/2 flex items-center gap-1 select-none text-xs font-medium tracking-wide text-foreground @max-[300px]:hidden"
+        >
+          <span>Slay</span>
+          <img src={logo} alt="" draggable={false} className="h-4 w-auto" />
+          <span>Zone</span>
+        </div>
+        <div className="flex items-center ml-auto">
+          <Tooltip delayDuration={500}>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => openSearch()}
+                aria-label="Search"
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors window-no-drag"
+              >
+                <Search className="size-3.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs">
+              {searchShortcut ? `Search (${searchShortcut})` : 'Search'}
+            </TooltipContent>
+          </Tooltip>
+          <TreeDisplaySettings />
+          <Tooltip delayDuration={500}>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label="Add project"
+                onClick={() => useDialogStore.getState().openCreateProject()}
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors mr-0.5 window-no-drag"
+              >
+                <Plus className="size-3.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs">
+              Add project
+            </TooltipContent>
+          </Tooltip>
+        </div>
+      </div>
+      <DndContext
+        sensors={sensors}
+        collisionDetection={collisionDetection}
+        onDragStart={handleDragStart}
+        onDragMove={handleDragMove}
+        onDragEnd={handleDragEnd}
+        onDragCancel={handleDragCancel}
+      >
+        <SortableContext
+          items={treeEntries.flatMap((e) =>
+            e.kind === 'project'
+              ? [`project:${e.id}`]
+              : [`group:${e.id}`, ...e.projects.map((p) => `project:${p.id}`)]
+          )}
+          strategy={noShiftStrategy}
+        >
+          <div className="flex flex-col gap-3">
+            {treeEntries.map((entry) => {
+              if (entry.kind === 'project') {
+                const line = projectDrop?.overId === `project:${entry.id}` ? projectDrop.mode : null
+                return (
+                  <div key={`project:${entry.id}`} className="relative">
+                    {/* Centered in the gap-3 (0.75rem) between top-level rows:
+                      -top-1.5 (0.75rem) = half-gap; -translate-y-1/2 puts the
+                      line CENTER at that offset. rem-based → exact at any zoom. */}
+                    {line === 'before' && (
+                      <span className="pointer-events-none absolute -top-1.5 left-2 right-2 z-20 h-1 -translate-y-1/2 rounded-full bg-foreground" />
+                    )}
+                    {line === 'after' && (
+                      <span className="pointer-events-none absolute -bottom-1.5 left-2 right-2 z-20 h-1 translate-y-1/2 rounded-full bg-foreground" />
+                    )}
+                    <div className="relative">
+                      {renderProject(entry.project)}
+                      {/* Overlay ON TOP of the opaque project block (matches its
+                        rounded-lg) — a fill behind it is hidden, leaving only
+                        the ring's corners. */}
+                      {line === 'merge' && (
+                        <span className="pointer-events-none absolute inset-0 z-20 flex items-center justify-end rounded-lg bg-primary/30 pr-2 text-primary ring-2 ring-inset ring-primary">
+                          <FolderPlus className="size-4" />
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )
+              }
+              return (
+                <Collapsible.Root
+                  key={`group:${entry.id}`}
+                  open={entry.group.collapsed === 0}
+                  onOpenChange={(open) => onSetGroupCollapsed?.(entry.id, !open)}
+                >
+                  <TreeGroupHeader
+                    group={entry.group}
+                    line={projectDrop?.overId === `group:${entry.id}` ? projectDrop.mode : null}
+                    onSettings={() => useDialogStore.getState().openGroupSettings(entry.group)}
+                    onDelete={() => onDeleteProjectGroup?.(entry.id)}
+                  />
+                  <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
+                    {/* Reference `projectDrop` DIRECTLY in JSX (no IIFE) so the
+                      React Compiler tracks it as a dep and re-renders mid-drag.
+                      Separator = ABSOLUTE overlay centered in the gap-3 (0.75rem)
+                      gap → -top-1.5 (0.75rem) = half-gap, rem-based (zoom-safe). */}
+                    {/* py-3 (12px) ≥ the ±1.5 edge-line offset so the first/last
+                      member's insertion line isn't clipped by Collapsible.Content's
+                      overflow-hidden. */}
+                    <div className="ml-5 flex flex-col gap-3 py-3">
+                      {entry.projects.map((p) => (
+                        <div key={`project:${p.id}`} className="relative">
+                          {projectDrop?.overId === `project:${p.id}` &&
+                            projectDrop.mode === 'before' && (
+                              <span className="pointer-events-none absolute -top-1.5 left-2 right-2 z-20 h-1 -translate-y-1/2 rounded-full bg-foreground" />
+                            )}
+                          {projectDrop?.overId === `project:${p.id}` &&
+                            projectDrop.mode === 'after' && (
+                              <span className="pointer-events-none absolute -bottom-1.5 left-2 right-2 z-20 h-1 translate-y-1/2 rounded-full bg-foreground" />
+                            )}
+                          <div className="relative">{renderProject(p, { groupId: entry.id })}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </Collapsible.Content>
+                </Collapsible.Root>
+              )
+            })}
+          </div>
+        </SortableContext>
+        <DragOverlay dropAnimation={null}>
+          {activeDragGroupId
+            ? (() => {
+                const g = projectGroups.find((pg) => pg.id === activeDragGroupId)
+                return (
+                  <div className="flex items-center gap-1 rounded-md bg-surface-2 px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-foreground shadow-lg">
+                    <ChevronDown className="size-3 shrink-0" />
+                    <span className="truncate">{g?.name.trim() || 'Folder'}</span>
+                  </div>
+                )
+              })()
+            : activeDragProjectId
+              ? (() => {
+                  const proj = sortedProjects.find((p) => p.id === activeDragProjectId)
+                  return proj ? <ProjectDragPreview project={proj} /> : null
+                })()
+              : activeDragTaskId
+                ? (() => {
+                    const active = tasksById.get(activeDragTaskId)
+                    if (!active) return null
+                    const isMulti =
+                      selectedTaskIds.has(activeDragTaskId) && selectedTaskIds.size > 1
+                    const ids = isMulti
+                      ? getMovedIdsInRenderOrder(active.project_id, selectedTaskIds)
+                      : [activeDragTaskId]
+                    const movedTasks = ids
+                      .map((id) => tasksById.get(id))
+                      .filter((t): t is Task => Boolean(t))
+                    return <TaskDragPreview tasks={movedTasks} />
+                  })()
+                : null}
+        </DragOverlay>
+      </DndContext>
+      {hiddenProjects.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowAll((v) => !v)}
+          className="flex items-center justify-center gap-1 px-2 py-2 text-[11px] text-muted-foreground/60 hover:text-muted-foreground transition-colors"
+        >
+          <span>{showAll ? 'Hide inactive' : 'Show all projects'}</span>
+          <ChevronDown className={cn('size-3 transition-transform', showAll && 'rotate-180')} />
+        </button>
+      )}
+    </div>
+  )
+}

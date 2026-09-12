@@ -1,0 +1,3098 @@
+[
+  {
+    "version": "0.35.0",
+    "date": "2026-06-12",
+    "tagline": "Focus, fixes, foundations",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Secret project 1",
+        "description": "Hint: check the commits"
+      },
+      {
+        "category": "feature",
+        "title": "Secret project 2",
+        "description": "Hint: check the commits"
+      },
+      {
+        "category": "feature",
+        "title": "Secret project 3",
+        "description": "You'll see"
+      },
+      {
+        "category": "improvement",
+        "title": "Instant search",
+        "description": "The Cmd+K search dialog preloads and opens with a snappier animation."
+      },
+      {
+        "category": "improvement",
+        "title": "Panel use keeps agents awake",
+        "description": "Working in a task's browser panel counts as activity, so auto-hibernate no longer pauses an agent you're actively using."
+      },
+      {
+        "category": "fix",
+        "title": "Conversations survive restarts",
+        "description": "An append-only conversation ledger stops conversation IDs from being clobbered, so agent sessions resume correctly after app restarts."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal focus stays put",
+        "description": "The terminal keeps focus through panel resizes and browser navigation, new-task terminals focus on open, and focus steals self-heal."
+      },
+      {
+        "category": "fix",
+        "title": "Browser panel stuck loading",
+        "description": "The browser panel no longer shows a perpetual loading spinner after fast navigations."
+      },
+      {
+        "category": "fix",
+        "title": "Always-fresh git diffs",
+        "description": "The working-tree diff panel always shows your current changes instead of stale cached ones."
+      },
+      {
+        "category": "fix",
+        "title": "Home icon opens project kanban",
+        "description": "Clicking a project's home icon in the sidebar reliably opens its kanban board."
+      }
+    ]
+  },
+  {
+    "version": "0.34.0",
+    "date": "2026-06-05",
+    "tagline": "Sessions, selection, speed",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Kanban multi-select gestures",
+        "description": "Select multiple kanban cards with standard shift- and cmd-click gestures."
+      },
+      {
+        "category": "feature",
+        "title": "Tree-view row selection",
+        "description": "Tree view gains per-row selection borders, with Esc to clear the selection."
+      },
+      {
+        "category": "improvement",
+        "title": "Pre-warmed agent shells",
+        "description": "Agent shells pre-warm per project so the first agent starts faster."
+      },
+      {
+        "category": "improvement",
+        "title": "Smarter agent auto-start",
+        "description": "Agent auto-start now fires reliably for temporary tasks and is scoped correctly for regular ones."
+      },
+      {
+        "category": "improvement",
+        "title": "Reopen overlay for hibernated sessions",
+        "description": "A loading overlay shows while a hibernated terminal session reopens."
+      },
+      {
+        "category": "fix",
+        "title": "No more false \"session expired\"",
+        "description": "Phantom conversation IDs are healed and mid-session \"Session not found\" echoes no longer freeze the terminal or trigger false expiry."
+      },
+      {
+        "category": "fix",
+        "title": "Tree-view pause icon priority",
+        "description": "The pause icon now wins over the unread blob in tree-view rows."
+      },
+      {
+        "category": "fix",
+        "title": "Bulk menu header alignment",
+        "description": "The bulk multi-select context menu header now aligns to the grid."
+      }
+    ]
+  },
+  {
+    "version": "0.33.1",
+    "date": "2026-06-03",
+    "tagline": "Jira goes live",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Jira out of Labs",
+        "description": "The Jira integration is now generally available, no longer behind the Labs flag."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal status no longer clobbers live conversations",
+        "description": "Reviving terminal status no longer overwrites an active AI conversation."
+      }
+    ]
+  },
+  {
+    "version": "0.33.0",
+    "date": "2026-06-03",
+    "tagline": "Groups, panels, speed",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Project group folders",
+        "description": "Organize projects into collapsible group folders in the sidebar, with drag-to-reorder."
+      },
+      {
+        "category": "feature",
+        "title": "Auto-hibernate idle agents",
+        "description": "Idle agent terminals can auto-hibernate to free resources, showing a pause icon and \"Paused\" label."
+      },
+      {
+        "category": "feature",
+        "title": "Figma-style panel layout",
+        "description": "Web panels gain per-panel layout with size units, min/max bounds, and anchoring."
+      },
+      {
+        "category": "feature",
+        "title": "Inline PDF preview",
+        "description": "PDFs now render inline in the file editor."
+      },
+      {
+        "category": "feature",
+        "title": "Blocked and Snooze task states",
+        "description": "The status menu adds Blocked, Blocked-by, and Snooze options."
+      },
+      {
+        "category": "feature",
+        "title": "Integration auto-recovery",
+        "description": "Integrations auto-disable on auth failure (401/403) and offer a reconnect UI scoped to affected projects."
+      },
+      {
+        "category": "improvement",
+        "title": "Faster startup and smoother rendering",
+        "description": "Idle prewarming, lazy-loaded panels, GPU rasterization, and React Activity wrapping cut startup time and smooth out the UI."
+      },
+      {
+        "category": "improvement",
+        "title": "More responsive under heavy data",
+        "description": "Moved SQLite to a worker thread so the UI stays responsive during heavy database work."
+      },
+      {
+        "category": "improvement",
+        "title": "Smoother terminal painting",
+        "description": "Adaptive paint cadence keeps terminals smooth on slow-drip output."
+      },
+      {
+        "category": "improvement",
+        "title": "More reliable terminal status",
+        "description": "Agent status indicators now self-heal and stay accurate across interrupts, resumes, hibernation, and PTY respawns."
+      },
+      {
+        "category": "improvement",
+        "title": "Browser panels keep rendering on hidden tabs",
+        "description": "Web panels keep painting when their task tab is in the background."
+      },
+      {
+        "category": "fix",
+        "title": "Friendly session-expired overlay",
+        "description": "Stale terminal sessions now show a clear \"session expired\" overlay instead of failing quietly."
+      },
+      {
+        "category": "fix",
+        "title": "Git diff tree",
+        "description": "The diff tree always shows with auto-selection outside flow mode, and its toggle reflects open state."
+      },
+      {
+        "category": "fix",
+        "title": "Editor focuses on open",
+        "description": "Opening a file now focuses the editor."
+      },
+      {
+        "category": "fix",
+        "title": "Settings cards no longer overflow",
+        "description": "Long descriptions in settings cards water-fill instead of spilling over."
+      },
+      {
+        "category": "fix",
+        "title": "Settings stay fresh after idle",
+        "description": "Settings no longer go stale after the app sits idle."
+      },
+      {
+        "category": "fix",
+        "title": "Window button alignment",
+        "description": "Traffic-light window buttons are aligned correctly in project and tree views."
+      },
+      {
+        "category": "fix",
+        "title": "Worktree nesting",
+        "description": "Worktrees no longer create a nested src/src when a tracked directory has ignored children."
+      },
+      {
+        "category": "fix",
+        "title": "Sidebar drag insertion line",
+        "description": "The project rail drag insertion line now reaches the top and bottom of the list."
+      }
+    ]
+  },
+  {
+    "version": "0.32.3",
+    "date": "2026-05-23",
+    "tagline": "Atlas cleanup",
+    "items": [
+      {
+        "category": "fix",
+        "title": "Terminal glyphs fully cleared after resize",
+        "description": "Cleaned up remaining WebGL atlas artefacts that could leave scrambled vectors after terminal resizes."
+      }
+    ]
+  },
+  {
+    "version": "0.32.2",
+    "date": "2026-05-22",
+    "tagline": "Scramble-free terminals",
+    "items": [
+      {
+        "category": "fix",
+        "title": "Terminals stay legible after resize",
+        "description": "Fixed scrambled terminal glyphs caused by a stale WebGL atlas after a window, panel, or font resize."
+      }
+    ]
+  },
+  {
+    "version": "0.32.1",
+    "date": "2026-05-22",
+    "tagline": "Codex Chat polish",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Codex Chat collaboration and Fast Mode",
+        "description": "Codex Chat sessions gain collaboration and Fast Mode controls."
+      },
+      {
+        "category": "feature",
+        "title": "Side-car status panel",
+        "description": "Diagnostics settings now shows a live status panel for the background side-car process."
+      },
+      {
+        "category": "fix",
+        "title": "Tree window dragging restored",
+        "description": "Fixed the popped-out tree window so it drags again, with correctly aligned window buttons."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal renders cleanly on cold start",
+        "description": "Restored WebGL atlas correction so terminal glyphs render correctly from the first frame."
+      },
+      {
+        "category": "fix",
+        "title": "Deterministic terminal shutdown",
+        "description": "Terminal shutdown now completes deterministically instead of leaving sessions in a stuck state."
+      },
+      {
+        "category": "fix",
+        "title": "Accurate turn detection",
+        "description": "Turn initialization is no longer mistaken for a turn opening, fixing agent activity state."
+      }
+    ]
+  },
+  {
+    "version": "0.32.0",
+    "date": "2026-05-21",
+    "tagline": "Codex Chat, more agents",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Codex Chat mode",
+        "description": "Run Codex as a chat session alongside the terminal, with its own logo on codex-chat tabs and a liveness watchdog that detects dead sessions."
+      },
+      {
+        "category": "feature",
+        "title": "Antigravity (agy) provider support",
+        "description": "Added Antigravity as a selectable terminal agent provider."
+      },
+      {
+        "category": "feature",
+        "title": "Drag-reorder panel toggle buttons",
+        "description": "Reorder the panel toggle buttons by dragging them into the layout you want."
+      },
+      {
+        "category": "feature",
+        "title": "Delete a project from settings",
+        "description": "Project settings now has a danger zone for permanently deleting a project."
+      },
+      {
+        "category": "feature",
+        "title": "Mark a task as unread",
+        "description": "Task context menu gains a Mark as unread action."
+      },
+      {
+        "category": "improvement",
+        "title": "Panel resize moves the shared boundary",
+        "description": "Dragging to resize a panel now moves the boundary shared with its neighbor instead of resizing in isolation."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal glyphs render cleanly on open",
+        "description": "Fixed scrambled glyphs on cold start and a hardened WebGL renderer lifecycle, so the terminal renders correctly from the first frame."
+      },
+      {
+        "category": "fix",
+        "title": "Tree-view rename persists",
+        "description": "Renaming a task inline in the tree now saves the new title reliably."
+      },
+      {
+        "category": "fix",
+        "title": "Settings cards expand to full height",
+        "description": "Task settings cards now expand and fill the available height."
+      },
+      {
+        "category": "fix",
+        "title": "Agent hooks work on Windows",
+        "description": "Fixed Windows hook paths and cross-platform slay init, plus native hooks.json for Codex."
+      },
+      {
+        "category": "fix",
+        "title": "Codex session cleaned up on fatal start error",
+        "description": "A Codex session that fails to start is now torn down instead of leaving a stuck tab."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal underline no longer drops a color",
+        "description": "Color index 4 is preserved when stripping SGR underline styling."
+      },
+      {
+        "category": "fix",
+        "title": "Browser file:// URLs no longer accumulate an 'app' prefix",
+        "description": "Navigating local files in the browser panel keeps the URL clean."
+      },
+      {
+        "category": "fix",
+        "title": "Hover-revealed sidebar layers above the browser panel",
+        "description": "The sidebar now appears above the browser panel when revealed on hover."
+      },
+      {
+        "category": "fix",
+        "title": "Spinner and progress ring align",
+        "description": "The terminal progress dot's spinner and progress ring are now aligned."
+      }
+    ]
+  },
+  {
+    "version": "0.31.0",
+    "date": "2026-05-20",
+    "tagline": "Sub-tasks, hook-driven agents",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Tree drag-and-drop: pin, unpin, reorder",
+        "description": "Drag tasks into, out of, or within the pinned bucket; cross-group sibling reordering now lands where the preview shows, with group headers as valid drop targets."
+      },
+      {
+        "category": "feature",
+        "title": "Sub-tasks in tree view",
+        "description": "Sub-tasks are now collapsible under their parent in the tree, with blocked/snoozed visibility toggles and an auto-collapse when dragging a parent."
+      },
+      {
+        "category": "feature",
+        "title": "Bulk actions on multi-selected tree rows",
+        "description": "Multi-select rows in the sidebar tree and run actions (status, priority, delete, etc.) on all of them from one context menu."
+      },
+      {
+        "category": "feature",
+        "title": "Hook-driven agent lifecycle for Claude Code, Codex, Gemini",
+        "description": "Terminal now tracks agent start/stop via hook events instead of regex-matching output, eliminating false idle states and missed turns."
+      },
+      {
+        "category": "feature",
+        "title": "Tree filters: priority + show-all-open",
+        "description": "Filter the tree by priority and toggle show-all-open with a keyboard shortcut."
+      },
+      {
+        "category": "feature",
+        "title": "Start the main PTY from the slay CLI",
+        "description": "New verb + flag let you spawn or auto-spawn a task's main agent terminal directly from the command line."
+      },
+      {
+        "category": "improvement",
+        "title": "Sidebar polish",
+        "description": "Sidebar gains a pill-shaped resize handle and auto-hides the window buttons when collapsed."
+      },
+      {
+        "category": "improvement",
+        "title": "Markdown tables support inline line breaks",
+        "description": "Editor now renders inline `<br>` inside markdown table cells, so multi-line content displays correctly."
+      },
+      {
+        "category": "improvement",
+        "title": "Task description cap raised to 10,000 characters",
+        "description": "Long-form task descriptions no longer truncate at the old 5,000-char limit."
+      },
+      {
+        "category": "fix",
+        "title": "Claude ESC interrupt detected reliably",
+        "description": "Pressing ESC to cancel a Claude turn is now picked up via an output marker, so the UI flips state immediately."
+      },
+      {
+        "category": "fix",
+        "title": "Claude state flips to idle on blocking PreToolUse hook",
+        "description": "When a PreToolUse hook blocks the turn, Claude's state correctly resets to idle instead of staying stuck working."
+      },
+      {
+        "category": "fix",
+        "title": "Temp tasks no longer auto-deleted when their PTY exits",
+        "description": "Closing a temporary task's terminal no longer wipes the task — close it explicitly to remove it."
+      },
+      {
+        "category": "fix",
+        "title": "Browser tab lock state updates instantly",
+        "description": "Toggling or auto-locking a browser tab now stamps the lock state locally for immediate UI feedback."
+      },
+      {
+        "category": "fix",
+        "title": "Diff chip row stays mounted on clean state",
+        "description": "The continuous-flow chip row no longer disappears the moment the working tree goes clean."
+      }
+    ]
+  },
+  {
+    "version": "0.30.0",
+    "date": "2026-05-15",
+    "tagline": "Tree overhaul, lazy agents",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Tree view overhaul",
+        "description": "Tree view now has per-status new-task buttons in group headers, a hide-closed toggle, inline rename on double-click, sibling multi-select, multi-drag with stacked preview, GroupBy 'none' + orderBy 'last_interaction', a 'Group pinned tasks' toggle, and reworked filters grouped into Tasks/Task/Filters."
+      },
+      {
+        "category": "feature",
+        "title": "Drag-and-drop in tree view",
+        "description": "Tree view now supports full sibling-drop dnd with a floating preview, decoupled from the kanban sort settings so it always works."
+      },
+      {
+        "category": "feature",
+        "title": "Lazy PTY — agents start on demand",
+        "description": "Terminals no longer spawn an agent until you click Start, with an auto-start setting + redesigned idle screen. Warm agents now persist across restarts and auto-resume on boot."
+      },
+      {
+        "category": "feature",
+        "title": "Provider switcher on the main tab",
+        "description": "Click anywhere on the main terminal tab to switch providers (Claude Code, Codex, Gemini, etc.) or right-click for the full menu."
+      },
+      {
+        "category": "feature",
+        "title": "Claude Chat is now its own provider",
+        "description": "Claude Chat lives alongside Claude Code in the provider menu, with its own session state."
+      },
+      {
+        "category": "feature",
+        "title": "Celebratory completion screens",
+        "description": "Closing a task now shows a celebratory completion screen themed to slay, with a grid of follow-up action buttons and dropdown variants."
+      },
+      {
+        "category": "feature",
+        "title": "Browser tabs: per-tab agent lock",
+        "description": "Lock a browser tab so the agent can see it but can't interact — CDP input gate with sticky persistence per tab."
+      },
+      {
+        "category": "feature",
+        "title": "Hook-driven agent lifecycle in terminal",
+        "description": "Terminal now uses hook events to detect agent start/stop, replacing fragile output-pattern matching."
+      },
+      {
+        "category": "feature",
+        "title": "Pasted images land in Uploads folder",
+        "description": "Images pasted into chat now save into a dedicated Uploads artifact folder per task."
+      },
+      {
+        "category": "feature",
+        "title": "Settings: Layout tab",
+        "description": "New Layout tab in settings consolidates task header alignment, menu mode, and other layout knobs."
+      },
+      {
+        "category": "feature",
+        "title": "CLI: slay tasks open --background",
+        "description": "Open a task in the background without stealing focus or activating its tab."
+      },
+      {
+        "category": "improvement",
+        "title": "Chat spawns subprocess lazily",
+        "description": "Chat no longer spawns the agent subprocess until you send your first message, cutting startup cost when you just want to read history."
+      },
+      {
+        "category": "improvement",
+        "title": "Mermaid renders as inline SVG",
+        "description": "Mermaid diagrams in markdown now render as inline SVG instead of canvas, sharper at any zoom level and copy-paste friendly."
+      },
+      {
+        "category": "improvement",
+        "title": "Unicode 15 grapheme widths in terminal",
+        "description": "Terminal now measures grapheme widths using Unicode 15 tables, so newer emoji and CJK characters render with correct cell width."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal: \"Turn interrupted\" shows even with tools hidden",
+        "description": "Cancelling a turn now displays the interrupted indicator regardless of the Show tools setting."
+      },
+      {
+        "category": "fix",
+        "title": "Claude spinner detection across split chunks",
+        "description": "Claude's working-spinner is now detected even when the bullet and verb are separated by CUF escape sequences, eliminating false idle states."
+      },
+      {
+        "category": "fix",
+        "title": "Browser tabs respond to CLI commands across all tasks",
+        "description": "CLI browser listeners no longer ignore tasks whose tab isn't currently active."
+      }
+    ]
+  },
+  {
+    "version": "0.29.2",
+    "date": "2026-05-12",
+    "tagline": "Update flow, chat polish",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Sidebar shows update download progress + restart card",
+        "description": "When a new app update is downloading, the sidebar now surfaces live progress and prompts you to restart once it's ready."
+      },
+      {
+        "category": "feature",
+        "title": "CLI: rename PTY sessions and read tab titles",
+        "description": "New slay pty rename command sets a tab title from the CLI, and tab titles are now exposed via the CLI for scripting."
+      },
+      {
+        "category": "feature",
+        "title": "CLI: link a worktree to a task",
+        "description": "slay tasks update --worktree-path now binds an existing worktree to a task without recreating it."
+      },
+      {
+        "category": "improvement",
+        "title": "Chat: Cancel actually interrupts the agent",
+        "description": "Cancelling an AskUserQuestion prompt now interrupts the running agent instead of just dismissing the prompt."
+      },
+      {
+        "category": "improvement",
+        "title": "Sidebar polish",
+        "description": "Tree header aligned with the tabbar with smaller icons, the standalone tree-header toggle is gone, and \"Show all\" is now \"Show all projects\" for clarity."
+      },
+      {
+        "category": "improvement",
+        "title": "Renaming a temporary task auto-promotes it",
+        "description": "Editing a temp task's title now promotes it to a permanent task automatically, no extra step required."
+      },
+      {
+        "category": "improvement",
+        "title": "Chat: message timestamp on hover",
+        "description": "Hover a chat message to see its exact timestamp."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal: more accurate \"agent working\" detection",
+        "description": "Claude-working detection now requires the spinner verb across multiple chunks, eliminating false positives that flipped tasks to working when they weren't."
+      },
+      {
+        "category": "fix",
+        "title": "IPC: dedup cache survives renderer reload",
+        "description": "The IPC dedup cache is now scoped per-sender so reloading the renderer no longer drops events that look like duplicates."
+      },
+      {
+        "category": "fix",
+        "title": "Chat: sub-agent completion anchors correctly",
+        "description": "Sub-agent runs now mark completion on the Task tool-result instead of mid-stream, so sub-task panels close at the right moment."
+      },
+      {
+        "category": "fix",
+        "title": "Chat: autocomplete no longer flickers under the cursor",
+        "description": "Autocomplete hover is gated until the mouse moves, so the popup doesn't preselect an item just because the cursor happened to sit over it."
+      },
+      {
+        "category": "fix",
+        "title": "Tabs: drag disabled while renaming",
+        "description": "You can no longer accidentally drag a tab while its title is in rename mode."
+      }
+    ]
+  },
+  {
+    "version": "0.29.1",
+    "date": "2026-05-12",
+    "tagline": "Sidebar polish, diagnostics rescue",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Sidebar top icon row with stale-skill indicator",
+        "description": "Tree-view sidebar now hosts the Slay{logo}Zone wordmark, Search, and a stale-skill dot in a single top row, with macOS traffic-light spacing adjusted to fit."
+      },
+      {
+        "category": "fix",
+        "title": "Diagnostics DB no longer balloons or freezes the app",
+        "description": "Three-layer fix — self-healing schema, batched writes, and faster retention — stops the diagnostics DB from ballooning into multi-gigabyte sizes that froze the app."
+      }
+    ]
+  },
+  {
+    "version": "0.29.0",
+    "date": "2026-05-11",
+    "tagline": "Attention, scrollback, tree power",
+    "items": [
+      {
+        "category": "breaking",
+        "title": "Manager mode + orchestrator sidebar removed",
+        "description": "The manager_mode task option and the orchestrator sidebar have been removed. Use sub-tasks and worktree inheritance instead."
+      },
+      {
+        "category": "feature",
+        "title": "Per-task attention flag for unseen idle agents",
+        "description": "Tasks now track a needs-attention flag that flips on when an agent goes idle while you're not watching; attention pills surface in the tree view and clear once the run resumes."
+      },
+      {
+        "category": "feature",
+        "title": "Persistent terminal scrollback with lazy load",
+        "description": "Terminal scrollback persists across restarts; older lines lazy-load with a Load more button so reopening a task picks up where you left off."
+      },
+      {
+        "category": "feature",
+        "title": "Tree-view sidebar overhaul",
+        "description": "Group by status, attention pills, worktree pills, Ctrl+Tab task cycling, temporary-task group, view-settings hub, header relocation, and richer display toggles (show-all sub-tasks, cross-out done, tri-mode sub-tasks)."
+      },
+      {
+        "category": "feature",
+        "title": "Worktree path template with project-folder token",
+        "description": "Worktree paths now use a configurable template with a {project-folder-name} token, and sub-tasks inherit their parent's worktree by default."
+      },
+      {
+        "category": "feature",
+        "title": "Mermaid + canvas-based media viewer",
+        "description": "Rich-text editor renders mermaid diagrams with a Preview/Raw switch, and a new canvas-based viewer handles SVG, mermaid, and images in markdown."
+      },
+      {
+        "category": "feature",
+        "title": "Chat: restart, cancel, and provider logos",
+        "description": "Restart button replaces the footer pills when a session ends, plan and question prompts get a Cancel button, and agent tabs now show provider logos."
+      },
+      {
+        "category": "feature",
+        "title": "Project header Context Manager + weekday lock",
+        "description": "New Context Manager icon in the project header, and the project scheduled-lock setting now supports weekday selection."
+      },
+      {
+        "category": "feature",
+        "title": "Completed-task empty state with status switcher",
+        "description": "Opening a completed task hides the task panels and shows a clean empty state with a quick status switcher."
+      },
+      {
+        "category": "improvement",
+        "title": "Smarter terminal idle + permission detection",
+        "description": "Adapter-driven idle policy: idle flips on permission prompts and approval modals, codex detectPrompt is wired up, queue drain gates on permission requests, and the claude adapter no longer false-positives on completion stamps."
+      },
+      {
+        "category": "improvement",
+        "title": "Cheaper polling across the app",
+        "description": "Migrated nine pollers to a content-hash useStablePoll hook with exponential backoff, added main-side IPC result dedup for heavy git reads, and memoized the commit graph — noticeably less CPU during long sessions."
+      },
+      {
+        "category": "improvement",
+        "title": "Updater keeps polling and checks on power resume",
+        "description": "Update checks resume automatically when your machine wakes from sleep, and the updater keeps polling after a download so subsequent releases aren't missed."
+      },
+      {
+        "category": "improvement",
+        "title": "Auto-focus chat composer on task open",
+        "description": "Opening a task drops focus straight into the chat composer so you can start typing immediately."
+      },
+      {
+        "category": "improvement",
+        "title": "Agent panel renamed to Global Agent panel",
+        "description": "Clarifies that the panel operates across all tasks, distinct from per-task agent tabs."
+      },
+      {
+        "category": "improvement",
+        "title": "Smarter chat autocomplete + UI polish",
+        "description": "Exact-name matches rank first in chat autocomplete; tree footer is more compact, plan-approve footer only shows on the latest plan, and the markdown settings banner moved into a Display popover."
+      },
+      {
+        "category": "fix",
+        "title": "Codex CLI flag updated",
+        "description": "Replaced the removed --full-auto flag with --sandbox workspace-write so codex sessions start again."
+      },
+      {
+        "category": "fix",
+        "title": "Chat: stuck typing indicators and orphaned turns",
+        "description": "Typing indicator no longer sticks during AskUserQuestion or after orphaned turns; perm-request side-channels replay on tab hydrate; tentative --resume now stages events and drops them on failure."
+      },
+      {
+        "category": "fix",
+        "title": "Sub-task drag handles + sidebar auto-close",
+        "description": "Drag handles for sub-tasks are no longer clipped, and sidebar auto-close ignores closed-but-mounted dialogs."
+      },
+      {
+        "category": "fix",
+        "title": "Shortcut resolution for Ctrl+.",
+        "description": "Resolved 'mod' to meta/ctrl correctly so Ctrl+. no longer triggers mod+. bindings."
+      }
+    ]
+  },
+  {
+    "version": "0.28.1",
+    "date": "2026-05-07",
+    "tagline": "Sidebar polish",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Pin tasks in tree-view sidebar",
+        "description": "Pin tasks in the tree view to keep them visible regardless of filters or scroll position."
+      },
+      {
+        "category": "feature",
+        "title": "Tree-view filters: sub-tasks, ancestors, archive",
+        "description": "Added a grid footer, sub-task toggle, ancestor inclusion, and archive filter to the tree view for finer control over what's listed."
+      },
+      {
+        "category": "improvement",
+        "title": "Tree view honors per-project sort order",
+        "description": "Tree view now respects each project's kanban sortBy setting so task ordering matches what you see in the board."
+      },
+      {
+        "category": "improvement",
+        "title": "Auto-hide sidebar overlay matches inline content",
+        "description": "Auto-hide overlay is now full-bleed and visually matches the inline sidebar."
+      }
+    ]
+  },
+  {
+    "version": "0.28.0",
+    "date": "2026-05-07",
+    "tagline": "Tree sidebar, faster boot",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Tree-view sidebar with auto-hide",
+        "description": "New pluggable sidebar view system with a tree view: auto-hide floating card, tree guides, status filter header, right-click context menu, display settings (status/priority), and a shut-down-agent menu."
+      },
+      {
+        "category": "improvement",
+        "title": "Faster cold boot",
+        "description": "Deferred MCP and shell-PATH warmup, split xterm/material-file-icons into lazy chunks, and deferred PostHog fetch — app shows up sooner."
+      },
+      {
+        "category": "improvement",
+        "title": "Update download button shows loading state",
+        "description": "The update download button now reflects in-flight state so the click feels responsive."
+      }
+    ]
+  },
+  {
+    "version": "0.27.2",
+    "date": "2026-05-06",
+    "tagline": "Artifact recovery",
+    "items": [
+      {
+        "category": "fix",
+        "title": "Recover orphaned artifact files",
+        "description": "Files left orphaned by the v127 assets→artifacts disk migration are now recovered automatically."
+      }
+    ]
+  },
+  {
+    "version": "0.27.1",
+    "date": "2026-05-06",
+    "tagline": "Update toast, tab menu",
+    "items": [
+      {
+        "category": "improvement",
+        "title": "Agent-status column icon",
+        "description": "Agent-status panel now shows the task's column status icon instead of a generic idle dot, making state easier to read at a glance."
+      },
+      {
+        "category": "feature",
+        "title": "Right-click context menu on editor tabs",
+        "description": "Right-click any open file tab for close, close-others, and close-all actions."
+      },
+      {
+        "category": "feature",
+        "title": "Update-ready toast restored",
+        "description": "When an update finishes downloading, a toast surfaces alongside the restart button so the prompt is harder to miss."
+      },
+      {
+        "category": "fix",
+        "title": "Artifacts panel order survives rename",
+        "description": "Saved panel orders containing the legacy 'assets' id now migrate to 'artifacts' so the panel stays in its expected slot."
+      }
+    ]
+  },
+  {
+    "version": "0.27.0",
+    "date": "2026-05-06",
+    "tagline": "Native chat, bulk kanban",
+    "items": [
+      {
+        "category": "breaking",
+        "title": "Notification system removed",
+        "description": "The 'attention' state and notification system are gone — agent activity surfaces via the agent-status panel and chat instead."
+      },
+      {
+        "category": "breaking",
+        "title": "Loop mode removed from agent chat",
+        "description": "Loop functionality has been dropped from agent chat mode; use scheduled or one-shot turns instead."
+      },
+      {
+        "category": "feature",
+        "title": "Native chat panel for agents",
+        "description": "Send turns, approve permissions, switch model/mode, and interrupt — all from the in-app chat panel without dropping to a terminal."
+      },
+      {
+        "category": "feature",
+        "title": "Agent-status panel",
+        "description": "New panel surfaces idle/working state for each agent at a glance."
+      },
+      {
+        "category": "feature",
+        "title": "Kanban multi-select with bulk actions",
+        "description": "Select multiple cards, drag them as a group, and apply bulk actions from a context menu."
+      },
+      {
+        "category": "feature",
+        "title": "Slay CLI: PTY split + tabs + artifacts search",
+        "description": "New CLI commands to create/split PTYs, manage tabs via REST, and search task artifacts."
+      },
+      {
+        "category": "improvement",
+        "title": "Account default model auto-resolved",
+        "description": "The 'Default' model option is gone — your account default resolves at spawn so the chosen model is always explicit."
+      },
+      {
+        "category": "improvement",
+        "title": "Reasoning effort control in chat",
+        "description": "Adjust reasoning effort per turn from the chat footer."
+      },
+      {
+        "category": "improvement",
+        "title": "Tool cards align with message indent",
+        "description": "Tool cards in chat now match message indentation and shrink to fit their content."
+      },
+      {
+        "category": "fix",
+        "title": "Cmd+W closes the open file, not the task",
+        "description": "When focus is in the editor (non-CodeMirror views), Cmd+W closes the active file instead of the whole task tab."
+      },
+      {
+        "category": "fix",
+        "title": "Deleting a task no longer closes the neighbour tab",
+        "description": "Danger-zone delete now closes only the deleted task, leaving adjacent tabs alone."
+      },
+      {
+        "category": "fix",
+        "title": "Open scratch terminals survive restart",
+        "description": "Scratch terminals reopen on restart instead of being lost."
+      },
+      {
+        "category": "fix",
+        "title": "MCP panel scrolls",
+        "description": "The MCP section in the context manager is now scrollable when long."
+      },
+      {
+        "category": "fix",
+        "title": "Long code wraps and scrolls in chat",
+        "description": "Long inline code breaks at character boundaries and pre blocks gain horizontal scroll."
+      },
+      {
+        "category": "fix",
+        "title": "Chat sessions exit when terminal closes",
+        "description": "Closing a terminal now properly kills its associated chat session."
+      }
+    ]
+  },
+  {
+    "version": "0.26.2",
+    "date": "2026-05-05",
+    "tagline": "Chat polish, self-heal",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Model dropdown in chat footer",
+        "description": "Switch models directly from the chat input footer."
+      },
+      {
+        "category": "feature",
+        "title": "Chat width and display settings",
+        "description": "New popover lets you tune chat panel width and per-turn meta footer visibility."
+      },
+      {
+        "category": "feature",
+        "title": "Hourly update check with one-click restart",
+        "description": "App now checks for updates hourly and surfaces a restart button in the top-right when one is ready."
+      },
+      {
+        "category": "improvement",
+        "title": "Sub-agent rows nest under their parent",
+        "description": "Sub-agent activity in chat now renders nested under the spawning turn with cross-links."
+      },
+      {
+        "category": "improvement",
+        "title": "Empty thinking blocks hidden",
+        "description": "Chat no longer renders empty thinking placeholders."
+      },
+      {
+        "category": "improvement",
+        "title": "More file types open in the editor",
+        "description": "Unknown extensions default to markdown and the code extension map now covers more languages."
+      },
+      {
+        "category": "improvement",
+        "title": "Diagnostics retention runs on idle",
+        "description": "Old diagnostics events are pruned in idle chunks instead of one large pass."
+      },
+      {
+        "category": "fix",
+        "title": "Stale lock self-heal on boot",
+        "description": "Boot sentinel detects and clears stale singleton locks instead of failing to start."
+      }
+    ]
+  },
+  {
+    "version": "0.26.1",
+    "date": "2026-05-04",
+    "tagline": "Chat shells, browser tabs",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Agent background shells in chat",
+        "description": "Background shells spawned by an agent now render inline in the chat panel."
+      },
+      {
+        "category": "feature",
+        "title": "Open browser tabs from CLI",
+        "description": "New CLI command to create browser tabs in the running app."
+      }
+    ]
+  },
+  {
+    "version": "0.26.0",
+    "date": "2026-05-04",
+    "tagline": "Chat polish",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Live status label on typing indicator",
+        "description": "Typing indicator now shows what the agent is currently doing."
+      },
+      {
+        "category": "feature",
+        "title": "Rich sub-agent rows in chat",
+        "description": "Sub-agent activity renders as indented rows in the timeline with hook noise filtered out."
+      },
+      {
+        "category": "feature",
+        "title": "Esc pops unanswered turn into input",
+        "description": "Press Esc to pull the last unanswered prompt back into the composer for editing."
+      },
+      {
+        "category": "improvement",
+        "title": "Smarter autocomplete ranking",
+        "description": "Autocomplete suggestions now break ties by how often you've used each option."
+      },
+      {
+        "category": "fix",
+        "title": "Chat-mode pill no longer flickers",
+        "description": "The chat mode indicator is now server-authoritative and won't revert mid-flight."
+      },
+      {
+        "category": "fix",
+        "title": "Browser panel attach respects visibility",
+        "description": "WebContentsView reparenting now waits for the panel to be visible before attaching."
+      },
+      {
+        "category": "fix",
+        "title": "Project init picks up project config",
+        "description": "The init automation now selects defaults from the project's saved config."
+      },
+      {
+        "category": "fix",
+        "title": "slay init --project flag honored",
+        "description": "The init modal now passes the project id and dev flag through to the CLI."
+      }
+    ]
+  },
+  {
+    "version": "0.25.0",
+    "date": "2026-05-03",
+    "tagline": "Chat modes & detach",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Detach task into separate window",
+        "description": "Pop a task out into its own window with panel claim and handoff between windows."
+      },
+      {
+        "category": "feature",
+        "title": "Auto permission mode for chat",
+        "description": "New `auto` permission mode auto-approves eligible actions based on detection."
+      },
+      {
+        "category": "feature",
+        "title": "Show earlier in chat timeline",
+        "description": "Paginate older messages with a Show earlier button instead of loading the full history."
+      },
+      {
+        "category": "feature",
+        "title": "ExitPlanMode plan card",
+        "description": "Render the agent's proposed plan as a prominent card in the chat timeline."
+      },
+      {
+        "category": "feature",
+        "title": "Shift+Tab cycles agent mode",
+        "description": "Cycle through agent modes from anywhere in the chat panel with Shift+Tab."
+      },
+      {
+        "category": "feature",
+        "title": "Chat mode UI overhaul",
+        "description": "New mode picker with loop, search, links, and a context menu."
+      },
+      {
+        "category": "feature",
+        "title": "Cmd+F find in browser panel",
+        "description": "Scope-aware Cmd+F now triggers in-page find inside the browser panel."
+      },
+      {
+        "category": "feature",
+        "title": "Drag-reorder browser tabs",
+        "description": "Reorder tabs in the browser panel by dragging them."
+      },
+      {
+        "category": "feature",
+        "title": "Double-click to rename browser tab",
+        "description": "Rename a browser panel tab inline via double-click."
+      },
+      {
+        "category": "feature",
+        "title": "TOC outline + minimap for markdown",
+        "description": "Toggle a table-of-contents outline and minimap in the markdown editor."
+      },
+      {
+        "category": "feature",
+        "title": "Restore last active tab per project",
+        "description": "Each project remembers its last open tab and restores it on switch."
+      },
+      {
+        "category": "feature",
+        "title": "AI action type for automations",
+        "description": "Automations can now run AI agents via DB-backed headless templates."
+      },
+      {
+        "category": "feature",
+        "title": "Headless command on AI providers",
+        "description": "Configure a custom headless command per AI provider in settings."
+      },
+      {
+        "category": "feature",
+        "title": "Per-repo + submodule git discovery",
+        "description": "Git panel discovers worktrees per repo and submodule, with a submodule pill on the picker."
+      },
+      {
+        "category": "feature",
+        "title": "Auto-focus chat composer",
+        "description": "Chat input auto-focuses on background click and on tab activate."
+      },
+      {
+        "category": "improvement",
+        "title": "Smoother chat timeline scrolling",
+        "description": "Replaced the virtualizer with direct render and use-stick-to-bottom for stable scroll."
+      },
+      {
+        "category": "improvement",
+        "title": "Block mode switch during stream",
+        "description": "Switching agent modes is blocked mid-stream, removing the confirmation modal."
+      },
+      {
+        "category": "improvement",
+        "title": "Better chat autocomplete ranking",
+        "description": "Autocomplete now merge-ranks results across sources at the same trigger."
+      },
+      {
+        "category": "improvement",
+        "title": "Cleaner context manager labels",
+        "description": "Renamed Disk/App/Config tabs to File/Database for clarity."
+      },
+      {
+        "category": "fix",
+        "title": "Stop button keeps chat session alive",
+        "description": "Stop now kills and resumes the subprocess, preserving the session id."
+      },
+      {
+        "category": "fix",
+        "title": "Sync chat permission pill",
+        "description": "Mode pill in the chat UI stays in sync with the actual subprocess permission mode."
+      },
+      {
+        "category": "fix",
+        "title": "Worktree provisioned on import",
+        "description": "Imported tasks now get a worktree provisioned on creation."
+      },
+      {
+        "category": "fix",
+        "title": "Hide turns header when no diffs",
+        "description": "Turns chip header in the git diff panel hides cleanly when there are no diffs."
+      }
+    ]
+  },
+  {
+    "version": "0.24.0",
+    "date": "2026-04-29",
+    "tagline": "Clipboard, tags & turns",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Copy/paste files via OS clipboard",
+        "description": "Copy and paste files between the editor, artifacts panel, and your OS clipboard."
+      },
+      {
+        "category": "feature",
+        "title": "Paste/drop images into editor",
+        "description": "Drop or paste images directly into the description editor and chat input."
+      },
+      {
+        "category": "feature",
+        "title": "Per-project tag colors",
+        "description": "Tags now get a unique color per project, with automatic dedup on migration."
+      },
+      {
+        "category": "feature",
+        "title": "Blocked column drag",
+        "description": "Drag tasks to or from the blocked column on the kanban board to toggle the flag."
+      },
+      {
+        "category": "feature",
+        "title": "Click preview to focus source",
+        "description": "Click the read-only markdown preview to jump the editor to the matching source line."
+      },
+      {
+        "category": "feature",
+        "title": "Inline HTML in markdown",
+        "description": "Render inline HTML in the markdown editor with proper src and link resolution."
+      },
+      {
+        "category": "feature",
+        "title": "Markdown editor settings banner",
+        "description": "Tweak markdown editor behavior from a persistent banner above the editor."
+      },
+      {
+        "category": "feature",
+        "title": "Cmd+Shift-click external open",
+        "description": "Cmd+Shift-click links in the browser panel to open them in your default browser."
+      },
+      {
+        "category": "feature",
+        "title": "Per-tab browser CLI",
+        "description": "slay browser commands now target individual tabs instead of the active tab."
+      },
+      {
+        "category": "feature",
+        "title": "Cron catchup on start",
+        "description": "Automations catch up on missed cron fires when the app starts after being closed."
+      },
+      {
+        "category": "improvement",
+        "title": "Faster worktree clones",
+        "description": "Worktree creation uses APFS clone (cp -cR) for instant copy of ignored files on macOS."
+      },
+      {
+        "category": "improvement",
+        "title": "Tags nested under Tasks",
+        "description": "Project settings now nests Tags under Tasks and renames the Templates section."
+      },
+      {
+        "category": "improvement",
+        "title": "Cleaner artifacts toolbar",
+        "description": "Removed size, words, and line count stats from the artifacts toolbar."
+      },
+      {
+        "category": "fix",
+        "title": "Pinch zoom across tabs",
+        "description": "Pinch zoom now works on every browser panel tab, not only the first."
+      },
+      {
+        "category": "fix",
+        "title": "No task switch on CLI open",
+        "description": "Opening an artifact from the CLI no longer switches the active task tab."
+      },
+      {
+        "category": "fix",
+        "title": "Stable diff turns chip row",
+        "description": "Turns chip row stays visible regardless of snapshot state in the diff panel."
+      },
+      {
+        "category": "fix",
+        "title": "Smarter agent turn consumption",
+        "description": "Agent turns are marked consumed by content match instead of HEAD equality."
+      }
+    ]
+  },
+  {
+    "version": "0.23.2",
+    "date": "2026-04-27",
+    "tagline": "Tab cycle & HTML preview",
+    "items": [
+      {
+        "category": "fix",
+        "title": "HTML artifact preview scripts",
+        "description": "HTML artifact previews now execute scripts via the slz-file:// protocol."
+      },
+      {
+        "category": "fix",
+        "title": "Ctrl+Tab cycle",
+        "description": "Exclude the context manager tab from the Ctrl+Tab cycle."
+      }
+    ]
+  },
+  {
+    "version": "0.23.1",
+    "date": "2026-04-26",
+    "tagline": "Polish pass",
+    "items": [
+      {
+        "category": "fix",
+        "title": "Sub-tasks panel self-reference",
+        "description": "Drop the current task from its own Sub-tasks panel."
+      },
+      {
+        "category": "fix",
+        "title": "HTML in markdown editor",
+        "description": "Render inline HTML in the markdown editor and artifact previews."
+      },
+      {
+        "category": "fix",
+        "title": "Stale agent turns",
+        "description": "Drop agent turns whose snapshot parent has diverged from HEAD."
+      }
+    ]
+  },
+  {
+    "version": "0.23.0",
+    "date": "2026-04-26",
+    "tagline": "Turns, diffs & mermaid",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Agent turns with scoped diffs",
+        "description": "Track agent turn boundaries with per-turn diffs, tooltips, and filtered empty turns in the git panel."
+      },
+      {
+        "category": "feature",
+        "title": "Side-by-side worktree diff viewer",
+        "description": "Revamped diff viewer with side-by-side mode for files and artifact versions, synced scrolling, and newest-first turn numbering."
+      },
+      {
+        "category": "feature",
+        "title": "Mermaid diagrams in markdown",
+        "description": "Render mermaid diagrams inline in the markdown split view and artifact previews."
+      },
+      {
+        "category": "feature",
+        "title": "Recursive copy-files dialog",
+        "description": "Pick whole folders in the copy-files dialog with ancestor/descendant deduping."
+      },
+      {
+        "category": "feature",
+        "title": "Fuzzy slash command search",
+        "description": "Chat slash menu now uses fzf for fuzzy matching across commands."
+      },
+      {
+        "category": "feature",
+        "title": "Default tab display mode",
+        "description": "Choose Terminal or Chat as the default panel for new task tabs in settings."
+      },
+      {
+        "category": "feature",
+        "title": "PTY helper commands",
+        "description": "New slay pty type, key, and respawn subcommands for scripting terminal interactions."
+      },
+      {
+        "category": "improvement",
+        "title": "Reorderable settings panels",
+        "description": "Drag to reorder panels in settings and toggle git sub-tabs, with a unified home and task order."
+      },
+      {
+        "category": "improvement",
+        "title": "Push-based git watcher",
+        "description": "Worktree changes now stream via fs watcher instead of polling, with renderer fallback when the watcher fails."
+      },
+      {
+        "category": "improvement",
+        "title": "Artifacts panel loading state",
+        "description": "Artifacts panel shows a loading indicator while files are scanned."
+      },
+      {
+        "category": "improvement",
+        "title": "Persistent git sub-tab",
+        "description": "Each task remembers which git panel sub-tab was last active."
+      },
+      {
+        "category": "improvement",
+        "title": "Wider agent overview sidebar",
+        "description": "Removed width clamps on the agent overview sidebar so it can grow as needed."
+      },
+      {
+        "category": "improvement",
+        "title": "Faster CLI task commands",
+        "description": "slay tasks commands now go through the REST API for faster, in-app-aware updates."
+      },
+      {
+        "category": "fix",
+        "title": "Kanban overflow scrollbars",
+        "description": "Restored horizontal and vertical scrollbars in the kanban view."
+      },
+      {
+        "category": "fix",
+        "title": "Automations no longer un-complete tasks",
+        "description": "Project automations skip tasks that are already completed or cancelled instead of reopening them."
+      },
+      {
+        "category": "fix",
+        "title": "CLI tasks list --json description",
+        "description": "slay tasks list --json now includes the task description field."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal robustness",
+        "description": "Raised the fd limit, answered OSC queries, and fell back to homedir when the PTY cwd is unreadable."
+      },
+      {
+        "category": "fix",
+        "title": "Chat env injection",
+        "description": "Chat SDK now receives SLAYZONE_TASK_ID and the enriched PATH so spawned tools see the same env as terminals."
+      },
+      {
+        "category": "fix",
+        "title": "Preserve temp task on chat toggle",
+        "description": "Toggling the chat panel no longer discards a temporary task."
+      }
+    ]
+  },
+  {
+    "version": "0.22.0",
+    "date": "2026-04-23",
+    "tagline": "Orchestration & progress",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Agent overview sidebar",
+        "description": "New agent sidebar with tree lines, status, and manager-mode orchestration for multi-task supervision."
+      },
+      {
+        "category": "feature",
+        "title": "Task progress field",
+        "description": "Track 0–100 progress per task with a progress ring in kanban, plus UI and CLI support."
+      },
+      {
+        "category": "feature",
+        "title": "slay init CLI",
+        "description": "Bootstrap a project with SlayZone instructions and skills from the CLI."
+      },
+      {
+        "category": "feature",
+        "title": "Agent sidebar context menu",
+        "description": "Right-click rows in the agent sidebar to act on individual agents."
+      },
+      {
+        "category": "improvement",
+        "title": "Terminal panel renamed to Agent",
+        "description": "Relabeled the Terminal panel to Agent across the UI."
+      },
+      {
+        "category": "improvement",
+        "title": "Explode-mode tab count",
+        "description": "Task tabs hide in explode mode and a count shows how many are open."
+      },
+      {
+        "category": "improvement",
+        "title": "Persistent artifacts folder state",
+        "description": "The artifacts panel remembers which folders are expanded per task."
+      },
+      {
+        "category": "improvement",
+        "title": "Smoother agent overview resize",
+        "description": "Terminal hides during agent-overview resizing to prevent flicker."
+      },
+      {
+        "category": "fix",
+        "title": "Editor tabs track deleted files",
+        "description": "Editor tabs close or flag when the underlying file is deleted on disk."
+      },
+      {
+        "category": "fix",
+        "title": "Overlay anchoring in explode mode",
+        "description": "Overlay views now anchor correctly when explode mode toggles."
+      },
+      {
+        "category": "fix",
+        "title": "Seed skips orphan marketplace metadata",
+        "description": "AI-config seed scrubs orphan marketplace metadata instead of erroring."
+      },
+      {
+        "category": "fix",
+        "title": "Clearer CLI DB error",
+        "description": "slay CLI hints at alternate DB paths when openDb can't find one."
+      }
+    ]
+  },
+  {
+    "version": "0.21.0",
+    "date": "2026-04-21",
+    "tagline": "Artifact history & chat",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Versioned task artifacts",
+        "description": "Content-addressed version history with a version tree, current pointer, lock rule, and CLI set-current."
+      },
+      {
+        "category": "feature",
+        "title": "Structured chat transport",
+        "description": "Chat with autocomplete, streaming, resilient reset, idle state, effort, and queue."
+      },
+      {
+        "category": "feature",
+        "title": "Chat history persists",
+        "description": "Terminal chat history now survives app reloads."
+      },
+      {
+        "category": "feature",
+        "title": "Git stash tab",
+        "description": "New Stash tab in the unified git panel."
+      },
+      {
+        "category": "feature",
+        "title": "Zen mode toggle",
+        "description": "Dedicated zen-mode icon toggle that also hides the task header."
+      },
+      {
+        "category": "feature",
+        "title": "Reparent tasks",
+        "description": "Move tasks to a new parent via CLI, MCP, or the UI."
+      },
+      {
+        "category": "feature",
+        "title": "Clickable sub-task status",
+        "description": "Tap a sub-task status icon to change it via popover."
+      },
+      {
+        "category": "feature",
+        "title": "In-artifact search",
+        "description": "Highlight and jump through matches in both raw and preview modes."
+      },
+      {
+        "category": "feature",
+        "title": "Processes URL pill",
+        "description": "Detected server URLs show as a pill that opens the browser panel."
+      },
+      {
+        "category": "feature",
+        "title": "Copy task ID",
+        "description": "Copy a task's ID straight from the settings header."
+      },
+      {
+        "category": "feature",
+        "title": "Trackpad pinch zoom",
+        "description": "Browser panel supports 1x–3x trackpad pinch zoom."
+      },
+      {
+        "category": "feature",
+        "title": "Worktree color-coding",
+        "description": "Color-coded worktree list with an authoritative registry; main worktree stays uncolored."
+      },
+      {
+        "category": "improvement",
+        "title": "Ghostty-inspired dark theme",
+        "description": "Reskinned slay dark theme with white text, Ghostty-inspired."
+      },
+      {
+        "category": "improvement",
+        "title": "WebContentsView web panels",
+        "description": "Migrated web panels from webview to WebContentsView for stability and perf."
+      },
+      {
+        "category": "improvement",
+        "title": "Explode-mode grid",
+        "description": "Sub-task grid columns size by available width and explode-mode header is richer."
+      },
+      {
+        "category": "improvement",
+        "title": "CLI opens artifact in UI",
+        "description": "Creating or uploading an artifact via CLI now opens it in the app."
+      },
+      {
+        "category": "improvement",
+        "title": "Editor folder auto-expand",
+        "description": "Compacted folders auto-expand to the first branch point."
+      },
+      {
+        "category": "improvement",
+        "title": "Enable chat shortcut",
+        "description": "New Enable chat entry in the terminal header menu with wider context menu."
+      },
+      {
+        "category": "improvement",
+        "title": "Lock toast feedback",
+        "description": "Toast appears when a locked project blocks creating a new tab."
+      },
+      {
+        "category": "fix",
+        "title": "PTY revival on status flip",
+        "description": "Terminal revives its PTY when a task flips from done back to in-progress."
+      },
+      {
+        "category": "fix",
+        "title": "Dropped paths inline",
+        "description": "Non-image file paths inline correctly on drop or paste into the terminal."
+      },
+      {
+        "category": "fix",
+        "title": "File tree rename",
+        "description": "Directory rename input shows, Escape no longer triggers rename via onBlur, expandedFolders preserved."
+      },
+      {
+        "category": "fix",
+        "title": "New-task modal in locked project",
+        "description": "Locked projects now allow the new-task modal and the modal no longer flashes during close."
+      },
+      {
+        "category": "fix",
+        "title": "Cmd+D in explode mode",
+        "description": "Cmd+D scopes to the focused cell in explode mode."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal copy trim",
+        "description": "Trailing spaces are trimmed from copied terminal selections."
+      },
+      {
+        "category": "fix",
+        "title": "Subtasks layout",
+        "description": "Settings panel no longer overflows with long sub-task lists; subtasks have min-h when few, flex-1 when many."
+      },
+      {
+        "category": "fix",
+        "title": "Import FK handling",
+        "description": "Import defers FK checks and auto-derives FK remap."
+      },
+      {
+        "category": "fix",
+        "title": "Browser sub-frame errors",
+        "description": "Browser panel ignores sub-frame did-fail-load events."
+      },
+      {
+        "category": "fix",
+        "title": "Provider fetch resilience",
+        "description": "Usage analytics hardens provider fetch against transient net::ERR_FAILED."
+      },
+      {
+        "category": "fix",
+        "title": "Wide-mode markdown padding",
+        "description": "Wide-mode markdown horizontal padding matches vertical."
+      }
+    ]
+  },
+  {
+    "version": "0.20.0",
+    "date": "2026-04-15",
+    "tagline": "Locks graduate, artifacts live",
+    "items": [
+      {
+        "category": "improvement",
+        "title": "Project Lock graduated",
+        "description": "Project Lock moved out of Labs into the main Settings."
+      },
+      {
+        "category": "improvement",
+        "title": "Lock UX overhaul",
+        "description": "Full-takeover lock screen with Re-lock and Apply actions, plus blocked task creation while locked."
+      },
+      {
+        "category": "improvement",
+        "title": "Notes line-spacing split",
+        "description": "Split notes line-spacing into separate Readability and Width controls."
+      },
+      {
+        "category": "fix",
+        "title": "Live artifact UI",
+        "description": "Task artifact panel now refreshes when file content changes on disk."
+      },
+      {
+        "category": "fix",
+        "title": "Instructions edits survive",
+        "description": "AI config instructions no longer lose edits and react to disk changes."
+      }
+    ]
+  },
+  {
+    "version": "0.19.0",
+    "date": "2026-04-14",
+    "tagline": "Locks, tabs & providers",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Project locks",
+        "description": "Lock a project with a duration, rate limit, and schedule to prevent accidental edits."
+      },
+      {
+        "category": "feature",
+        "title": "Project-scoped tabs",
+        "description": "Per-project tab persistence with a Cmd+Shift+H shortcut to jump home."
+      },
+      {
+        "category": "feature",
+        "title": "Default provider select",
+        "description": "Pick a default terminal-mode provider from the Providers settings tab."
+      },
+      {
+        "category": "improvement",
+        "title": "Context Manager & Automations graduated",
+        "description": "Both features moved out of Labs into the main settings."
+      },
+      {
+        "category": "improvement",
+        "title": "Slimmer Settings layout",
+        "description": "General tab removed and MCP extracted into its own tab."
+      },
+      {
+        "category": "fix",
+        "title": "Floating agent on tiling managers",
+        "description": "Disabled by default and fixed compatibility with macOS tiling window managers."
+      },
+      {
+        "category": "fix",
+        "title": "Lock popover input width",
+        "description": "Lock popover inputs now stretch to fill the full popover width."
+      }
+    ]
+  },
+  {
+    "version": "0.18.0",
+    "date": "2026-04-13",
+    "tagline": "Palette, panels & polish",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Unified command palette",
+        "description": "Cmd+K and Cmd+P now open one palette with fzf-based search, dual-score ranking, and match highlighting."
+      },
+      {
+        "category": "feature",
+        "title": "Floating agent panel",
+        "description": "Agent panel has a proper state machine, menu, manual detach, auto-detach on window blur, and persistent sizing."
+      },
+      {
+        "category": "feature",
+        "title": "Custom project icons",
+        "description": "Set a project icon using letters or an image."
+      },
+      {
+        "category": "feature",
+        "title": "Markdown split mode in editor",
+        "description": "Toggle between source and preview with per-file and per-artifact view persistence, plus Notion-like typography."
+      },
+      {
+        "category": "feature",
+        "title": "Browser panel auto-hide",
+        "description": "Browser panel hides when the last tab closes; Cmd+T opens a new tab."
+      },
+      {
+        "category": "feature",
+        "title": "Stale skill detection",
+        "description": "Stale-skill dots on context manager tabs and skill graph cards, plus per-provider sync in the editor."
+      },
+      {
+        "category": "feature",
+        "title": "Bound skill source banners",
+        "description": "Bound skills are locked with a source banner and support sync and unlink from the file."
+      },
+      {
+        "category": "feature",
+        "title": "Agent panel provider controls",
+        "description": "Pick the provider from a dropdown and reset conversation state from the panel header."
+      },
+      {
+        "category": "feature",
+        "title": "Search result pills",
+        "description": "Task search results show status and priority as pills."
+      },
+      {
+        "category": "feature",
+        "title": "Skills group-by",
+        "description": "Group the skills list by source or prefix via a new dropdown."
+      },
+      {
+        "category": "feature",
+        "title": "Kanban blocked pill",
+        "description": "Blocked indicator moved to the card's bottom row as a pill."
+      },
+      {
+        "category": "feature",
+        "title": "Unbindable shortcuts",
+        "description": "Clear a shortcut binding to disable it entirely."
+      },
+      {
+        "category": "feature",
+        "title": "New keyboard shortcuts",
+        "description": "Cmd+J opens settings, Cmd+Shift+J toggles zen mode, Cmd+Shift+U updates the database."
+      },
+      {
+        "category": "feature",
+        "title": "CLI commit-and-done",
+        "description": "New commit-and-done skill plus `slay tasks done --close` to close the tab after finishing."
+      },
+      {
+        "category": "feature",
+        "title": "Processes panel spinner",
+        "description": "Loading spinner while processes panel fetches state."
+      },
+      {
+        "category": "feature",
+        "title": "Smarter browser URLs",
+        "description": "Task browser defaults localhost and IP addresses to http://."
+      },
+      {
+        "category": "feature",
+        "title": "CLI init command reference",
+        "description": "`slay init` prints the full command reference and suggests commands on error."
+      },
+      {
+        "category": "improvement",
+        "title": "Terminal rebound to Cmd+K",
+        "description": "Terminal, search, and processes shortcuts reshuffled for better finger ergonomics."
+      },
+      {
+        "category": "improvement",
+        "title": "Context menu alignment",
+        "description": "Context-menu rows now align cleanly via CSS subgrid."
+      },
+      {
+        "category": "fix",
+        "title": "Editor dark mode text colors",
+        "description": "Dead prose selector no longer breaks text colors in dark mode."
+      },
+      {
+        "category": "fix",
+        "title": "Dev server Vite warmup",
+        "description": "Removed broken Vite warmup block that could crash dev startup."
+      },
+      {
+        "category": "fix",
+        "title": "CLI HTTP errors surfaced",
+        "description": "Silent HTTP failures in notifyApp and `slay tasks done --close` are now shown."
+      },
+      {
+        "category": "fix",
+        "title": "CLI --dev flag in tasks open",
+        "description": "`slay tasks open` now respects the --dev flag."
+      }
+    ]
+  },
+  {
+    "version": "0.17.3",
+    "date": "2026-04-11",
+    "tagline": "Config & graphs",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Duplicate AI provider",
+        "description": "Duplicate an existing provider configuration with one click in AI settings."
+      },
+      {
+        "category": "feature",
+        "title": "Marketplace library & project actions",
+        "description": "Add or remove libraries and projects directly from marketplace skill cards."
+      },
+      {
+        "category": "fix",
+        "title": "Skill graph edge rendering",
+        "description": "Fixed inconsistent edge styles and spurious back-edges in the skill graph."
+      }
+    ]
+  },
+  {
+    "version": "0.17.2",
+    "date": "2026-04-10",
+    "tagline": "Boot crash fix",
+    "items": [
+      {
+        "category": "fix",
+        "title": "Boot crash on skill registry update",
+        "description": "Fixed datetime() SQL quoting that caused a crash on startup."
+      }
+    ]
+  },
+  {
+    "version": "0.17.1",
+    "date": "2026-04-10",
+    "tagline": "Stability fixes",
+    "items": [
+      {
+        "category": "fix",
+        "title": "AI config graph crash",
+        "description": "Fixed temporal dead zone crash when deleting edges in the AI config graph."
+      },
+      {
+        "category": "fix",
+        "title": "Leaderboard OAuth errors",
+        "description": "OAuth callback errors are now surfaced instead of silently swallowed."
+      },
+      {
+        "category": "improvement",
+        "title": "CLI --permanent flag",
+        "description": "Use --permanent with slay tasks update to persist task changes."
+      }
+    ]
+  },
+  {
+    "version": "0.17.0",
+    "date": "2026-04-10",
+    "tagline": "Skills & polish",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Domain-specific slay skills",
+        "description": "Split monolithic slay skill into 9 focused domain skills with rich documentation."
+      },
+      {
+        "category": "feature",
+        "title": "Skill marketplace sync",
+        "description": "Installed skills now sync to disk automatically, and project-scoped skill init writes files directly."
+      },
+      {
+        "category": "feature",
+        "title": "Blocked task state",
+        "description": "Tasks can be marked as blocked with a split button UI, blocking relationships, and B/Shift+B shortcuts."
+      },
+      {
+        "category": "feature",
+        "title": "Agent side panel",
+        "description": "Persistent full-height agent panel accessible via Ctrl+Tab cycling."
+      },
+      {
+        "category": "feature",
+        "title": "Artifact downloads",
+        "description": "Download artifacts as PDF, PNG, HTML, or ZIP from a restructured download menu."
+      },
+      {
+        "category": "feature",
+        "title": "Inline tab rename",
+        "description": "Double-click a task tab to rename it inline."
+      },
+      {
+        "category": "improvement",
+        "title": "Redesigned surface tokens",
+        "description": "New inset card panels and unified surface token scale across light and dark modes."
+      },
+      {
+        "category": "improvement",
+        "title": "Editor syntax highlighting",
+        "description": "Added Go, YAML, SQL, TOML, and HCL syntax highlighting to the editor."
+      },
+      {
+        "category": "improvement",
+        "title": "Git status in file tree",
+        "description": "File tree shows git status letter badges and italicizes ignored files."
+      },
+      {
+        "category": "improvement",
+        "title": "Browser address bar search",
+        "description": "Non-URL input in the browser address bar now searches Google."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal word navigation",
+        "description": "Option+Arrow keys now correctly move by word on macOS."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal file links",
+        "description": "Cmd+Click file links work on wrapped lines and bare filenames in parentheses."
+      },
+      {
+        "category": "fix",
+        "title": "Usage API reliability",
+        "description": "Fixed first-429 backoff and stale cross-account data in usage tracking."
+      },
+      {
+        "category": "fix",
+        "title": "Editor list indentation",
+        "description": "Unified indentation across bullet, ordered, and task lists."
+      }
+    ]
+  },
+  {
+    "version": "0.16.0",
+    "date": "2026-04-08",
+    "tagline": "Folders & skills",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Artifact folders",
+        "description": "Organize task artifacts into folders with drag-and-drop, context menus, and inline renaming."
+      },
+      {
+        "category": "feature",
+        "title": "Artifact search",
+        "description": "Find artifacts with a local search bar and global search panel integration."
+      },
+      {
+        "category": "feature",
+        "title": "Auto-reconcile skills",
+        "description": "On-disk skills are automatically synced to the database, removing the unmanaged concept."
+      },
+      {
+        "category": "improvement",
+        "title": "Artifact card styling",
+        "description": "Artifact sidebar items and folders now render as styled cards."
+      },
+      {
+        "category": "improvement",
+        "title": "Auto-refresh artifacts",
+        "description": "Artifact content refreshes automatically when updated via CLI."
+      },
+      {
+        "category": "fix",
+        "title": "Sidebar drag lock",
+        "description": "Project drag in sidebar now locked to vertical axis to prevent accidental reordering."
+      },
+      {
+        "category": "fix",
+        "title": "Create-task form reset",
+        "description": "Create-task form no longer resets when background data refreshes."
+      },
+      {
+        "category": "fix",
+        "title": "Markdown checkboxes",
+        "description": "Checkboxes now render correctly in the markdown file editor."
+      },
+      {
+        "category": "fix",
+        "title": "Skill graph arrows",
+        "description": "Dependency direction arrows now display correctly on skill graph edges."
+      }
+    ]
+  },
+  {
+    "version": "0.15.0",
+    "date": "2026-04-07",
+    "tagline": "Artifacts & automation",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Task artifacts",
+        "description": "Attach files, images, and documents to tasks with a dedicated artifacts panel."
+      },
+      {
+        "category": "feature",
+        "title": "Artifact mentions in editor",
+        "description": "Link artifacts inline with @-mention picker and visual chips in the editor."
+      },
+      {
+        "category": "feature",
+        "title": "Auto-move tasks on terminal state",
+        "description": "Tasks automatically move between columns when terminal state changes."
+      },
+      {
+        "category": "feature",
+        "title": "Artifact CLI commands",
+        "description": "Create, list, and manage task artifacts from the Slay CLI."
+      },
+      {
+        "category": "improvement",
+        "title": "Project settings navigation",
+        "description": "New Tasks category in project settings for task automation rules."
+      },
+      {
+        "category": "improvement",
+        "title": "AI input timing",
+        "description": "PTY submit now supports --wait for better AI mode input timing."
+      },
+      {
+        "category": "fix",
+        "title": "Windows PTY cleanup",
+        "description": "Errors when killing PTY on Windows are now handled gracefully."
+      },
+      {
+        "category": "fix",
+        "title": "Usage analytics timezone",
+        "description": "Daily usage grouping now uses local timezone instead of UTC."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal cursor blink",
+        "description": "Disabled distracting cursor blink in terminal panels."
+      }
+    ]
+  },
+  {
+    "version": "0.14.0",
+    "date": "2026-04-06",
+    "tagline": "Context & shortcuts",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Find in browser page",
+        "description": "Use Cmd+F to search within browser panels."
+      },
+      {
+        "category": "feature",
+        "title": "Tasks from browser links",
+        "description": "Turn any browser link into a new task with one click."
+      },
+      {
+        "category": "feature",
+        "title": "Session resume",
+        "description": "Resume previous AI sessions when reopening tasks."
+      },
+      {
+        "category": "feature",
+        "title": "Web panel CLI commands",
+        "description": "Create and manage web panels from the Slay CLI."
+      },
+      {
+        "category": "feature",
+        "title": "Priority keyboard shortcuts",
+        "description": "New priority-based shortcut system prevents conflicts between panels."
+      },
+      {
+        "category": "feature",
+        "title": "Blocker search",
+        "description": "Search and link blocker tasks with status icons."
+      },
+      {
+        "category": "improvement",
+        "title": "Copy session & conversation IDs",
+        "description": "Copy session and conversation IDs directly from the terminal dropdown menu."
+      },
+      {
+        "category": "improvement",
+        "title": "CLI DB mismatch warning",
+        "description": "CLI warns when the --dev flag targets a different database than the running app."
+      },
+      {
+        "category": "fix",
+        "title": "Browser zoom alignment",
+        "description": "Browser views stay aligned when using app zoom."
+      },
+      {
+        "category": "fix",
+        "title": "Browser URL on navigation",
+        "description": "URL input now updates correctly during history navigation."
+      }
+    ]
+  },
+  {
+    "version": "0.13.0",
+    "date": "2026-04-01",
+    "tagline": "History & CLI power",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Activity history",
+        "description": "See a timeline of changes to your tasks, tags, and automations."
+      },
+      {
+        "category": "feature",
+        "title": "CLI install onboarding",
+        "description": "Install the slay CLI directly from the onboarding flow."
+      },
+      {
+        "category": "feature",
+        "title": "Extended CLI commands",
+        "description": "Manage tags, templates, automations, due dates, and web panels from the CLI."
+      },
+      {
+        "category": "feature",
+        "title": "Terminal copy history",
+        "description": "Access previously copied text from the terminal context menu."
+      },
+      {
+        "category": "improvement",
+        "title": "Collapsible notification groups",
+        "description": "Collapse and expand notification sections to focus on what matters."
+      },
+      {
+        "category": "improvement",
+        "title": "Cron schedule presets",
+        "description": "Pick common schedules from a dropdown when setting up automations."
+      },
+      {
+        "category": "improvement",
+        "title": "Collapsible task details",
+        "description": "Task metadata now lives in a collapsible Details section."
+      },
+      {
+        "category": "fix",
+        "title": "Default terminal flags",
+        "description": "Terminal now correctly falls back to default flags when none are set per-task."
+      },
+      {
+        "category": "fix",
+        "title": "Markdown checkboxes",
+        "description": "Task list checkboxes now render and toggle properly in the editor."
+      },
+      {
+        "category": "fix",
+        "title": "Editor height",
+        "description": "Description editor now fills the available card space correctly."
+      }
+    ]
+  },
+  {
+    "version": "0.12.0",
+    "date": "2026-03-31",
+    "tagline": "Organize & automate",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Project-scoped tags",
+        "description": "Tag tasks with custom colored labels — each project gets its own set."
+      },
+      {
+        "category": "feature",
+        "title": "Task templates",
+        "description": "Create reusable templates per project and apply them to new tasks instantly."
+      },
+      {
+        "category": "feature",
+        "title": "Snooze tasks",
+        "description": "Temporarily hide tasks from the board until a time you choose."
+      },
+      {
+        "category": "feature",
+        "title": "Automations (beta)",
+        "description": "Set up rules to automate repetitive task workflows."
+      },
+      {
+        "category": "feature",
+        "title": "Rich markdown editing",
+        "description": "Edit markdown files with a visual toolbar — no raw syntax needed."
+      },
+      {
+        "category": "feature",
+        "title": "Loop command",
+        "description": "Repeat an AI prompt automatically until your acceptance criteria are met."
+      },
+      {
+        "category": "feature",
+        "title": "Terminal context menu",
+        "description": "Right-click terminal panes for quick actions like split, close, and restart."
+      },
+      {
+        "category": "feature",
+        "title": "Custom working directory",
+        "description": "Override the working directory for individual tasks."
+      },
+      {
+        "category": "improvement",
+        "title": "File tree upgrades",
+        "description": "Multi-select, keyboard navigation, git status colors, and compact folders in the file tree."
+      },
+      {
+        "category": "improvement",
+        "title": "Unified theme system",
+        "description": "Terminal and editor colors now follow one consistent theme with per-section overrides."
+      },
+      {
+        "category": "fix",
+        "title": "Stuck terminal loading",
+        "description": "Terminals no longer get stuck loading when a session ends unexpectedly."
+      },
+      {
+        "category": "fix",
+        "title": "Shortcuts in editors",
+        "description": "App keyboard shortcuts now work while editing text in notes and editors."
+      },
+      {
+        "category": "fix",
+        "title": "Menus behind browser",
+        "description": "Dropdown menus no longer hide behind the browser panel."
+      }
+    ]
+  },
+  {
+    "version": "0.11.0",
+    "date": "2026-03-27",
+    "tagline": "Copilot & editor polish",
+    "items": [
+      {
+        "category": "feature",
+        "title": "GitHub Copilot support",
+        "description": "Use GitHub Copilot as an AI coding assistant directly inside SlayZone."
+      },
+      {
+        "category": "feature",
+        "title": "Drag-and-drop project reordering",
+        "description": "Rearrange projects in the sidebar by dragging them into your preferred order."
+      },
+      {
+        "category": "feature",
+        "title": "Notes formatting toolbar",
+        "description": "A new toolbar makes it easy to format your task notes with bold, lists, and more."
+      },
+      {
+        "category": "improvement",
+        "title": "Move list items with keyboard",
+        "description": "Rearrange list items in notes using Alt+Up/Down shortcuts."
+      },
+      {
+        "category": "improvement",
+        "title": "Open links in new browser tabs",
+        "description": "Cmd+Click or middle-click links in the browser to open them in a new tab."
+      },
+      {
+        "category": "feature",
+        "title": "Linear assignee filtering",
+        "description": "Only import and sync Linear issues that are assigned to you."
+      },
+      {
+        "category": "improvement",
+        "title": "Collapsible task description",
+        "description": "Collapse the task description to free up space when you don't need it."
+      },
+      {
+        "category": "fix",
+        "title": "Background terminal output",
+        "description": "Terminals now keep receiving output even when their tab isn't visible."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal sizing",
+        "description": "New terminals now match the actual panel size instead of starting too small."
+      },
+      {
+        "category": "fix",
+        "title": "Stopping processes",
+        "description": "Stopping a process now fully shuts down all related sub-processes."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal flickering",
+        "description": "Fixed terminals sometimes flickering when switching between panels."
+      },
+      {
+        "category": "fix",
+        "title": "Claude Code on Linux & Windows",
+        "description": "Fixed Claude Code authentication not being detected on Linux and Windows."
+      }
+    ]
+  },
+  {
+    "version": "0.10.0",
+    "date": "2026-03-25",
+    "tagline": "Qwen Code & browser upgrades",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Qwen Code CLI integration",
+        "description": "Full support for Qwen Code as an AI coding assistant with session detection, usage tracking, and MCP support."
+      },
+      {
+        "category": "feature",
+        "title": "Browser screenshot capture",
+        "description": "Screenshot the browser view directly instead of requiring region selection."
+      },
+      {
+        "category": "fix",
+        "title": "Shortcuts blocked by modals",
+        "description": "Global keyboard shortcuts no longer fire when a modal dialog is open."
+      },
+      {
+        "category": "fix",
+        "title": "Browser edit shortcuts",
+        "description": "Native edit shortcuts (cut, copy, paste) now pass through to the browser view correctly."
+      },
+      {
+        "category": "fix",
+        "title": "Browser JS execution",
+        "description": "Fixed browser view JavaScript execution to use the correct frame context."
+      }
+    ]
+  },
+  {
+    "version": "0.9.0",
+    "date": "2026-03-25",
+    "tagline": "Shortcuts & polish",
+    "items": [
+      {
+        "category": "feature",
+        "title": "New keyboard shortcuts",
+        "description": "Restart terminals, focus the browser URL bar, and jump to the attention panel — all from the keyboard."
+      },
+      {
+        "category": "feature",
+        "title": "Browser loading animation",
+        "description": "See a smooth loading animation while the browser panel starts up."
+      },
+      {
+        "category": "feature",
+        "title": "Auto-open browser from CLI",
+        "description": "Running a navigate command from the CLI now opens the browser panel automatically."
+      },
+      {
+        "category": "improvement",
+        "title": "Shortcut hints stay in sync",
+        "description": "Shortcut hints throughout the app update to reflect your custom keybindings."
+      },
+      {
+        "category": "improvement",
+        "title": "Better feedback dialog",
+        "description": "Redesigned feedback dialog with quick links to GitHub and Discord."
+      },
+      {
+        "category": "fix",
+        "title": "Stuck loading spinner",
+        "description": "Fixed a bug where reopening a task could leave the loading spinner spinning forever."
+      },
+      {
+        "category": "fix",
+        "title": "Alt shortcuts on macOS",
+        "description": "Alt-based keyboard shortcuts now work reliably on macOS."
+      },
+      {
+        "category": "fix",
+        "title": "Clickable links in terminals",
+        "description": "Links printed in terminals are now clickable with hover tooltips."
+      },
+      {
+        "category": "fix",
+        "title": "Smoother usage tracking",
+        "description": "Usage data now handles rate limits gracefully instead of showing errors."
+      }
+    ]
+  },
+  {
+    "version": "0.8.0",
+    "date": "2026-03-25",
+    "tagline": "Your keys, your way",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Custom keyboard shortcuts",
+        "description": "Rebind any shortcut from the new shortcuts dialog — conflicts are detected and swapped automatically."
+      },
+      {
+        "category": "feature",
+        "title": "CLI --description flag",
+        "description": "Set task descriptions directly from the Slay CLI with --description on create, update, and subtask-add."
+      },
+      {
+        "category": "improvement",
+        "title": "Closable toast notifications",
+        "description": "Toast notifications now have a close button so you can dismiss them immediately."
+      },
+      {
+        "category": "improvement",
+        "title": "Smarter worktree branch cleanup",
+        "description": "Removing a worktree now tries multiple strategies to clean up its branch."
+      },
+      {
+        "category": "improvement",
+        "title": "What's New auto-expands new versions",
+        "description": "The changelog dialog automatically expands all versions you haven't seen yet."
+      },
+      {
+        "category": "fix",
+        "title": "Stale task CWD",
+        "description": "Task and project are now props instead of local state, fixing stale working directories."
+      },
+      {
+        "category": "fix",
+        "title": "Temporary task conversion",
+        "description": "Converting a temporary task now correctly sets it to in-progress status."
+      }
+    ]
+  },
+  {
+    "version": "0.7.0",
+    "date": "2026-03-23",
+    "tagline": "Browse better",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Faster browser panel",
+        "description": "The built-in browser is now significantly faster and more stable."
+      },
+      {
+        "category": "feature",
+        "title": "Browser keyboard capture",
+        "description": "Choose whether keyboard shortcuts go to the browser or SlayZone with a single toggle."
+      },
+      {
+        "category": "feature",
+        "title": "AI crash recovery",
+        "description": "If an AI agent crashes, its terminal drops into a regular shell so you can keep working."
+      },
+      {
+        "category": "feature",
+        "title": "Automatic data backups",
+        "description": "Your data is automatically backed up before updates for extra safety."
+      },
+      {
+        "category": "feature",
+        "title": "Linux support improvements",
+        "description": "SlayZone now follows Linux conventions for file and config locations."
+      },
+      {
+        "category": "improvement",
+        "title": "Quick status changes",
+        "description": "Click the status icon on any task or column header to change it instantly."
+      },
+      {
+        "category": "improvement",
+        "title": "Cleaner worktree removal",
+        "description": "Deleting a worktree now offers to clean up its branch too."
+      },
+      {
+        "category": "improvement",
+        "title": "Worktree file presets",
+        "description": "Pick from ready-made presets when setting up files for new worktrees."
+      },
+      {
+        "category": "improvement",
+        "title": "Scrollable sub-tasks",
+        "description": "Long sub-task lists now scroll neatly instead of stretching the page."
+      },
+      {
+        "category": "fix",
+        "title": "Crash recovery",
+        "description": "SlayZone now recovers automatically instead of showing a blank screen after a rare crash."
+      },
+      {
+        "category": "fix",
+        "title": "Newlines in AI prompts",
+        "description": "Shift+Enter now correctly adds a new line when typing AI prompts."
+      },
+      {
+        "category": "fix",
+        "title": "Project switching cleanup",
+        "description": "Switching projects now properly resets task state so nothing carries over by accident."
+      },
+      {
+        "category": "fix",
+        "title": "Editor folder memory",
+        "description": "Folders you expanded in the file tree stay open when you come back."
+      }
+    ]
+  },
+  {
+    "version": "0.6.1",
+    "date": "2026-03-18",
+    "tagline": "Integrate everything",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Jira Cloud integration (Labs)",
+        "description": "Connect your Jira Cloud account to sync issues directly into SlayZone. Enable in Settings → Labs."
+      },
+      {
+        "category": "feature",
+        "title": "Multi-repo projects",
+        "description": "Projects now support multiple repositories with auto-detection."
+      },
+      {
+        "category": "feature",
+        "title": "Processes panel",
+        "description": "New dedicated panel to monitor and manage running processes."
+      },
+      {
+        "category": "improvement",
+        "title": "Process names on terminal tabs",
+        "description": "Terminal tabs now show the running process name with duplicate numbering."
+      },
+      {
+        "category": "improvement",
+        "title": "File tree refresh",
+        "description": "Added a refresh button to the file editor sidebar."
+      },
+      {
+        "category": "fix",
+        "title": "Usage bar layout",
+        "description": "Fixed boost pill popover layout and normalized spacer widths."
+      }
+    ]
+  },
+  {
+    "version": "0.5.0",
+    "date": "2026-03-17",
+    "tagline": "Click & connect",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Clickable terminal links",
+        "description": "URLs and file paths in terminals are now clickable — Cmd+Click opens files, Cmd+Shift+Click opens in default app."
+      },
+      {
+        "category": "feature",
+        "title": "Worktree sync & merge",
+        "description": "New sync dropdown with merge-to-parent and use-existing-branch options."
+      },
+      {
+        "category": "improvement",
+        "title": "Fullscreen task descriptions",
+        "description": "Task descriptions open in a distraction-free fullscreen dialog."
+      },
+      {
+        "category": "improvement",
+        "title": "Process stats",
+        "description": "Active terminals and processes now show CPU, memory, duration, and restart count."
+      },
+      {
+        "category": "improvement",
+        "title": "Sidebar reorganized",
+        "description": "Leaderboard and usage buttons moved to the sidebar footer for cleaner navigation."
+      },
+      {
+        "category": "improvement",
+        "title": "Drag to empty groups",
+        "description": "Tasks can now be dropped into empty list-view groups."
+      },
+      {
+        "category": "fix",
+        "title": "Browser logins",
+        "description": "CAPTCHAs and OAuth popups now work reliably in the browser panel."
+      },
+      {
+        "category": "fix",
+        "title": "Worktree file copying",
+        "description": "Creating worktrees no longer freezes the UI, and junk files are excluded."
+      },
+      {
+        "category": "fix",
+        "title": "Diverged branch graph",
+        "description": "Commit graph now correctly renders diverged local/remote branches."
+      }
+    ]
+  },
+  {
+    "version": "0.4.0",
+    "date": "2026-03-15",
+    "tagline": "Speed & sync",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Integrations in beta",
+        "description": "Sync tasks with Linear and GitHub from one place, with easy discovery of unlinked tasks."
+      },
+      {
+        "category": "feature",
+        "title": "Git panel settings",
+        "description": "Customize commit graph defaults and save display preferences per project."
+      },
+      {
+        "category": "improvement",
+        "title": "Faster app startup",
+        "description": "The app loads significantly faster thanks to smaller bundles and smarter loading."
+      },
+      {
+        "category": "improvement",
+        "title": "Smoother board loading",
+        "description": "Kanban boards now load in a single step instead of multiple sequential fetches."
+      },
+      {
+        "category": "improvement",
+        "title": "Snappier commit graph",
+        "description": "Commit graph handles large repos much better with less memory usage."
+      },
+      {
+        "category": "improvement",
+        "title": "Faster terminal rendering",
+        "description": "Terminals feel more responsive with hardware-accelerated rendering and reduced overhead."
+      },
+      {
+        "category": "fix",
+        "title": "Commit graph display",
+        "description": "Fixed various visual glitches in the commit graph layout."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal reconnection",
+        "description": "Switching back to a terminal no longer replays its entire history."
+      },
+      {
+        "category": "fix",
+        "title": "Sync reliability",
+        "description": "Tasks now properly archive when deleted or archived in Linear/GitHub."
+      }
+    ]
+  },
+  {
+    "version": "0.3.1",
+    "date": "2026-03-13",
+    "tagline": "Polish & feedback loop",
+    "items": [
+      {
+        "category": "feature",
+        "title": "In-app feedback dialog",
+        "description": "Send feedback directly from the app with Discord forum integration."
+      },
+      {
+        "category": "feature",
+        "title": "Full-file diff toggle",
+        "description": "View entire files in the diff viewer instead of just changed hunks."
+      },
+      {
+        "category": "feature",
+        "title": "Process stop action",
+        "description": "Stop running processes directly from the process panel."
+      },
+      {
+        "category": "feature",
+        "title": "Configurable commit graph",
+        "description": "Branch-focused commit graph with legend, tooltips, and tag support."
+      },
+      {
+        "category": "feature",
+        "title": "Leaderboard",
+        "description": "Track AI coding agent activity across tasks."
+      },
+      {
+        "category": "improvement",
+        "title": "Git-ignored file copying",
+        "description": "Automatically copy git-ignored files when creating worktrees, configurable per project."
+      },
+      {
+        "category": "improvement",
+        "title": "Persistent home panel state",
+        "description": "Home panel visibility and git tab selection saved per project."
+      },
+      {
+        "category": "improvement",
+        "title": "Active tab styling",
+        "description": "Active task tab is now more visually prominent."
+      },
+      {
+        "category": "improvement",
+        "title": "Scrollable sidebar",
+        "description": "Project list in sidebar now scrolls when overflowing."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal bottom clipping",
+        "description": "Fixed bottom content being clipped by FitAddon padding mismatch."
+      },
+      {
+        "category": "fix",
+        "title": "Shell startup flags",
+        "description": "Removed persisted shell override that caused incorrect startup flags."
+      },
+      {
+        "category": "fix",
+        "title": "Webview surface clipping",
+        "description": "Fixed browser panel clipping under CSS transforms."
+      }
+    ]
+  },
+  {
+    "version": "0.3.0",
+    "date": "2026-03-10",
+    "tagline": "Git hub command center",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Pull request dashboard",
+        "description": "Full PR tab with create/link, merge controls, diff view, comments timeline, and mermaid diagrams."
+      },
+      {
+        "category": "feature",
+        "title": "Branch & worktree graph",
+        "description": "Visual branch/worktree tabs with graph view, actions, and PR status at a glance."
+      },
+      {
+        "category": "feature",
+        "title": "Worktree tab grouping",
+        "description": "Task tabs grouped by worktree with colored borders for quick identification."
+      },
+      {
+        "category": "feature",
+        "title": "Git push/pull controls",
+        "description": "Push and pull directly from the git panel with remote URL display."
+      },
+      {
+        "category": "feature",
+        "title": "Configurable rate-limit bars",
+        "description": "Customize usage bars with support for custom providers."
+      },
+      {
+        "category": "feature",
+        "title": "Per-view panel toggles",
+        "description": "Configure which panels show on home vs task views independently."
+      },
+      {
+        "category": "fix",
+        "title": "Main-thread freezes eliminated",
+        "description": "Git and GitHub CLI operations no longer block the UI."
+      },
+      {
+        "category": "fix",
+        "title": "Layout shift on tab switch",
+        "description": "Fixed xterm scrollbar leak and layout jump when switching tabs."
+      }
+    ]
+  },
+  {
+    "version": "0.2.6",
+    "date": "2026-03-08",
+    "tagline": "Themes & reliability",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Terminal theme picker",
+        "description": "Choose from 16 curated terminal color themes."
+      },
+      {
+        "category": "feature",
+        "title": "Database backups",
+        "description": "Automatic SQLite database backup system to protect your data."
+      },
+      {
+        "category": "fix",
+        "title": "Interactive CLI prompts fixed",
+        "description": "Sync query responses and OSC filtering fix broken interactive prompts."
+      },
+      {
+        "category": "fix",
+        "title": "Copy/paste on Linux & Windows",
+        "description": "Ctrl+Shift+C/V now works for terminal copy/paste on non-macOS."
+      },
+      {
+        "category": "fix",
+        "title": "Usage rate limiting",
+        "description": "Added caching and 429 backoff to prevent API rate limiting."
+      }
+    ]
+  },
+  {
+    "version": "0.2.5",
+    "date": "2026-03-06",
+    "tagline": "Providers unleashed",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Custom AI providers",
+        "description": "Add any AI CLI as a terminal mode with custom commands, flags, and settings."
+      },
+      {
+        "category": "feature",
+        "title": "Getting started checklist",
+        "description": "New onboarding checklist guides you through initial setup step by step."
+      },
+      {
+        "category": "feature",
+        "title": "Worktrees management panel",
+        "description": "Create, switch, and delete git worktrees from a dedicated panel in the kanban view."
+      },
+      {
+        "category": "improvement",
+        "title": "Terminal focus on tab switch",
+        "description": "Switching task tabs now auto-focuses the terminal — no extra click needed."
+      },
+      {
+        "category": "fix",
+        "title": "Unknown terminal modes handled",
+        "description": "Tasks with unrecognized terminal modes no longer crash the UI."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal reinit on save",
+        "description": "Saving a conversation ID no longer restarts the terminal session."
+      }
+    ]
+  },
+  {
+    "version": "0.2.4",
+    "date": "2026-03-03",
+    "tagline": "Fine-tuned panels",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Per-panel settings",
+        "description": "Configure editor, diff, terminal, and browser panels individually from a dedicated settings page."
+      },
+      {
+        "category": "improvement",
+        "title": "Drill-down settings navigation",
+        "description": "Settings now use a drill-down layout — less clutter, easier discovery."
+      },
+      {
+        "category": "fix",
+        "title": "Dark mode text selection",
+        "description": "Selected text is now visible in dark mode."
+      }
+    ]
+  },
+  {
+    "version": "0.2.3",
+    "date": "2026-03-03",
+    "tagline": "Run anywhere",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Claude Code Switch integration",
+        "description": "Claude Code Switch integrated into the profile dropdown for quick access."
+      },
+      {
+        "category": "feature",
+        "title": "Execution contexts",
+        "description": "Run tasks on your host, in Docker containers, or over SSH — configurable per project."
+      }
+    ]
+  },
+  {
+    "version": "0.2.2",
+    "date": "2026-03-02",
+    "tagline": "Stability fixes",
+    "items": [
+      {
+        "category": "fix",
+        "title": "Undo stale snapshot",
+        "description": "Undoing task completion no longer uses a stale task snapshot."
+      },
+      {
+        "category": "fix",
+        "title": "Task processes cleaned up on archive",
+        "description": "Archiving or purging a task now kills its background processes, not just terminals."
+      }
+    ]
+  },
+  {
+    "version": "0.2.1",
+    "date": "2026-03-02",
+    "tagline": "Light up your workflow",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Light & dark theme selector",
+        "description": "Choose between light, dark, or system theme from settings — light mode fully polished."
+      },
+      {
+        "category": "feature",
+        "title": "Undo/redo for task mutations",
+        "description": "Accidentally moved a task? Undo and redo any task change instantly."
+      },
+      {
+        "category": "feature",
+        "title": "Worktree setup scripts",
+        "description": "Drop a .slay/worktree-setup.sh in your project — it runs automatically when creating worktrees."
+      },
+      {
+        "category": "improvement",
+        "title": "Task settings panel header",
+        "description": "Settings panel now matches the consistent header style of other panels."
+      },
+      {
+        "category": "fix",
+        "title": "Codex session detection",
+        "description": "Codex session IDs are now auto-detected from disk instead of requiring manual entry."
+      },
+      {
+        "category": "fix",
+        "title": "Git error messages cleaned up",
+        "description": "Worktree git errors no longer show the \"Command failed\" prefix."
+      }
+    ]
+  },
+  {
+    "version": "0.2.0",
+    "date": "2026-03-01",
+    "tagline": "Your workflow, your rules",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Custom task status workflows",
+        "description": "Define your own statuses per project — name them, group them, reorder them. Kanban columns follow your workflow."
+      },
+      {
+        "category": "feature",
+        "title": "Git diff folder actions",
+        "description": "Stage, unstage, and discard entire folders at once. Confirmation modals protect against accidental discards."
+      },
+      {
+        "category": "feature",
+        "title": "Per-provider skill sync",
+        "description": "SKILL.md files sync independently per AI provider — Claude, Codex, Gemini each get their own context."
+      },
+      {
+        "category": "feature",
+        "title": "Context manager",
+        "description": "Browse, diff, and manually sync project context files across providers from a dedicated panel."
+      },
+      {
+        "category": "improvement",
+        "title": "Per-project processes",
+        "description": "Background processes are now scoped to the active project instead of global."
+      },
+      {
+        "category": "improvement",
+        "title": "Auto-switch project",
+        "description": "Clicking a task tab automatically switches to its project — no more manual selection."
+      },
+      {
+        "category": "fix",
+        "title": "Browser tab stability",
+        "description": "Fixed a race condition that could lose non-main tab URLs when switching quickly."
+      }
+    ]
+  },
+  {
+    "version": "0.1.69",
+    "date": "2026-02-26",
+    "tagline": "Search everything",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Global file search",
+        "description": "Cmd+Shift+F searches across all files in your project — from any tab."
+      },
+      {
+        "category": "feature",
+        "title": "Project color tints",
+        "description": "Tabs, task detail, and kanban cards pick up your project's color for quick visual grouping."
+      },
+      {
+        "category": "feature",
+        "title": "Pinnable usage bars",
+        "description": "Pin or unpin inline API usage bars per provider — keep only what you care about visible."
+      },
+      {
+        "category": "feature",
+        "title": "In-app changelog",
+        "description": "See what's new every time you update — opens automatically on version upgrade."
+      },
+      {
+        "category": "feature",
+        "title": "Appearance settings",
+        "description": "Customize font sizes across the app and enable reduced motion for a calmer experience."
+      },
+      {
+        "category": "improvement",
+        "title": "Faster startup",
+        "description": "Parallel splash screen and pre-populated app — visible content on first frame."
+      },
+      {
+        "category": "fix",
+        "title": "Windows support",
+        "description": "Shell, environment, and git operations stabilized for Windows."
+      }
+    ]
+  },
+  {
+    "version": "0.1.62",
+    "date": "2026-02-20",
+    "tagline": "Terminal power, everywhere",
+    "items": [
+      {
+        "category": "feature",
+        "title": "The Slay CLI",
+        "description": "Create, update, search, and manage tasks without leaving your terminal. Full CRUD, completions, and auto-project scoping."
+      },
+      {
+        "category": "feature",
+        "title": "Multi-panel home screen",
+        "description": "Open kanban, git, editor, and processes side by side — all on the home tab."
+      },
+      {
+        "category": "improvement",
+        "title": "Tooltips everywhere",
+        "description": "Every panel, button, and control now has helpful tooltip hints."
+      }
+    ]
+  },
+  {
+    "version": "0.1.56",
+    "date": "2026-02-15",
+    "tagline": "See everything at once",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Processes panel",
+        "description": "Monitor and manage background tasks — dev servers, builds, watchers — from a dedicated panel."
+      },
+      {
+        "category": "feature",
+        "title": "Daily leaderboard",
+        "description": "Opt-in anonymous weekly coding streaks. See how you stack up."
+      },
+      {
+        "category": "feature",
+        "title": "Inline DevTools",
+        "description": "Chromium DevTools embedded right inside the browser panel. No more separate windows."
+      },
+      {
+        "category": "improvement",
+        "title": "Focused panel glow",
+        "description": "A subtle glow shows which panel is currently active — gone when there's only one."
+      },
+      {
+        "category": "fix",
+        "title": "Terminal injection fix",
+        "description": "Escape sequence responses no longer inject garbage characters into your terminal."
+      }
+    ]
+  },
+  {
+    "version": "0.1.51",
+    "date": "2026-02-10",
+    "tagline": "Rock solid terminals",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Crash recovery",
+        "description": "Terminals now auto-recover from crashes with built-in health checks and diagnostics."
+      },
+      {
+        "category": "improvement",
+        "title": "Smarter Cmd+W",
+        "description": "Closes the focused pane first — terminal split, editor file, browser tab — then the task tab."
+      },
+      {
+        "category": "improvement",
+        "title": "Copy URL in browser",
+        "description": "One-click button to copy the current browser panel URL."
+      },
+      {
+        "category": "fix",
+        "title": "Blocked external launches",
+        "description": "Webviews can no longer silently open apps like Spotify or Zoom."
+      }
+    ]
+  },
+  {
+    "version": "0.1.47",
+    "date": "2026-02-05",
+    "tagline": "Drag, drop, split",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Split terminal groups",
+        "description": "Drag terminals into groups and run them side by side within a single task."
+      },
+      {
+        "category": "feature",
+        "title": "Responsive browser preview",
+        "description": "Test your app across phone, tablet, and desktop viewports — all inline."
+      },
+      {
+        "category": "feature",
+        "title": "Drag files from Finder",
+        "description": "Drop files and folders straight from Finder into the editor tree."
+      },
+      {
+        "category": "improvement",
+        "title": "Image preview in editor",
+        "description": "Open images directly in the editor panel instead of an external app."
+      },
+      {
+        "category": "improvement",
+        "title": "Priority signal bars",
+        "description": "Kanban cards now show signal-bar indicators so you can spot high-priority tasks at a glance."
+      },
+      {
+        "category": "improvement",
+        "title": "Update toast",
+        "description": "When a new version is downloaded, a toast appears — restart with one click."
+      }
+    ]
+  },
+  {
+    "version": "0.1.42",
+    "date": "2026-01-28",
+    "tagline": "The big picture",
+    "items": [
+      {
+        "category": "feature",
+        "title": "Explode mode",
+        "description": "Grid view of every open task terminal at once. See all your agents working in parallel."
+      }
+    ]
+  }
+]

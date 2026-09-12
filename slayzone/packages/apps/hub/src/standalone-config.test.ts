@@ -1,0 +1,275 @@
+/**
+ * Hub standalone-config resolve — applyStandaloneHubConfig folds
+ * hub.config.json/hub.state.json into process.env with env>file>default
+ * precedence, and resolves/persists the hub-auth secret (security fix).
+ * Supervised = no-op (no file read/write).
+ *
+ * Pure Node (real temp home dir via SLAYZONE_ROOT, no native deps) → runs
+ * under plain `npx tsx`.
+ *
+ * Run with: npx tsx packages/apps/hub/src/standalone-config.test.ts
+ */
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, join } from 'node:path'
+import {
+  DEV_HUB_AUTH_SECRET,
+  getHubConfigFilePath,
+  getHubStateFilePath,
+  loadHubStateFile,
+  saveHubConfigFile,
+  saveHubStateFile
+} from '@slayzone/platform/slayzone-config'
+import { applyStandaloneHubConfig } from './standalone-config.js'
+
+let passed = 0
+let failed = 0
+
+function test(name: string, fn: () => void): void {
+  try {
+    fn()
+    console.log(`  ✓ ${name}`)
+    passed++
+  } catch (e) {
+    console.error(`  ✗ ${name}`)
+    console.error(`    ${e instanceof Error ? e.message : e}`)
+    failed++
+  }
+}
+function assert(cond: unknown, msg: string): asserts cond {
+  if (!cond) throw new Error(`assertion failed: ${msg}`)
+}
+function assertEq(actual: unknown, expected: unknown, msg: string): void {
+  if (actual !== expected)
+    throw new Error(`${msg}: expected ${String(expected)}, got ${String(actual)}`)
+}
+
+/** Env keys this module touches — scrubbed + restored around each case. */
+const ENV_KEYS = [
+  'SLAYZONE_SUPERVISED',
+  'SLAYZONE_ROOT',
+  'SLAYZONE_HUB_AUTH_SECRET',
+  'SLAYZONE_HUB_ADDRESS',
+  'SLAYZONE_HUB_PUBLIC_ADDRESS',
+  'SLAYZONE_HUB_NAME',
+  'SLAYZONE_MODE'
+] as const
+
+/** Run `fn` with a clean env + isolated temp home dir; restore env after. */
+function withIsolatedEnv(seed: Record<string, string>, fn: (home: string) => void): void {
+  const saved: Record<string, string | undefined> = {}
+  for (const k of ENV_KEYS) {
+    saved[k] = process.env[k]
+    delete process.env[k]
+  }
+  const home = mkdtempSync(join(tmpdir(), 'slz-hub-home-'))
+  process.env.SLAYZONE_ROOT = home
+  for (const [k, v] of Object.entries(seed)) process.env[k] = v
+  try {
+    fn(home)
+  } finally {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k]
+      else process.env[k] = saved[k]
+    }
+    rmSync(home, { recursive: true, force: true })
+  }
+}
+
+console.log('\nstandalone-config: env > file > default')
+console.log('─'.repeat(40))
+
+test('hub.config.json fills unset env (address, publicAddress)', () => {
+  withIsolatedEnv({}, () => {
+    saveHubConfigFile({
+      address: '0.0.0.0:8080',
+      publicAddress: 'hub.example:8443'
+    })
+    applyStandaloneHubConfig()
+    // No DB path is seeded anywhere in this chain: it DERIVES from SLAYZONE_ROOT
+    // (<ROOT>, flat) via platform.getStorageDir() and is not overridable.
+    assertEq(process.env.SLAYZONE_HUB_ADDRESS, '0.0.0.0:8080', 'address')
+    assertEq(process.env.SLAYZONE_HUB_PUBLIC_ADDRESS, 'hub.example:8443', 'publicAddress')
+  })
+})
+
+test('legacy port/publicUrl keys still boot (authority extracted, scheme dropped)', () => {
+  withIsolatedEnv({}, () => {
+    // An existing hub.config.json written by an older build must keep working —
+    // the legacy keys are READ (never written back).
+    saveHubConfigFile({ port: 8080, publicUrl: 'https://hub.example:8443/' })
+    applyStandaloneHubConfig()
+    assertEq(process.env.SLAYZONE_HUB_ADDRESS, '127.0.0.1:8080', 'legacy port → loopback address')
+    assertEq(
+      process.env.SLAYZONE_HUB_PUBLIC_ADDRESS,
+      'hub.example:8443',
+      'legacy publicUrl → authority only (https:// discarded, SLAYZONE_MODE owns the scheme)'
+    )
+  })
+})
+
+test('new address key WINS over the legacy port key', () => {
+  withIsolatedEnv({}, () => {
+    saveHubConfigFile({ address: '0.0.0.0:7000', port: 8080 })
+    applyStandaloneHubConfig()
+    assertEq(process.env.SLAYZONE_HUB_ADDRESS, '0.0.0.0:7000', 'address wins')
+  })
+})
+
+test('env WINS over hub.config.json (does not overwrite a set env)', () => {
+  withIsolatedEnv({ SLAYZONE_HUB_ADDRESS: '127.0.0.1:9999' }, () => {
+    saveHubConfigFile({ address: '0.0.0.0:8080' })
+    applyStandaloneHubConfig()
+    assertEq(process.env.SLAYZONE_HUB_ADDRESS, '127.0.0.1:9999', 'env address kept')
+  })
+})
+
+// `mode` is what makes `slay hub create --public-address` actually work: without it
+// the hub boots local, and `deriveComputerHubUrl` hands out `ws://127.0.0.1:<port>`
+// tokens no other machine can use.
+test('hub.config.json mode seeds SLAYZONE_MODE', () => {
+  withIsolatedEnv({}, () => {
+    saveHubConfigFile({ mode: 'remote', publicAddress: 'hub.example:8443' })
+    applyStandaloneHubConfig()
+    assertEq(process.env.SLAYZONE_MODE, 'remote', 'mode seeded from config')
+  })
+})
+
+test('env SLAYZONE_MODE wins over hub.config.json mode', () => {
+  withIsolatedEnv({ SLAYZONE_MODE: 'local' }, () => {
+    saveHubConfigFile({ mode: 'remote' })
+    applyStandaloneHubConfig()
+    assertEq(process.env.SLAYZONE_MODE, 'local', 'env mode kept')
+  })
+})
+
+test('no mode key leaves SLAYZONE_MODE unset (getSlayzoneMode defaults to local)', () => {
+  withIsolatedEnv({}, () => {
+    saveHubConfigFile({ address: '127.0.0.1:8080' })
+    applyStandaloneHubConfig()
+    // Deliberately UNSET rather than an explicit 'local': every existing standalone
+    // boot must stay byte-identical, and the default already lives in
+    // getSlayzoneMode().
+    assert(process.env.SLAYZONE_MODE === undefined, 'not seeded when absent')
+  })
+})
+
+test('no config + no env ⇒ only the generated hub-auth secret is set (defaults elsewhere)', () => {
+  withIsolatedEnv({}, () => {
+    applyStandaloneHubConfig()
+    assert(process.env.SLAYZONE_HUB_ADDRESS === undefined, 'no address default here')
+    assert(!!process.env.SLAYZONE_HUB_AUTH_SECRET, 'hub-auth secret always resolved')
+  })
+})
+
+console.log('\nstandalone-config: hub-auth secret (security fix)')
+console.log('─'.repeat(40))
+
+test('generates + persists a hub-auth secret into hub.state.json (!= dev constant)', () => {
+  withIsolatedEnv({}, () => {
+    applyStandaloneHubConfig()
+    const secret = process.env.SLAYZONE_HUB_AUTH_SECRET
+    assert(!!secret, 'env set')
+    assert(secret !== DEV_HUB_AUTH_SECRET, 'not the shared dev constant')
+    assertEq(secret!.length, 64, '256-bit hex')
+    // persisted into the temp hub.state.json
+    assertEq(loadHubStateFile().computerTransportSecret, secret, 'persisted')
+  })
+})
+
+test('second boot reuses the SAME persisted secret (stable)', () => {
+  withIsolatedEnv({}, () => {
+    applyStandaloneHubConfig()
+    const first = process.env.SLAYZONE_HUB_AUTH_SECRET
+    // simulate a fresh process: clear the env, keep the file
+    delete process.env.SLAYZONE_HUB_AUTH_SECRET
+    applyStandaloneHubConfig()
+    assertEq(process.env.SLAYZONE_HUB_AUTH_SECRET, first, 'same secret across boots')
+  })
+})
+
+test('env SLAYZONE_HUB_AUTH_SECRET wins + no state-file write', () => {
+  withIsolatedEnv({ SLAYZONE_HUB_AUTH_SECRET: 'ci-pinned-secret' }, () => {
+    applyStandaloneHubConfig()
+    assertEq(process.env.SLAYZONE_HUB_AUTH_SECRET, 'ci-pinned-secret', 'env secret kept')
+    // hub.state.json should NOT have been created (no generate/persist path taken)
+    assert(!existsSync(getHubStateFilePath()), 'no state file written when env pins the secret')
+  })
+})
+
+test('hub.state.json computerTransportSecret used (env unset) and NOT regenerated', () => {
+  withIsolatedEnv({}, () => {
+    saveHubStateFile({ computerTransportSecret: 'from-state-file' })
+    applyStandaloneHubConfig()
+    assertEq(process.env.SLAYZONE_HUB_AUTH_SECRET, 'from-state-file', 'state-file secret used')
+  })
+})
+
+test('EMPTY env SLAYZONE_HUB_AUTH_SECRET counts as absent ⇒ generates (no misleading throw)', () => {
+  withIsolatedEnv({ SLAYZONE_HUB_AUTH_SECRET: '' }, () => {
+    applyStandaloneHubConfig()
+    const secret = process.env.SLAYZONE_HUB_AUTH_SECRET
+    assert(!!secret, 'a real secret was generated (empty treated as absent)')
+    assert(secret !== DEV_HUB_AUTH_SECRET, 'not the dev constant')
+    assertEq(secret!.length, 64, '256-bit hex generated')
+    assertEq(loadHubStateFile().computerTransportSecret, secret, 'persisted')
+  })
+})
+
+console.log('\nstandalone-config: hub name (env > config > basename(ROOT))')
+console.log('─'.repeat(40))
+
+test('defaults to the ROOT directory name — no config, no env', () => {
+  withIsolatedEnv({}, (home) => {
+    applyStandaloneHubConfig()
+    assertEq(process.env.SLAYZONE_HUB_NAME, basename(home), 'name = basename(ROOT)')
+  })
+})
+
+test('hub.config.json hubName beats the ROOT-name default', () => {
+  withIsolatedEnv({}, () => {
+    saveHubConfigFile({ hubName: 'staging' })
+    applyStandaloneHubConfig()
+    assertEq(process.env.SLAYZONE_HUB_NAME, 'staging', 'config hubName')
+  })
+})
+
+test('env SLAYZONE_HUB_NAME beats hub.config.json', () => {
+  withIsolatedEnv({ SLAYZONE_HUB_NAME: 'from-env' }, () => {
+    saveHubConfigFile({ hubName: 'from-file' })
+    applyStandaloneHubConfig()
+    assertEq(process.env.SLAYZONE_HUB_NAME, 'from-env', 'env wins')
+  })
+})
+
+test('a blank env name falls through to the default (not an empty hub name)', () => {
+  withIsolatedEnv({ SLAYZONE_HUB_NAME: '   ' }, (home) => {
+    applyStandaloneHubConfig()
+    assertEq(process.env.SLAYZONE_HUB_NAME, basename(home), 'blank treated as unset')
+  })
+})
+
+console.log('\nstandalone-config: supervised = no-op')
+console.log('─'.repeat(40))
+
+test('supervised does NOT read or write hub.config.json/hub.state.json (no file created, no env seeded)', () => {
+  withIsolatedEnv({ SLAYZONE_SUPERVISED: '1' }, () => {
+    applyStandaloneHubConfig()
+    assert(process.env.SLAYZONE_HUB_AUTH_SECRET === undefined, 'no secret seeded when supervised')
+    assert(!existsSync(getHubConfigFilePath()), 'no config file written when supervised')
+    assert(!existsSync(getHubStateFilePath()), 'no state file written when supervised')
+  })
+})
+
+test('supervised IGNORES an existing hub.config.json/hub.state.json entirely', () => {
+  withIsolatedEnv({ SLAYZONE_SUPERVISED: '1' }, () => {
+    saveHubConfigFile({ address: '0.0.0.0:8080' })
+    saveHubStateFile({ computerTransportSecret: 'should-be-ignored' })
+    applyStandaloneHubConfig()
+    assert(process.env.SLAYZONE_HUB_ADDRESS === undefined, 'ignored address')
+    assert(process.env.SLAYZONE_HUB_AUTH_SECRET === undefined, 'ignored computerTransportSecret')
+  })
+})
+
+console.log(`\n${passed} passed, ${failed} failed\n`)
+if (failed > 0) process.exit(1)

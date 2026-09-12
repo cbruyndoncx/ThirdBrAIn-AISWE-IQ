@@ -1,0 +1,38 @@
+{
+  "name": "@slayzone/types",
+  "version": "0.36.0-beta.17",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./global": "./src/global.d.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@slayzone/agent-turns": "workspace:*",
+    "@slayzone/ai-config": "workspace:*",
+    "@slayzone/automations": "workspace:*",
+    "@slayzone/feedback": "workspace:*",
+    "@slayzone/file-editor": "workspace:*",
+    "@slayzone/history": "workspace:*",
+    "@slayzone/integrations": "workspace:*",
+    "@slayzone/platform": "workspace:*",
+    "@slayzone/projects": "workspace:*",
+    "@slayzone/settings": "workspace:*",
+    "@slayzone/tags": "workspace:*",
+    "@slayzone/task": "workspace:*",
+    "@slayzone/task-artifacts": "workspace:*",
+    "@slayzone/task-terminals": "workspace:*",
+    "@slayzone/terminal": "workspace:*",
+    "@slayzone/test-panel": "workspace:*",
+    "@slayzone/usage-analytics": "workspace:*",
+    "@slayzone/worktrees": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

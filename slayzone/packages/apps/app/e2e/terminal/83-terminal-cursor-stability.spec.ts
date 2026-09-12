@@ -1,0 +1,96 @@
+/**
+ * Terminal cursor stability — verifies no unexpected cursor jumping or blank
+ * lines when creating a new temporary task (claude-code mode, the default).
+ */
+import { test, expect, seed, resetApp, clickProject } from '../fixtures/electron'
+import { TEST_PROJECT_PATH } from '../fixtures/electron'
+import { getMainSessionId, waitForPtySession, getTerminalState } from '../fixtures/terminal'
+
+/** The renderer exposes the tab store on `window` for e2e only — just the slice
+ *  this spec reads (see fixtures/context-manager.ts for the same pattern). */
+type TabStoreWindow = {
+  __slayzone_tabStore?: {
+    getState: () => {
+      tabs: Array<{ type: string; taskId?: string }>
+      activeTabIndex: number
+    }
+  }
+}
+
+test.describe('Temporary task cursor stability', () => {
+  let projectAbbrev: string
+
+  test.beforeAll(async ({ mainWindow }) => {
+    await resetApp(mainWindow)
+    const s = seed(mainWindow)
+    const p = await s.createProject({
+      name: 'Cursor Stab',
+      color: '#f97316',
+      path: TEST_PROJECT_PATH
+    })
+    projectAbbrev = p.name.slice(0, 2).toUpperCase()
+    await s.refreshData()
+  })
+
+  // QUARANTINED 2026-05-16: PTY for temp task doesn't register — Claude
+  // Code likely requires auth or is missing in test env. Cursor stability
+  // assertion can't run without real CLI output.
+  test('no blank lines between Claude Code header and prompt', async ({ mainWindow }) => {
+    // Select the project first (required for temp task creation)
+    await clickProject(mainWindow, projectAbbrev)
+
+    await mainWindow.getByLabel('New temporary task', { exact: true }).click()
+
+    await expect
+      .poll(
+        async () => {
+          return mainWindow.evaluate(() => {
+            const store = (window as unknown as TabStoreWindow).__slayzone_tabStore
+            if (!store) return null
+            const { tabs, activeTabIndex } = store.getState()
+            const activeTab = tabs[activeTabIndex]
+            return activeTab?.type === 'task' ? activeTab.taskId : null
+          })
+        },
+        { timeout: 10_000 }
+      )
+      .not.toBeNull()
+
+    const taskId = await mainWindow.evaluate(() => {
+      const store = (window as unknown as TabStoreWindow).__slayzone_tabStore
+      if (!store) throw new Error('__slayzone_tabStore not exposed')
+      const { tabs, activeTabIndex } = store.getState()
+      return tabs[activeTabIndex].taskId as string
+    })
+
+    const sessionId = getMainSessionId(taskId)
+    await waitForPtySession(mainWindow, sessionId, 30_000)
+
+    // Wait for Claude Code prompt (❯ character)
+    await expect
+      .poll(
+        async () => {
+          const state = await getTerminalState(mainWindow, sessionId)
+          if (!state) return false
+          return state.lines.some((l) => l.includes('❯'))
+        },
+        { timeout: 30_000 }
+      )
+      .toBe(true)
+
+    const state = await getTerminalState(mainWindow, sessionId)
+    expect(state).toBeTruthy()
+
+    // Find the prompt line and the last header line (directory path)
+    const promptIdx = state!.lines.findIndex((l) => l.includes('❯'))
+    const headerLines = state!.lines.slice(0, promptIdx)
+
+    // Find last non-empty header line (the working directory line)
+    const lastHeaderIdx = headerLines.reduce((last, l, i) => (l.trim() ? i : last), -1)
+
+    // Between the last header line and prompt, there should be at most 1 blank line
+    // (Claude Code renders: header, blank line, prompt). More indicates cursor jumped.
+    const gap = promptIdx - lastHeaderIdx - 1
+    expect(gap).toBeLessThanOrEqual(1)
+  })
+})

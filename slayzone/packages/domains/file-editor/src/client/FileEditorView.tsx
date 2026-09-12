@@ -1,0 +1,629 @@
+import {
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  useMemo,
+  useImperativeHandle,
+  forwardRef
+} from 'react'
+import { FileCode, Files, RefreshCw, Search } from 'lucide-react'
+import type { EditorView as CMEditorView } from '@codemirror/view'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  Button,
+  PulseGrid,
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+  getThemeChrome,
+  getChromeStyleOverrides,
+  getThemeEditorColors,
+  useAppearance,
+  safeClipboardWriteText
+} from '@slayzone/ui'
+import { useMutation } from '@tanstack/react-query'
+import { useTRPC } from '@slayzone/transport/client'
+import { useTheme } from '@slayzone/settings/client'
+import { toSlzFileUrl } from '@slayzone/platform/slz-file-url'
+import type {
+  EditorOpenFilesState,
+  MarkdownViewMode,
+  OpenFileOptions
+} from '@slayzone/file-editor/shared'
+import { useFileEditor, isImageFile, isPdfFile } from './useFileEditor'
+import { EditorFileTree, type EditorFileTreeHandle } from './EditorFileTree'
+import { EditorTabBar } from './EditorTabBar'
+import { CodeEditor } from './CodeEditor'
+import { MarkdownSplitView } from './MarkdownSplitView'
+import { SearchPanel } from './SearchPanel'
+import { EditorToc } from './EditorToc'
+import type { MarkdownHeading } from './markdown-headings'
+import { MarkdownFilePane, type MarkdownFilePaneHandle } from './EditorMarkdownPane'
+import { EditorDisplayPopover } from './EditorDisplayPopover'
+import { useFileDropZone } from './useFileDropZone'
+import { useEditorLayoutState } from './useEditorLayoutState'
+import { formatSize } from './FileEditorView.utils'
+import {
+  useWorkspaceIsLocal,
+  WorkspaceTargetProvider,
+  type WorkspaceTarget
+} from './workspace-target'
+
+export interface FileEditorViewHandle {
+  openFile: (filePath: string, options?: OpenFileOptions) => void
+  closeActiveFile: () => boolean
+  toggleSearch: () => void
+}
+
+interface FileEditorViewProps {
+  projectPath: string
+  /**
+   * Which machine owns `projectPath`. Every filesystem call below is routed to
+   * it; omitting this falls back to the connected default computer, which is only
+   * correct for callers with no task context.
+   */
+  target?: WorkspaceTarget
+  initialEditorState?: EditorOpenFilesState | null
+  onEditorStateChange?: (state: EditorOpenFilesState) => void
+}
+
+/**
+ * The provider has to sit ABOVE the component that reads it, so the exported
+ * `FileEditorView` is the wrapper and the body is a separate component. Putting
+ * the provider inside the body would leave that body's own hooks reading the
+ * default (empty) target — i.e. the default computer — while everything beneath it
+ * read the right one.
+ */
+export const FileEditorView = forwardRef<FileEditorViewHandle, FileEditorViewProps>(
+  function FileEditorView(props, ref) {
+    return (
+      <WorkspaceTargetProvider target={props.target}>
+        <FileEditorViewBody {...props} ref={ref} />
+      </WorkspaceTargetProvider>
+    )
+  }
+)
+
+const FileEditorViewBody = forwardRef<FileEditorViewHandle, FileEditorViewProps>(
+  function FileEditorViewBody({ projectPath, initialEditorState, onEditorStateChange }, ref) {
+    const trpc = useTRPC()
+    const showInFinderMutation = useMutation(trpc.fileEditor.showInFinder.mutationOptions())
+    const {
+      openFiles,
+      activeFile,
+      activeFilePath,
+      setActiveFilePath,
+      openFile,
+      openFileForced,
+      updateContent,
+      saveFile,
+      closeFile,
+      closeOtherFiles,
+      closeFilesToRight,
+      closeSavedFiles,
+      closeAllFiles,
+      hasDirtyFiles,
+      isDirty,
+      isFileDiskChanged,
+      isFileDeleted,
+      renameOpenFile,
+      isRestoring,
+      refreshTree,
+      treeRefreshKey,
+      fileVersions,
+      goToPosition,
+      focusToken,
+      clearGoToPosition
+    } = useFileEditor(projectPath, initialEditorState)
+
+    const { editorOverrideThemeId, editorThemeId, contentVariant } = useTheme()
+    const editorPanelStyle = useMemo(() => {
+      if (!editorOverrideThemeId) return undefined
+      return getChromeStyleOverrides(getThemeChrome(editorOverrideThemeId, contentVariant))
+    }, [editorOverrideThemeId, contentVariant])
+    const markdownThemeColors = useMemo(
+      () => getThemeEditorColors(editorThemeId, contentVariant),
+      [editorThemeId, contentVariant]
+    )
+
+    const {
+      treeWidth,
+      treeVisible,
+      setTreeVisible,
+      expandedFolders,
+      setExpandedFolders,
+      sidebarMode,
+      setSidebarMode,
+      tocWidth,
+      setTocWidth,
+      treeReady,
+      setTreeReady,
+      handleResizeStart
+    } = useEditorLayoutState(initialEditorState)
+
+    const treeRef = useRef<EditorFileTreeHandle>(null)
+    const [confirmClose, setConfirmClose] = useState<string | null>(null)
+    const [confirmCloseAll, setConfirmCloseAll] = useState(false)
+    const [fileViewModes, setFileViewModes] = useState<Record<string, MarkdownViewMode>>(
+      initialEditorState?.fileViewModes ?? {}
+    )
+    const {
+      editorMarkdownViewMode,
+      notesReadability,
+      notesWidth,
+      notesFontFamily,
+      editorMinimapEnabled,
+      editorTocEnabled
+    } = useAppearance()
+    const cmViewRef = useRef<CMEditorView | null>(null)
+    const richPaneRef = useRef<MarkdownFilePaneHandle | null>(null)
+
+    // Focus the editor whenever a file is opened/activated via openFile. The
+    // newly-active pane mounts (child effect sets cmViewRef / richPaneRef) before
+    // this parent effect runs; rAF covers async-mount slack. CM (code + split-md)
+    // first, else rich-markdown (milkdown); image/too-large have nothing to focus.
+    // Skips token 0 so first render / restore never grabs focus.
+    useEffect(() => {
+      if (focusToken === 0) return
+      const id = requestAnimationFrame(() => {
+        if (cmViewRef.current) cmViewRef.current.focus()
+        else richPaneRef.current?.focus()
+      })
+      return () => cancelAnimationFrame(id)
+    }, [focusToken])
+    const viewMode: MarkdownViewMode =
+      (activeFilePath ? fileViewModes[activeFilePath] : undefined) ?? editorMarkdownViewMode
+    const setViewModeForFile = useCallback(
+      (mode: MarkdownViewMode) => {
+        if (!activeFilePath) return
+        setFileViewModes((prev) => ({ ...prev, [activeFilePath]: mode }))
+      },
+      [activeFilePath]
+    )
+    const { isFileDragOver, dropHandlers } = useFileDropZone(projectPath, openFile)
+    const showLoading = isRestoring || (treeVisible && !treeReady)
+
+    // --- Emit state changes to parent for persistence ---
+    // Parent (TaskDetailPage) debounces at 500ms, so frequent calls here are fine.
+    // Use filePathsKey (stable string) instead of openFiles to avoid emitting on every keystroke.
+    const onChangeRef = useRef(onEditorStateChange)
+    onChangeRef.current = onEditorStateChange
+    const filePathsKey = openFiles.map((f) => f.path).join('\0')
+
+    const fileViewModesKey = JSON.stringify(fileViewModes)
+    useEffect(() => {
+      if (isRestoring) return
+      const openPaths = filePathsKey ? filePathsKey.split('\0') : []
+      const modes: Record<string, MarkdownViewMode> = {}
+      for (const p of openPaths) {
+        if (fileViewModes[p]) modes[p] = fileViewModes[p]
+      }
+      onChangeRef.current?.({
+        files: openPaths,
+        activeFile: activeFilePath,
+        treeWidth,
+        treeVisible,
+        expandedFolders: [...expandedFolders],
+        fileViewModes: Object.keys(modes).length > 0 ? modes : undefined,
+        tocWidth
+      })
+    }, [
+      filePathsKey,
+      activeFilePath,
+      treeWidth,
+      treeVisible,
+      expandedFolders,
+      isRestoring,
+      fileViewModesKey,
+      tocWidth
+    ])
+
+    // Auto-reveal active file in tree when it changes
+    useEffect(() => {
+      if (!activeFilePath || isRestoring) return
+      const parts = activeFilePath.split('/')
+      if (parts.length > 1) {
+        const ancestors = parts.slice(0, -1).reduce<string[]>((acc, part, i) => {
+          acc.push(i === 0 ? part : `${acc[i - 1]}/${part}`)
+          return acc
+        }, [])
+        setExpandedFolders((prev) => {
+          if (ancestors.every((a) => prev.has(a))) return prev
+          return new Set([...prev, ...ancestors])
+        })
+      }
+      requestAnimationFrame(() => treeRef.current?.scrollToPath(activeFilePath))
+    }, [activeFilePath, isRestoring, setExpandedFolders])
+
+    const isMarkdown = useMemo(() => {
+      const ext = activeFilePath?.split('.').pop()?.toLowerCase()
+      return ext === 'md' || ext === 'mdx'
+    }, [activeFilePath])
+
+    const handleTocJump = useCallback(
+      (heading: MarkdownHeading) => {
+        if (viewMode === 'rich') {
+          richPaneRef.current?.scrollToHeadingIndex(heading.index)
+          return
+        }
+        const view = cmViewRef.current
+        if (!view) return
+        const line = Math.max(1, Math.min(heading.line, view.state.doc.lines))
+        const lineObj = view.state.doc.line(line)
+        view.dispatch({ selection: { anchor: lineObj.from }, scrollIntoView: true })
+        view.focus()
+      },
+      [viewMode]
+    )
+
+    // `binary` means "no text content"; derive the actual viewer from the extension.
+    const isImage = !!activeFile?.binary && isImageFile(activeFile.path)
+    const isPdf = !!activeFile?.binary && isPdfFile(activeFile.path)
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        openFile,
+        closeActiveFile: () => {
+          if (activeFilePath) {
+            closeFile(activeFilePath)
+            return true
+          }
+          return false
+        },
+        toggleSearch: () => {
+          setSidebarMode((prev) => {
+            const next = prev === 'search' ? 'tree' : 'search'
+            if (next === 'search' && !treeVisible) setTreeVisible(true)
+            return next
+          })
+        }
+      }),
+      [openFile, activeFilePath, closeFile, treeVisible, setSidebarMode, setTreeVisible]
+    )
+
+    const handleCloseFile = useCallback(
+      (filePath: string) => {
+        if (isDirty(filePath)) {
+          setConfirmClose(filePath)
+          return
+        }
+        closeFile(filePath)
+      },
+      [isDirty, closeFile]
+    )
+
+    const handleConfirmDiscard = useCallback(() => {
+      if (confirmClose) {
+        closeFile(confirmClose)
+        setConfirmClose(null)
+      }
+    }, [confirmClose, closeFile])
+
+    const handleCloseAll = useCallback(() => {
+      if (hasDirtyFiles) {
+        setConfirmCloseAll(true)
+        return
+      }
+      closeAllFiles()
+    }, [hasDirtyFiles, closeAllFiles])
+
+    const handleConfirmCloseAll = useCallback(() => {
+      closeAllFiles()
+      setConfirmCloseAll(false)
+    }, [closeAllFiles])
+
+    const handleCopyPath = useCallback(
+      (filePath: string) => {
+        void safeClipboardWriteText(`${projectPath}/${filePath}`)
+      },
+      [projectPath]
+    )
+
+    const handleCopyRelativePath = useCallback((filePath: string) => {
+      void safeClipboardWriteText(filePath)
+    }, [])
+
+    // Not routed on purpose — `showInFinder` resolves against THIS desktop, the
+    // only machine whose file manager the user can see.
+    const canRevealInFinder = useWorkspaceIsLocal()
+    const handleRevealInFinder = useCallback(
+      (filePath: string) => {
+        if (!canRevealInFinder) return
+        void showInFinderMutation.mutateAsync({ rootPath: projectPath, targetPath: filePath })
+      },
+      [projectPath, canRevealInFinder]
+    )
+
+    return (
+      <div
+        className="h-full flex bg-surface-0 relative"
+        style={editorPanelStyle as React.CSSProperties | undefined}
+        {...dropHandlers}
+      >
+        {/* Sidebar: header tabs + file tree or search */}
+        {treeVisible && (
+          <div
+            className="shrink-0 border-r overflow-hidden flex flex-col"
+            style={{ width: treeWidth }}
+          >
+            {/* Sidebar tab header */}
+            <TooltipProvider delayDuration={400}>
+              <div className="flex items-center gap-1 px-2 h-10 border-b border-border shrink-0 bg-surface-1">
+                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide mr-auto">
+                  {sidebarMode === 'search' ? 'Search' : 'Files'}
+                </span>
+                {sidebarMode === 'tree' && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        className="size-7 flex items-center justify-center rounded transition-colors text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                        onClick={refreshTree}
+                      >
+                        <RefreshCw className="size-3.5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">Refresh</TooltipContent>
+                  </Tooltip>
+                )}
+                {[
+                  { mode: 'tree' as const, icon: Files, label: 'Explorer' },
+                  { mode: 'search' as const, icon: Search, label: 'Search' }
+                ].map(({ mode, icon: Icon, label }) => (
+                  <Tooltip key={mode}>
+                    <TooltipTrigger asChild>
+                      <button
+                        className={`size-7 flex items-center justify-center rounded transition-colors ${sidebarMode === mode ? 'text-foreground bg-muted' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}`}
+                        onClick={() => setSidebarMode(mode)}
+                      >
+                        <Icon className="size-4" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">{label}</TooltipContent>
+                  </Tooltip>
+                ))}
+              </div>
+            </TooltipProvider>
+            {/* Sidebar content */}
+            <div className="flex-1 min-w-0 min-h-0">
+              {sidebarMode === 'search' ? (
+                <SearchPanel projectPath={projectPath} onOpenFile={openFile} />
+              ) : (
+                <EditorFileTree
+                  ref={treeRef}
+                  projectPath={projectPath}
+                  onOpenFile={openFile}
+                  onFileRenamed={renameOpenFile}
+                  activeFilePath={activeFilePath}
+                  refreshKey={treeRefreshKey}
+                  expandedFolders={expandedFolders}
+                  onExpandedFoldersChange={setExpandedFolders}
+                  onReady={() => setTreeReady(true)}
+                />
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Editor area */}
+        <div className="relative flex-1 flex flex-col min-w-0">
+          {/* Resize handle (overlay) */}
+          {treeVisible && (
+            <div
+              className="absolute left-0 inset-y-0 w-2 -translate-x-1/2 z-10 cursor-col-resize hover:bg-primary/20 active:bg-primary/30 transition-colors"
+              onMouseDown={handleResizeStart}
+            />
+          )}
+          <TooltipProvider delayDuration={400}>
+            <div className="flex items-center shrink-0 h-10 border-b border-border bg-surface-1">
+              <EditorTabBar
+                files={openFiles}
+                activeFilePath={activeFilePath}
+                onSelect={setActiveFilePath}
+                onClose={handleCloseFile}
+                onCloseOthers={closeOtherFiles}
+                onCloseToRight={closeFilesToRight}
+                onCloseSaved={closeSavedFiles}
+                onCloseAll={handleCloseAll}
+                onCopyPath={handleCopyPath}
+                onCopyRelativePath={handleCopyRelativePath}
+                onRevealInFinder={handleRevealInFinder}
+                isDirty={isDirty}
+                diskChanged={isFileDiskChanged}
+                deleted={isFileDeleted}
+                treeVisible={treeVisible}
+                onToggleTree={() => setTreeVisible((v) => !v)}
+              />
+              {isMarkdown && activeFile?.content != null && !activeFile?.deleted && (
+                <EditorDisplayPopover
+                  viewMode={viewMode}
+                  onViewModeChange={setViewModeForFile}
+                  editorTocEnabled={editorTocEnabled}
+                  editorMinimapEnabled={editorMinimapEnabled}
+                  notesReadability={notesReadability}
+                  notesWidth={notesWidth}
+                  notesFontFamily={notesFontFamily}
+                />
+              )}
+            </div>
+          </TooltipProvider>
+
+          {activeFile?.deleted && (
+            <div className="shrink-0 flex items-center gap-3 px-3 py-2 bg-destructive/10 border-b border-destructive/30 text-xs">
+              <span className="text-destructive font-medium">File deleted on disk.</span>
+              <span className="text-muted-foreground">
+                Save to recreate, or close tab to discard changes.
+              </span>
+              <div className="ml-auto flex items-center gap-2">
+                <Button size="sm" variant="outline" onClick={() => saveFile(activeFile.path)}>
+                  Save
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => closeFile(activeFile.path)}>
+                  Discard
+                </Button>
+              </div>
+            </div>
+          )}
+          {activeFile && isImage ? (
+            <div className="flex-1 min-h-0 flex items-center justify-center overflow-auto p-4 bg-[repeating-conic-gradient(hsl(var(--muted))_0%_25%,transparent_0%_50%)_50%/16px_16px]">
+              <img
+                src={toSlzFileUrl(
+                  `${projectPath}/${activeFile.path}`,
+                  fileVersions.get(activeFile.path)
+                )}
+                className="max-w-full max-h-full object-contain"
+                draggable={false}
+              />
+            </div>
+          ) : activeFile && isPdf ? (
+            <iframe
+              src={toSlzFileUrl(
+                `${projectPath}/${activeFile.path}`,
+                fileVersions.get(activeFile.path)
+              )}
+              className="flex-1 w-full min-h-0"
+              title="PDF preview"
+            />
+          ) : activeFile?.tooLarge ? (
+            <div className="flex-1 flex items-center justify-center text-muted-foreground">
+              <div className="text-center space-y-3">
+                <FileCode className="size-8 mx-auto opacity-40" />
+                <p className="text-sm">File too large ({formatSize(activeFile.sizeBytes ?? 0)})</p>
+                {(activeFile.sizeBytes ?? 0) <= 10 * 1024 * 1024 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => openFileForced(activeFile.path)}
+                  >
+                    Open anyway
+                  </Button>
+                )}
+              </div>
+            </div>
+          ) : activeFile?.content != null ? (
+            <div className="relative flex-1 min-h-0 flex">
+              <div className="flex-1 min-w-0">
+                {isMarkdown && viewMode === 'rich' ? (
+                  <MarkdownFilePane
+                    key={activeFile.path}
+                    filePath={activeFile.path}
+                    projectPath={projectPath}
+                    content={activeFile.content}
+                    onChange={(content) => updateContent(activeFile.path, content)}
+                    onSave={() => saveFile(activeFile.path)}
+                    onOpenFile={openFile}
+                    themeColors={markdownThemeColors}
+                    readability={notesReadability}
+                    width={notesWidth}
+                    fontFamily={notesFontFamily}
+                    handleRef={richPaneRef}
+                  />
+                ) : isMarkdown && viewMode === 'split' ? (
+                  <MarkdownSplitView
+                    key={activeFile.path}
+                    filePath={activeFile.path}
+                    content={activeFile.content}
+                    onChange={(content) => updateContent(activeFile.path, content)}
+                    onSave={() => saveFile(activeFile.path)}
+                    version={fileVersions.get(activeFile.path)}
+                    goToPosition={goToPosition?.filePath === activeFile.path ? goToPosition : null}
+                    onGoToPositionApplied={clearGoToPosition}
+                    minimap={editorMinimapEnabled}
+                    viewHandleRef={cmViewRef}
+                  />
+                ) : (
+                  <CodeEditor
+                    key={activeFile.path}
+                    filePath={activeFile.path}
+                    content={activeFile.content}
+                    onChange={(content) => updateContent(activeFile.path, content)}
+                    onSave={() => saveFile(activeFile.path)}
+                    version={fileVersions.get(activeFile.path)}
+                    goToPosition={goToPosition?.filePath === activeFile.path ? goToPosition : null}
+                    onGoToPositionApplied={clearGoToPosition}
+                    minimap={editorMinimapEnabled}
+                    viewHandleRef={cmViewRef}
+                  />
+                )}
+              </div>
+              {isMarkdown && editorTocEnabled && (
+                <EditorToc
+                  content={activeFile.content}
+                  width={tocWidth}
+                  onWidthChange={setTocWidth}
+                  onJump={handleTocJump}
+                  minimapVisible={editorMinimapEnabled && viewMode !== 'rich'}
+                />
+              )}
+            </div>
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-muted-foreground">
+              <div className="text-center space-y-2">
+                <FileCode className="size-8 mx-auto opacity-40" />
+                <p className="text-sm">Select a file to edit</p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {showLoading && (
+          <div className="absolute inset-0 z-40 bg-surface-0">
+            <PulseGrid />
+          </div>
+        )}
+
+        {/* Drop overlay */}
+        {isFileDragOver && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/80 border-2 border-dashed border-primary rounded-md pointer-events-none">
+            <p className="text-sm text-primary font-medium">Drop files to open</p>
+          </div>
+        )}
+
+        {/* Unsaved changes confirmation */}
+        <AlertDialog
+          open={!!confirmClose}
+          onOpenChange={(open) => {
+            if (!open) setConfirmClose(null)
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Unsaved changes</AlertDialogTitle>
+              <AlertDialogDescription>
+                {confirmClose?.split('/').pop()} has unsaved changes that will be lost.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={handleConfirmDiscard}>Discard</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        <AlertDialog open={confirmCloseAll} onOpenChange={setConfirmCloseAll}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Unsaved changes</AlertDialogTitle>
+              <AlertDialogDescription>
+                Some open files have unsaved changes. Closing all will discard them.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={handleConfirmCloseAll}>Discard all</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
+    )
+  }
+)

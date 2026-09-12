@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflow-lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Lint GitHub workflows
+        uses: rhysd/actionlint@v1.7.11
+
+      - name: Enforce release workflow policy
+        run: bash scripts/ci/check-release-workflow-policy.sh
+
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          CI_SKIP_POSTINSTALL: '1'
+
+      - name: Lint theme tokens
+        run: pnpm lint:theme
+
+      - name: Lint server boundary (electron-free guard)
+        run: pnpm lint:server-boundary
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build CLI
+        run: pnpm --filter @slayzone/cli build
+
+      - name: Build
+        run: pnpm build
+        env:
+          POSTHOG_API_KEY: ci
+          POSTHOG_HOST: https://app.posthog.com
+          VITE_CONVEX_URL: https://example.invalid
+
+  # Windows job: the cross-platform shell + agent-hook path code (issue #88) is
+  # only meaningfully exercised on a real Windows runner — Git Bash is
+  # preinstalled here, so the hook-execution test reproduces the bug end-to-end.
+  check-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          CI_SKIP_POSTINSTALL: '1'
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test platform (shell primitives)
+        run: pnpm --filter @slayzone/platform test
+
+      - name: Test agent-hooks
+        run: pnpm --filter @slayzone/app test:agent-hooks

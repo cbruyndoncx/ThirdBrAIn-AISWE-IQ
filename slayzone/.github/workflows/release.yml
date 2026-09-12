@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to release (vX.Y.Z)
+        required: true
+        type: string
+      mode:
+        description: Release mode
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - publish
+      channels:
+        description: 'JSON array of channels (example: ["stable","beta"])'
+        required: false
+        default: '["stable"]'
+        type: string
+
+concurrency:
+  group: release-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}-${{ github.event_name == 'push' && 'publish' || inputs.mode }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  detect-channel:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      channels_json: ${{ steps.detect.outputs.channels_json }}
+    steps:
+      - name: Derive channel from tag suffix
+        id: detect
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-([A-Za-z]+) ]]; then
+            CHANNEL="${BASH_REMATCH[1]}"
+          else
+            CHANNEL="stable"
+          fi
+
+          echo "channels_json=[\"$CHANNEL\"]" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: [detect-channel]
+    if: ${{ !failure() && !cancelled() }}
+    uses: ./.github/workflows/release-foundation.yml
+    with:
+      mode: ${{ github.event_name == 'push' && 'publish' || inputs.mode }}
+      release_tag: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+      channels_json: ${{ github.event_name == 'push' && needs.detect-channel.outputs.channels_json || inputs.channels }}
+    secrets: inherit

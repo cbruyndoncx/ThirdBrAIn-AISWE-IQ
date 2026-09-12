@@ -1,0 +1,102 @@
+import { useCallback, useRef, useState } from 'react'
+import { useMutation } from '@tanstack/react-query'
+import { electronBootstrap, useTRPC } from '@slayzone/transport/client'
+import { useWorkspaceTarget } from './workspace-target'
+
+export interface FileDropZoneHandlers {
+  onDragOver: (e: React.DragEvent) => void
+  onDragEnter: (e: React.DragEvent) => void
+  onDragLeave: (e: React.DragEvent) => void
+  onDrop: (e: React.DragEvent) => void
+}
+
+export interface UseFileDropZoneResult {
+  isFileDragOver: boolean
+  dropHandlers: FileDropZoneHandlers
+}
+
+export function useFileDropZone(
+  projectPath: string,
+  openFile: (filePath: string) => void
+): UseFileDropZoneResult {
+  const trpc = useTRPC()
+  // Which machine these filesystem calls are for. Ambient for the whole
+  // panel — see ./workspace-target. Spread into every input so it also
+  // keys the query cache.
+  const target = useWorkspaceTarget()
+  const copyInMutation = useMutation(trpc.fileEditor.copyIn.mutationOptions())
+  const [isFileDragOver, setIsFileDragOver] = useState(false)
+  const dragCounter = useRef(0)
+
+  const handleFileDragOver = useCallback((e: React.DragEvent) => {
+    // Skip internal tree drags — let the tree handle them
+    if (e.dataTransfer.types.includes('application/x-slayzone-tree')) return
+    e.preventDefault()
+    e.stopPropagation()
+  }, [])
+
+  const handleFileDragEnter = useCallback((e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes('application/x-slayzone-tree')) return
+    e.preventDefault()
+    e.stopPropagation()
+    dragCounter.current++
+    if (e.dataTransfer.types.includes('Files')) {
+      setIsFileDragOver(true)
+    }
+  }, [])
+
+  const handleFileDragLeave = useCallback((e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes('application/x-slayzone-tree')) return
+    e.preventDefault()
+    e.stopPropagation()
+    dragCounter.current--
+    if (dragCounter.current === 0) {
+      setIsFileDragOver(false)
+    }
+  }, [])
+
+  const handleFileDrop = useCallback(
+    async (e: React.DragEvent) => {
+      if (e.dataTransfer.types.includes('application/x-slayzone-tree')) return
+      e.preventDefault()
+      e.stopPropagation()
+      dragCounter.current = 0
+      setIsFileDragOver(false)
+
+      // Paths extracted by preload's capture-phase drop listener
+      // (contextBridge proxies File objects, so webUtils must run in preload)
+      const paths = electronBootstrap.getDropPaths()
+      if (!paths.length) return
+
+      const normalizedRoot = projectPath.replace(/\/+$/, '') + '/'
+      for (const absPath of paths) {
+        if (absPath.startsWith(normalizedRoot)) {
+          openFile(absPath.slice(normalizedRoot.length))
+        } else {
+          // External file — copy into project root
+          try {
+            const relPath = await copyInMutation.mutateAsync({
+              ...target,
+              rootPath: projectPath,
+              absoluteSrc: absPath
+            })
+            openFile(relPath)
+          } catch {
+            // Copy failed (e.g. directory, permission error)
+          }
+        }
+      }
+    },
+    [projectPath, openFile]
+  )
+
+  return {
+    isFileDragOver,
+    dropHandlers: {
+      onDragOver: handleFileDragOver,
+      onDragEnter: handleFileDragEnter,
+      onDragLeave: handleFileDragLeave,
+      onDrop: handleFileDrop
+    }
+  }
+}

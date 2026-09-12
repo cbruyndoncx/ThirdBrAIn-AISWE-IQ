@@ -1,0 +1,330 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro'
+import SiteFooter from '../../components/SiteFooter.astro'
+import SiteNav from '../../components/SiteNav.astro'
+import FeaturesHelpers from '../../components/features/FeaturesHelpers.astro'
+import { featurePath, features, findFeatureBySlug } from '../../data/features.js'
+
+import Board from '../../components/features/visuals/board.astro'
+import Terminals from '../../components/features/visuals/terminals.astro'
+import EmbeddedBrowser from '../../components/features/visuals/embedded-browser.astro'
+import Worktrees from '../../components/features/visuals/worktrees.astro'
+import GitWorkflow from '../../components/features/visuals/git-workflow.astro'
+import DiffViewer from '../../components/features/visuals/diff-viewer.astro'
+import CommitGraph from '../../components/features/visuals/commit-graph.astro'
+import PullRequests from '../../components/features/visuals/pull-requests.astro'
+import NotesEditor from '../../components/features/visuals/notes-editor.astro'
+import DevServers from '../../components/features/visuals/dev-servers.astro'
+import UsageMeter from '../../components/features/visuals/usage-meter.astro'
+import UsageReports from '../../components/features/visuals/usage-reports.astro'
+import IssueSync from '../../components/features/visuals/issue-sync.astro'
+import ExplodeMode from '../../components/features/visuals/explode-mode.astro'
+import AttentionPanel from '../../components/features/visuals/attention-panel.astro'
+import McpBoard from '../../components/features/visuals/mcp-board.astro'
+
+const visuals: Record<string, any> = {
+  board: Board,
+  terminals: Terminals,
+  'embedded-browser': EmbeddedBrowser,
+  worktrees: Worktrees,
+  'git-workflow': GitWorkflow,
+  'diff-viewer': DiffViewer,
+  'commit-graph': CommitGraph,
+  'pull-requests': PullRequests,
+  'notes-editor': NotesEditor,
+  'dev-servers': DevServers,
+  'usage-meter': UsageMeter,
+  'usage-reports': UsageReports,
+  'issue-sync': IssueSync,
+  'explode-mode': ExplodeMode,
+  'attention-panel': AttentionPanel,
+  'mcp-board': McpBoard
+}
+
+export function getStaticPaths() {
+  return features.map((feature) => ({
+    params: { slug: feature.slug }
+  }))
+}
+
+const feature = findFeatureBySlug(Astro.params.slug)
+
+if (!feature) {
+  throw new Error(`Unknown feature slug: ${Astro.params.slug}`)
+}
+
+const Visual = visuals[feature.slug]
+if (!Visual) {
+  throw new Error(`No visual registered for slug: ${feature.slug}`)
+}
+
+const currentIndex = features.findIndex((item) => item.slug === feature.slug)
+const previousFeature = currentIndex > 0 ? features[currentIndex - 1] : null
+const nextFeature = currentIndex < features.length - 1 ? features[currentIndex + 1] : null
+---
+
+<BaseLayout
+  title={`SlayZone — ${feature.title}`}
+  description={feature.metaDescription}
+  canonicalPath={featurePath(feature)}
+  currentNav="features"
+>
+  <Fragment slot="nav">
+    <SiteNav current="features" />
+  </Fragment>
+
+  <section class="feature-hero">
+    <div class="hero-copy">
+      <a href="/features" class="back-link">← Back to all features</a>
+      <h1>{feature.title}</h1>
+      <p class="hero-summary">{feature.shortDescription}</p>
+    </div>
+  </section>
+
+  <section class="feature-demo">
+    <FeaturesHelpers />
+    <div class="feature-demo-frame" id={feature.legacyId}>
+      <div class="scale-wrap">
+        <Visual />
+      </div>
+    </div>
+  </section>
+
+  <script is:inline>
+    (function() {
+      const wrap = document.querySelector('.feature-demo-frame .scale-wrap');
+      if (!wrap) return;
+      function update() {
+        const c = wrap.parentElement;
+        const s = c.offsetWidth / 720;
+        wrap.style.transform = 'scale(' + s + ')';
+        c.style.height = (540 * s) + 'px';
+      }
+      update();
+      window.addEventListener('resize', update);
+    })();
+  </script>
+
+  <section class="feature-context">
+    <div class="context-main">
+      {feature.details.map((paragraph) => <p>{paragraph}</p>)}
+    </div>
+    {feature.highlights && feature.highlights.length > 0 && (
+      <aside class="feature-highlights" aria-label="Key points">
+        <h2>Key points</h2>
+        <ul>
+          {feature.highlights.map((point) => <li>{point}</li>)}
+        </ul>
+      </aside>
+    )}
+  </section>
+
+  <section class="feature-faq-cta">
+    <p>Have a question about how this works in practice? Check the <a href="/faq">SlayZone FAQ</a> or read about <a href="/features">all features</a>.</p>
+  </section>
+
+  <section class="feature-nav">
+    {previousFeature ? (
+      <a href={featurePath(previousFeature)} class="feature-nav-card prev-card">
+        <span class="nav-kicker">← Previous</span>
+        <strong>{previousFeature.title}</strong>
+      </a>
+    ) : <div class="feature-nav-card empty"></div>}
+    {nextFeature ? (
+      <a href={featurePath(nextFeature)} class="feature-nav-card next-card">
+        <span class="nav-kicker">Next →</span>
+        <strong>{nextFeature.title}</strong>
+      </a>
+    ) : <div class="feature-nav-card empty"></div>}
+  </section>
+
+  <Fragment slot="footer">
+    <SiteFooter />
+  </Fragment>
+</BaseLayout>
+
+<style>
+  .feature-hero {
+    margin: 34px 0 28px;
+  }
+  .back-link {
+    all: unset;
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    margin-bottom: 8px;
+    padding: 4px 0;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: none;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    line-height: 1.2;
+    font-weight: 700;
+  }
+  .back-link:hover { color: var(--accent); }
+  h1 {
+    margin: 0 0 16px;
+    max-width: 900px;
+    font-size: clamp(44px, 7vw, 80px);
+    line-height: 0.96;
+    letter-spacing: -0.06em;
+    color: #111220;
+    text-wrap: balance;
+  }
+  .hero-summary {
+    margin: 0;
+    max-width: 860px;
+    font-size: 21px;
+    line-height: 1.62;
+    color: #4d5266;
+  }
+  .feature-demo {
+    margin: 0 0 32px;
+  }
+  .feature-demo-frame {
+    position: relative;
+    width: 100%;
+    border-radius: 20px;
+    overflow: hidden;
+    background: #f3f4f8;
+  }
+  .feature-demo-frame .scale-wrap {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 720px;
+    height: 540px;
+    transform-origin: top left;
+  }
+  @media (max-width: 640px) {
+    .feature-demo-frame { border-radius: 16px; }
+  }
+  .feature-context {
+    margin: 0 0 40px;
+  }
+  .context-main {
+    width: 100%;
+  }
+  .context-main p {
+    margin: 0 0 18px;
+    color: #2f3548;
+    font-size: 18px;
+    line-height: 1.78;
+  }
+  .context-main p:last-child {
+    margin-bottom: 0;
+  }
+  .feature-highlights {
+    margin: 32px 0 0;
+    padding: 24px 28px;
+    border-radius: 12px;
+    background: #f6f5f3;
+    border: 1px solid #e0e0e8;
+  }
+  .feature-highlights h2 {
+    margin: 0 0 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .feature-highlights ul {
+    margin: 0;
+    padding-left: 20px;
+    list-style: disc;
+  }
+  .feature-highlights li {
+    margin: 0 0 8px;
+    color: #2f3548;
+    font-size: 17px;
+    line-height: 1.6;
+  }
+  .feature-highlights li:last-child {
+    margin-bottom: 0;
+  }
+  .feature-faq-cta {
+    margin: 28px 0 32px;
+    padding: 16px 20px;
+    border-radius: 10px;
+    background: #fbfaf8;
+    border: 1px solid #e0e0e8;
+  }
+  .feature-faq-cta p {
+    margin: 0;
+    color: #4d5266;
+    font-size: 15px;
+    line-height: 1.55;
+  }
+  .feature-faq-cta a {
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 600;
+  }
+  .feature-faq-cta a:hover {
+    text-decoration: underline;
+  }
+  .feature-nav {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 24px;
+    width: 100%;
+  }
+  .feature-nav-card {
+    min-height: 104px;
+    padding: 20px;
+    border-radius: 12px;
+    background: #f6f5f3;
+    border: 1px solid #e0e0e8;
+    text-decoration: none;
+    color: #1a1a2e;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 12px;
+    transition: border-color 0.2s ease, background-color 0.2s ease;
+  }
+  .feature-nav-card:hover {
+    border-color: rgba(244,104,23,0.3);
+    background: #fbfaf8;
+  }
+  .feature-nav-card.empty {
+    visibility: hidden;
+  }
+  .next-card {
+    text-align: right;
+    align-items: flex-end;
+  }
+  .nav-kicker {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+  }
+  .feature-nav-card strong {
+    font-size: 20px;
+    line-height: 1.15;
+    letter-spacing: -0.04em;
+    color: #111220;
+    font-family: 'Outfit', sans-serif;
+  }
+  @media (max-width: 640px) {
+    h1 {
+      font-size: clamp(38px, 13vw, 56px);
+    }
+    .hero-summary {
+      font-size: 19px;
+    }
+    .feature-nav {
+      grid-template-columns: 1fr;
+    }
+    .next-card {
+      text-align: left;
+      align-items: flex-start;
+    }
+  }
+</style>

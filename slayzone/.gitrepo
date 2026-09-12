@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/debuglebowski/slayzone.git
+	branch = main
+	commit = e912716783068a8fdffbf634d6c8eb1dd11fb182
+	parent = 8cb5897c50d765d3e844fbe2387dd7ef13ee13e2
+	method = merge
+	cmdver = 0.4.9

@@ -1,0 +1,443 @@
+import { getPtyHostBridge, type PtySessionWindow } from '../pty-host'
+import type { SlayzoneDb } from '@slayzone/platform'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
+import {
+  createPty,
+  writePty,
+  submitPty,
+  resizePty,
+  killPty,
+  touchPty,
+  interruptPty,
+  ackEnsureAlive,
+  hasPty,
+  getBuffer,
+  clearBuffer,
+  getBufferSince,
+  listPtys,
+  getState,
+  setDatabase,
+  setTerminalTheme,
+  testExecutionContext,
+  setPtyCreateCapture,
+  takePtyCreateOpts,
+  takePtyKillCalls
+} from './pty-manager'
+import { listSessions, getSessionState } from './session-registry'
+import { createDbPtySpawnLookups, mapModeRow, type PtySpawnLookups } from './pty-data-ops'
+import { listChatSessions } from './chat-transport-manager'
+import { claimWarmShell, setProjectTabCounts } from './warm-process-manager'
+import { getAdapter, type ExecutionContext } from '../adapters'
+import type {
+  TerminalMode,
+  TerminalModeInfo,
+  CreateTerminalModeInput,
+  UpdateTerminalModeInput
+} from '@slayzone/terminal/shared'
+import { DEFAULT_TERMINAL_MODES } from '@slayzone/terminal/shared'
+import { parseShellArgs } from '../adapters/flag-parser'
+import { setShellOverride } from '../shell-env'
+
+const execFileAsync = promisify(execFile)
+
+/**
+ * Injectable spawn-time lookups (hub/computer split, wave 2, Model A). Default
+ * `null` → each `createPtyOps` builds the db-backed impl below, so behavior is
+ * byte-identical. A later wave calls `setPtySpawnLookups` at boot (BEFORE
+ * `createPtyOps`) to route spawn-time reads — including `resolveComputerId` —
+ * through the hub RPC. Swap only at a boot quiesce point (no in-flight spawn).
+ */
+let injectedSpawnLookups: PtySpawnLookups | null = null
+export function setPtySpawnLookups(lookups: PtySpawnLookups | null): void {
+  injectedSpawnLookups = lookups
+}
+
+export interface PtyCreateOpts {
+  sessionId: string
+  cwd: string
+  conversationId?: string | null
+  existingConversationId?: string | null
+  mode?: TerminalMode
+  initialPrompt?: string | null
+  providerFlags?: string | null
+  executionContext?: ExecutionContext | null
+  cols?: number
+  rows?: number
+}
+
+/**
+ * Transport-agnostic PTY operations (IPC → tRPC migration, slice 3 / P17).
+ *
+ * Single implementation of every `pty:*` / `terminalModes:*` / `session:*` /
+ * `chat:list` handler body, so the IPC handlers (`registerPtyHandlers`) and the
+ * tRPC `pty` router both delegate here — no duplicated logic while both
+ * transports coexist (renderer cutover is slice 5). Mirrors the chat/task
+ * `createXOps` pattern; injected into the transport layer via `setPtyDeps`.
+ *
+ * `warmSetProjectTabCounts` is per-window state: the IPC handler keys it by
+ * `event.sender.id`, the tRPC proc by `ctx.windowId` (same webContents id).
+ * Window-close cleanup lives host-side (`wireWarmWindowCleanup`), independent
+ * of which transport pushed the counts.
+ */
+export function createPtyOps(db: SlayzoneDb) {
+  // Wires the pty-manager's session ledger (hub/computer wave 1: the runtime's
+  // DB touchpoints go through an injected ops interface, db-backed by default).
+  setDatabase(db)
+  // Spawn-time reads (mode row, task→project, computer assignment) — same queries,
+  // behind the seam. Injectable (wave 2) so a computer-aware impl can replace the
+  // db default; unset → the db-backed impl (byte-identical). The terminal_modes
+  // CRUD below stays on the raw db: that's hub data.
+  const lookups = injectedSpawnLookups ?? createDbPtySpawnLookups(db)
+
+  // Terminal Modes CRUD
+  const terminalModesList = async (): Promise<TerminalModeInfo[]> => {
+    const rows = await db.prepare('SELECT * FROM terminal_modes ORDER BY "order" ASC').all()
+    return rows.map(mapModeRow)
+  }
+
+  const terminalModesTest = async (
+    command: string
+  ): Promise<{ ok: boolean; error?: string; detail?: string }> => {
+    try {
+      const parts = parseShellArgs(command)
+      const bin = parts[0]
+      if (!bin) return { ok: false, error: 'No command provided' }
+
+      // Try 'which' on Unix or 'where' on Windows to see if binary exists
+      const checkCmd = process.platform === 'win32' ? 'where' : 'which'
+      const { stdout } = await execFileAsync(checkCmd, [bin])
+      return { ok: true, detail: stdout.trim() }
+    } catch (err) {
+      return { ok: false, error: 'Command not found', detail: (err as Error).message }
+    }
+  }
+
+  const terminalModesGet = async (id: string): Promise<TerminalModeInfo | null> => {
+    const row = await db.prepare('SELECT * FROM terminal_modes WHERE id = ?').get(id)
+    return row ? mapModeRow(row) : null
+  }
+
+  const terminalModesCreate = async (input: CreateTerminalModeInput): Promise<TerminalModeInfo> => {
+    const id = input.id
+    await db
+      .prepare(
+        `
+      INSERT INTO terminal_modes (id, label, type, initial_command, resume_command, headless_command, default_flags, enabled, is_builtin, "order", pattern_working, pattern_error, usage_config)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+    `
+      )
+      .run(
+        id,
+        input.label,
+        input.type,
+        input.initialCommand ?? null,
+        input.resumeCommand ?? null,
+        input.headlessCommand ?? null,
+        input.defaultFlags ?? null,
+        input.enabled !== false ? 1 : 0,
+        input.order ?? 0,
+        input.patternWorking ?? null,
+        input.patternError ?? null,
+        input.usageConfig ? JSON.stringify(input.usageConfig) : null
+      )
+    const row = await db.prepare('SELECT * FROM terminal_modes WHERE id = ?').get(id)
+    return mapModeRow(row)
+  }
+
+  const terminalModesUpdate = async (
+    id: string,
+    updates: UpdateTerminalModeInput
+  ): Promise<TerminalModeInfo | null> => {
+    const builtinRow = (await db
+      .prepare('SELECT is_builtin FROM terminal_modes WHERE id = ?')
+      .get(id)) as { is_builtin: number } | undefined
+    const isBuiltin = Boolean(builtinRow?.is_builtin)
+
+    const sets: string[] = []
+    const params: unknown[] = []
+
+    if (updates.label !== undefined && !isBuiltin) {
+      sets.push('label = ?')
+      params.push(updates.label)
+    }
+    if (updates.type !== undefined && !isBuiltin) {
+      sets.push('type = ?')
+      params.push(updates.type)
+    }
+    if (updates.initialCommand !== undefined && !isBuiltin) {
+      sets.push('initial_command = ?')
+      params.push(updates.initialCommand)
+    }
+    if (updates.resumeCommand !== undefined && !isBuiltin) {
+      sets.push('resume_command = ?')
+      params.push(updates.resumeCommand ?? null)
+    }
+    if (updates.headlessCommand !== undefined) {
+      sets.push('headless_command = ?')
+      params.push(updates.headlessCommand ?? null)
+    }
+    if (updates.defaultFlags !== undefined) {
+      sets.push('default_flags = ?')
+      params.push(updates.defaultFlags)
+    }
+    if (updates.enabled !== undefined) {
+      sets.push('enabled = ?')
+      params.push(updates.enabled ? 1 : 0)
+    }
+    if (updates.order !== undefined) {
+      sets.push(' "order" = ?')
+      params.push(updates.order)
+    }
+    if (updates.patternWorking !== undefined) {
+      sets.push('pattern_working = ?')
+      params.push(updates.patternWorking ?? null)
+    }
+    if (updates.patternError !== undefined) {
+      sets.push('pattern_error = ?')
+      params.push(updates.patternError ?? null)
+    }
+    if (updates.usageConfig !== undefined) {
+      sets.push('usage_config = ?')
+      params.push(updates.usageConfig ? JSON.stringify(updates.usageConfig) : null)
+    }
+
+    if (sets.length > 0) {
+      sets.push("updated_at = datetime('now')")
+      params.push(id)
+      await db.prepare(`UPDATE terminal_modes SET ${sets.join(', ')} WHERE id = ?`).run(...params)
+    }
+
+    const updatedRow = await db.prepare('SELECT * FROM terminal_modes WHERE id = ?').get(id)
+    return updatedRow ? mapModeRow(updatedRow) : null
+  }
+
+  const terminalModesDelete = async (id: string): Promise<boolean> => {
+    const deleteRow = (await db
+      .prepare('SELECT is_builtin FROM terminal_modes WHERE id = ?')
+      .get(id)) as { is_builtin: number } | undefined
+    if (deleteRow?.is_builtin) {
+      return false // Built-in modes cannot be deleted
+    }
+    await db.prepare('DELETE FROM terminal_modes WHERE id = ?').run(id)
+    return true
+  }
+
+  const terminalModesRestoreDefaults = async (): Promise<void> => {
+    const insertSql = `
+        INSERT OR IGNORE INTO terminal_modes (id, label, type, initial_command, resume_command, headless_command, default_flags, enabled, is_builtin, "order")
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+      `
+    const ops = DEFAULT_TERMINAL_MODES.map((mode) => ({
+      type: 'run' as const,
+      sql: insertSql,
+      params: [
+        mode.id,
+        mode.label,
+        mode.type,
+        mode.initialCommand ?? null,
+        mode.resumeCommand ?? null,
+        mode.headlessCommand ?? null,
+        mode.defaultFlags ?? null,
+        mode.enabled ? 1 : 0,
+        mode.order
+      ]
+    }))
+    await db.batchTxn(ops)
+  }
+
+  const terminalModesResetToDefaultState = async (): Promise<void> => {
+    const insertSql = `
+        INSERT INTO terminal_modes (id, label, type, initial_command, resume_command, headless_command, default_flags, enabled, is_builtin, "order")
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+      `
+    const ops = [
+      { type: 'run' as const, sql: 'DELETE FROM terminal_modes', params: [] as unknown[] },
+      ...DEFAULT_TERMINAL_MODES.map((mode) => ({
+        type: 'run' as const,
+        sql: insertSql,
+        params: [
+          mode.id,
+          mode.label,
+          mode.type,
+          mode.initialCommand ?? null,
+          mode.resumeCommand ?? null,
+          mode.headlessCommand ?? null,
+          mode.defaultFlags ?? null,
+          mode.enabled ? 1 : 0,
+          mode.order
+        ] as unknown[]
+      }))
+    ]
+    await db.batchTxn(ops)
+  }
+
+  /**
+   * Create a PTY. `win` is supplied by the IPC handler from the invoking
+   * `event.sender`; the tRPC path omits it and we fall back to the focused/first
+   * window (PTY output now fans out via `ptyEvents`, so the window is only
+   * needed for legacy `redirectSessionWindow()` codepaths).
+   */
+  const ptyCreate = async (
+    opts: PtyCreateOpts,
+    win?: PtySessionWindow | null
+  ): Promise<{ success: boolean; error?: string }> => {
+    const host = getPtyHostBridge()
+    const targetWin = win ?? host.getFocusedWindow() ?? host.getAllWindows()[0]
+    if (!targetWin) return { success: false, error: 'No window found' }
+
+    let providerArgs: string[] = []
+    try {
+      providerArgs = parseShellArgs(opts.providerFlags)
+    } catch (err) {
+      console.warn('[pty:create] Invalid provider flags, ignoring:', (err as Error).message)
+    }
+
+    // Look up mode info to get type, templates, and default flags
+    const modeId = opts.mode || 'claude-code'
+
+    const modeInfo = (await lookups.getTerminalMode(modeId)) ?? undefined
+
+    // Warm-process pool: if this project has a ready warm agent ON THE COMPUTER this
+    // spawn resolves to, and it matches (default mode, project-root cwd, fresh
+    // start, same flags), adopt it instead of cold-spawning. A miss is silent —
+    // createPty cold-spawns exactly as before.
+    //
+    // Claiming is gated on a RESOLVED computer, the inverse of the old rule. It used
+    // to fire only when `computerId == null`, because the pool was hub-local — which
+    // meant the hub booted the agent itself in precisely the case that is supposed
+    // to raise "no computer available". The pool now lives on the computer, so a claim
+    // needs a computer rather than the absence of one.
+    let warmClaim: ReturnType<typeof claimWarmShell> = null
+    const taskId = opts.sessionId.split(':')[0]
+    let computerId: string | null = null
+    // Resolved regardless of whether a warm agent is claimed: it is threaded into
+    // the spawn spec so the COMPUTER can resolve its own cwd when the caller has no
+    // absolute path to give (see PtySpawnSpec.projectId).
+    let projectId: string | null = null
+    if (taskId) {
+      computerId = await lookups.resolveComputerId(taskId)
+      projectId = await lookups.getTaskProjectId(taskId)
+      if (computerId != null) {
+        if (projectId) {
+          warmClaim = claimWarmShell({
+            projectId,
+            mode: modeId,
+            cwd: opts.cwd,
+            resuming: !!opts.existingConversationId,
+            computerId,
+            // The warm agent baked the mode's default flags; only adopt it when
+            // this spawn's flags match (else cold-spawn with the right flags).
+            flags: opts.providerFlags ?? null
+          })
+        }
+      }
+    }
+
+    return createPty({
+      win: targetWin,
+      sessionId: opts.sessionId,
+      computerId,
+      projectId,
+      cwd: opts.cwd,
+      conversationId: opts.conversationId,
+      existingConversationId: opts.existingConversationId,
+      mode: modeId as TerminalMode,
+      initialPrompt: opts.initialPrompt,
+      providerArgs,
+      executionContext: opts.executionContext,
+      type: modeInfo?.type,
+      initialCommand: modeInfo?.initialCommand,
+      resumeCommand: modeInfo?.resumeCommand,
+      defaultFlags: modeInfo?.defaultFlags,
+      patternWorking: modeInfo?.patternWorking,
+      patternError: modeInfo?.patternError,
+      cols: opts.cols,
+      rows: opts.rows,
+      adoptPty: warmClaim ?? undefined
+    })
+  }
+
+  const ptyTestExecutionContext = (context: ExecutionContext) => testExecutionContext(context)
+  const ptyWrite = (sessionId: string, data: string) => writePty(sessionId, data)
+  const ptySubmit = (sessionId: string, text: string) => submitPty(sessionId, text)
+  const ptyResize = (sessionId: string, cols: number, rows: number) =>
+    resizePty(sessionId, cols, rows)
+  const ptyKill = (sessionId: string) => killPty(sessionId)
+  const ptyTouch = (sessionId: string) => touchPty(sessionId)
+  const ptyInterrupt = (sessionId: string) => interruptPty(sessionId)
+  const ptyAckEnsureAlive = (reqId: number, result: 'ok' | 'already-alive' | 'error') =>
+    ackEnsureAlive(reqId, result)
+  const ptyExists = (sessionId: string) => hasPty(sessionId)
+  const ptyGetBuffer = (sessionId: string) => getBuffer(sessionId)
+  const ptyClearBuffer = (sessionId: string) => clearBuffer(sessionId)
+  const ptyGetBufferSince = (sessionId: string, afterSeq: number) =>
+    getBufferSince(sessionId, afterSeq)
+  const ptyList = () => listPtys()
+  const chatList = () => listChatSessions()
+  const ptyGetState = (sessionId: string) => getState(sessionId)
+  const sessionList = () => listSessions()
+  const sessionGetState = (sessionId: string) => getSessionState(sessionId)
+  const ptySetTheme = (theme: {
+    foreground: string
+    background: string
+    cursor: string
+    ansi?: readonly string[]
+  }) => setTerminalTheme(theme)
+
+  const ptyValidate = async (mode: TerminalMode) => {
+    const modeInfo = (await lookups.getTerminalMode(mode)) ?? undefined
+    const adapter = getAdapter({
+      mode,
+      type: modeInfo?.type,
+      patterns: {
+        working: modeInfo?.patternWorking,
+        error: modeInfo?.patternError
+      }
+    })
+    return adapter.validate ? adapter.validate() : []
+  }
+
+  const ptySetShellOverride = (value: string | null) => setShellOverride(value)
+
+  // Warm-process gate: a window's full per-project open-task-tab snapshot.
+  // Idempotent (full snapshot each time) so dropped messages self-heal.
+  const warmSetProjectTabCounts = (windowId: number, counts: Record<string, number>): void =>
+    setProjectTabCounts(windowId, counts)
+
+  return {
+    terminalModesList,
+    terminalModesTest,
+    terminalModesGet,
+    terminalModesCreate,
+    terminalModesUpdate,
+    terminalModesDelete,
+    terminalModesRestoreDefaults,
+    terminalModesResetToDefaultState,
+    ptyCreate,
+    setCreateCapture: setPtyCreateCapture,
+    takeCreateOpts: takePtyCreateOpts,
+    takeKillCalls: takePtyKillCalls,
+    ptyTestExecutionContext,
+    ptyWrite,
+    ptySubmit,
+    ptyResize,
+    ptyKill,
+    ptyTouch,
+    ptyInterrupt,
+    ptyAckEnsureAlive,
+    ptyExists,
+    ptyGetBuffer,
+    ptyClearBuffer,
+    ptyGetBufferSince,
+    ptyList,
+    chatList,
+    ptyGetState,
+    sessionList,
+    sessionGetState,
+    ptySetTheme,
+    ptyValidate,
+    ptySetShellOverride,
+    warmSetProjectTabCounts
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "name": "@slayzone/automations",
+  "version": "0.36.0-beta.17",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./shared": "./src/shared/index.ts",
+    "./server": "./src/server/index.ts",
+    "./electron": "./src/electron/index.ts",
+    "./db": "./src/server/worker-db.ts",
+    "./client": "./src/client/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@slayzone/history": "workspace:*",
+    "@slayzone/tags": "workspace:*",
+    "@slayzone/task": "workspace:*",
+    "@slayzone/telemetry": "workspace:*",
+    "@slayzone/transport": "workspace:*",
+    "@slayzone/ui": "workspace:*",
+    "@tanstack/react-query": "^5.100.9",
+    "date-fns": "^4.1.0",
+    "lucide-react": "^0.562.0",
+    "@slayzone/platform": "workspace:*"
+  },
+  "peerDependencies": {
+    "electron": "^41.0.0",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/react": "^19.2.7",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

@@ -1,0 +1,215 @@
+/**
+ * Shared helpers for browser-view E2E tests.
+ *
+ * All helpers assume a task tab is open and the test is running inside
+ * the shared Electron worker fixture.
+ */
+import type { Page } from '@playwright/test'
+import { expect } from '@playwright/test'
+import { pressShortcut } from './shortcuts'
+
+// ── IPC bridge ──────────────────────────────────────────────────────
+
+/** Invoke an IPC channel directly via the renderer's __testInvoke bridge. */
+export async function testInvoke(
+  page: Page,
+  channel: string,
+  ...args: unknown[]
+): Promise<unknown> {
+  return page.evaluate(
+    async ({ c, a }) => {
+      const invoke = (
+        window as unknown as { __testInvoke?: (ch: string, ...rest: unknown[]) => Promise<unknown> }
+      ).__testInvoke
+      if (!invoke) throw new Error('__testInvoke unavailable in e2e')
+      return invoke(c, ...(a ?? []))
+    },
+    { c: channel, a: args }
+  )
+}
+
+/** Simulate a main→renderer IPC event via the renderer's __testEmit bridge. */
+export async function testEmit(page: Page, channel: string, data: unknown): Promise<void> {
+  await page.evaluate(
+    ({ c, d }) => {
+      const emit = (window as unknown as { __testEmit?: (ch: string, data: unknown) => void })
+        .__testEmit
+      if (!emit) throw new Error('__testEmit unavailable in e2e')
+      emit(c, d)
+    },
+    { c: channel, d: data }
+  )
+}
+
+// ── Locator helpers ─────────────────────────────────────────────────
+
+export const urlInput = (page: Page) =>
+  page.locator('input[placeholder="Enter URL..."]:visible').first()
+
+export const tabBar = (page: Page) => page.locator('.h-10.overflow-x-auto:visible').first()
+
+export const tabEntries = (page: Page) =>
+  tabBar(page).locator('[role="button"]:not(:has(.lucide-plus))')
+
+export const newTabBtn = (page: Page) => tabBar(page).locator('button:has(.lucide-plus)').first()
+
+// ── Focus & shortcut helpers ────────────────────────────────────────
+
+/** Move focus away from any editor/text input so app-level shortcuts fire. */
+export async function focusForAppShortcut(page: Page): Promise<void> {
+  await page.keyboard.press('Escape').catch(() => {})
+  const sidebar = page.locator('[data-slot="sidebar"]').first()
+  if (await sidebar.isVisible().catch(() => false)) {
+    await sidebar.click({ position: { x: 12, y: 12 } }).catch(() => {})
+  } else {
+    await page
+      .locator('#root')
+      .click({ position: { x: 12, y: 12 } })
+      .catch(() => {})
+  }
+  // The corner click can land on a drag region / no-op area and leave a text
+  // input focused (e.g. the URL bar autofocuses when the browser panel opens);
+  // hotkeys are ignored while form fields have focus. Blur explicitly.
+  await page
+    .evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      if (el && el !== document.body) el.blur?.()
+    })
+    .catch(() => {})
+}
+
+/**
+ * Ensure the browser panel is open. Retries the Cmd+B shortcut up to 5 times
+ * with a small delay between attempts (handles race where isActive hasn't
+ * propagated yet after beforeAll's task navigation).
+ */
+export async function ensureBrowserPanelVisible(page: Page): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (
+      await urlInput(page)
+        .isVisible()
+        .catch(() => false)
+    )
+      return
+    await focusForAppShortcut(page)
+    await page.waitForTimeout(150)
+    await page.keyboard.press('Meta+b')
+    await page.waitForTimeout(300)
+  }
+  await expect(urlInput(page)).toBeVisible({ timeout: 5000 })
+}
+
+/** Close the browser panel if it's currently visible. */
+export async function ensureBrowserPanelHidden(page: Page): Promise<void> {
+  if (
+    await urlInput(page)
+      .isVisible()
+      .catch(() => false)
+  ) {
+    await focusForAppShortcut(page)
+    await page.waitForTimeout(150)
+    await page.keyboard.press('Meta+b')
+    await expect(urlInput(page)).not.toBeVisible({ timeout: 5000 })
+  }
+}
+
+// ── Task navigation ─────────────────────────────────────────────────
+
+export async function openTaskViaSearch(page: Page, title: string): Promise<void> {
+  const input = page.getByPlaceholder('Search files, folders, commands, projects, and tasks...')
+  // Right after a task switch the new task's TaskDetailPage isn't shortcut-active
+  // yet (same propagation race ensureBrowserPanelVisible retries for), so a single
+  // mod+k can be swallowed. Retry press→appear before failing.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await focusForAppShortcut(page)
+    await pressShortcut(page, 'search')
+    if (
+      await input
+        .waitFor({ state: 'visible', timeout: 1_000 })
+        .then(() => true)
+        .catch(() => false)
+    )
+      break
+  }
+  await expect(input).toBeVisible()
+  await input.fill(title)
+  await page.keyboard.press('Enter')
+  await expect(input).not.toBeVisible()
+}
+
+// ── View helpers ────────────────────────────────────────────────────
+
+export async function getViewsForTask(page: Page, taskId: string): Promise<string[]> {
+  return (await testInvoke(page, 'browser:get-views-for-task', taskId)) as string[]
+}
+
+export async function getAllViewIds(page: Page): Promise<string[]> {
+  return (await testInvoke(page, 'browser:get-all-view-ids')) as string[]
+}
+
+export interface BrowserViewState {
+  viewId: string
+  url: string
+  title: string
+  isLoading: boolean
+  domReady: boolean
+  hasLoadedRealPage: boolean
+}
+
+/** The manager's live view state — the same snapshot the renderer subscribes to. */
+export async function getViewState(page: Page, viewId: string): Promise<BrowserViewState | null> {
+  return (await testInvoke(page, 'browser:get-state', viewId)) as BrowserViewState | null
+}
+
+/**
+ * Wait until `viewId` has actually finished loading `pathFragment`.
+ *
+ * WHY NOT JUST POLL THE URL. Chromium updates the WebContents URL at navigation
+ * COMMIT — the instant the response starts and the new document is created —
+ * which is strictly before the document parses. `document.readyState` is
+ * `'loading'` at that point by definition. So `poll(get-url).toContain(path)`
+ * followed by a read of page state is a race the test wins only while the IPC
+ * round-trip happens to outlast the parse. It lost once in 14 full-suite runs
+ * (`79-browser-view-events` › "loading stops after navigation completes"), and
+ * five sibling tests in that file carried the same latent race.
+ *
+ * BOTH CONDITIONS ARE REQUIRED. `isLoading === false` alone would match the
+ * PRE-navigation idle state — the classic wait-for-busy-then-idle bug, which
+ * would make this helper return before the navigation even starts. Because the
+ * URL commits before `did-stop-loading` fires, the conjunction is monotone:
+ * once both hold, the target document is committed AND done loading, and
+ * neither can revert without a new navigation.
+ */
+export async function waitForLoadComplete(
+  page: Page,
+  viewId: string,
+  pathFragment: string,
+  timeout = 15_000
+): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        const state = await getViewState(page, viewId)
+        if (!state) return false
+        return state.url.includes(pathFragment) && state.isLoading === false
+      },
+      { timeout }
+    )
+    .toBe(true)
+}
+
+/** Wait for at least one view to exist for a task and return the first viewId. */
+export async function getActiveViewId(page: Page, taskId: string): Promise<string> {
+  let viewId = ''
+  await expect
+    .poll(
+      async () => {
+        const views = await getViewsForTask(page, taskId)
+        viewId = views?.[0] ?? ''
+        return viewId
+      },
+      { timeout: 10000 }
+    )
+    .toBeTruthy()
+  return viewId
+}

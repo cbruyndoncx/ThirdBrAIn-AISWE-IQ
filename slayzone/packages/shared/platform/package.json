@@ -1,0 +1,37 @@
+{
+  "name": "@slayzone/platform",
+  "version": "0.36.0-beta.17",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./ipc": "./src/ipc-dedup.ts",
+    "./slz-file-url": "./src/slz-file-url.ts",
+    "./html-theme-css": "./src/html-theme-css.ts",
+    "./events": "./src/typed-emitter.ts",
+    "./slayzone-config": "./src/slayzone-config.ts",
+    "./client-settings": "./src/client-settings.ts",
+    "./computer-identity": "./src/computer-identity.ts",
+    "./config-prompt": "./src/config-prompt.ts",
+    "./env-manifest": "./src/env-manifest.ts",
+    "./device-status-queries": "./src/device-status-queries.ts",
+    "./hub-addr": "./src/hub-addr.ts",
+    "./hub-discovery": "./src/hub-discovery.ts",
+    "./hub-owner-file": "./src/hub-owner-file.ts",
+    "./paths": "./src/paths.ts",
+    "./service-unit": "./src/service-unit.ts",
+    "./join-token": "./src/join-token.ts",
+    "./agent-hooks": "./src/agent-hooks/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsgo --noEmit"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

@@ -1,0 +1,289 @@
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useSubscription, useTRPC } from '@slayzone/transport/client'
+import type { Theme, ThemePreference } from '@slayzone/settings/shared'
+import { track } from '@slayzone/telemetry/client'
+import { applyTheme } from './apply-theme'
+
+interface ThemeContextValue {
+  // Core
+  theme: Theme
+  preference: ThemePreference
+  themeId: string // resolved chrome theme (accounts for split)
+  setPreference: (pref: ThemePreference) => Promise<void>
+  setThemeId: (id: string) => void
+
+  // Split dark/light themes
+  splitThemes: boolean
+  setSplitThemes: (enabled: boolean) => void
+  themeIdDark: string
+  setThemeIdDark: (id: string) => void
+  themeIdLight: string
+  setThemeIdLight: (id: string) => void
+
+  // Per-section overrides (empty string = same as app)
+  terminalOverrideThemeId: string
+  setTerminalOverrideThemeId: (id: string) => void
+  editorOverrideThemeId: string
+  setEditorOverrideThemeId: (id: string) => void
+
+  // Resolved for consumers
+  terminalThemeId: string
+  editorThemeId: string
+  contentVariant: Theme
+}
+
+const DEFAULT_THEME_ID = 'slay'
+
+/** Maps old variant-specific IDs to unified family IDs */
+const LEGACY_ID_MAP: Record<string, string> = {
+  'slay-light': 'slay',
+  'slay-special-light': 'slay-special',
+  'default-light': 'default-dark',
+  'catppuccin-mocha': 'catppuccin',
+  'catppuccin-latte': 'catppuccin',
+  'solarized-dark': 'solarized',
+  'solarized-light': 'solarized',
+  'tokyo-night-light': 'tokyo-night',
+  'rose-pine-dawn': 'rose-pine'
+}
+
+function migrateThemeId(id: string): string {
+  return LEGACY_ID_MAP[id] ?? id
+}
+
+// Resolve the OS dark/light setting in the renderer. The chromium-fork sidecar
+// has no Electron `nativeTheme`, so its server-side effective-theme is a constant
+// — "system" MUST be resolved here via `prefers-color-scheme`. matchMedia works
+// identically in the Electron renderer (reflects nativeTheme), so this is shared.
+function systemTheme(): Theme {
+  if (typeof window === 'undefined' || !window.matchMedia) return 'dark'
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
+// Effective dark/light from the user's preference: explicit wins, "system" maps
+// to the OS, and a non-preference value falls back to the server's answer.
+function resolveEffective(source: ThemePreference, serverEffective: Theme): Theme {
+  if (source === 'light' || source === 'dark') return source
+  if (source === 'system') return systemTheme()
+  return serverEffective
+}
+
+const ThemeContext = createContext<ThemeContextValue | null>(null)
+
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  const trpc = useTRPC()
+  const queryClient = useQueryClient()
+  const setThemeMutation = useMutation(trpc.settings.setTheme.mutationOptions())
+  const setSettingMutation = useMutation(trpc.settings.set.mutationOptions())
+
+  const [theme, setTheme] = useState<Theme>('dark')
+  const [preference, setPreferenceState] = useState<ThemePreference>('dark')
+
+  // Single theme (when split off)
+  const [singleThemeId, setSingleThemeId] = useState(DEFAULT_THEME_ID)
+
+  // Split themes
+  const [splitThemes, setSplitThemesState] = useState(false)
+  const [themeIdDark, setThemeIdDarkState] = useState(DEFAULT_THEME_ID)
+  const [themeIdLight, setThemeIdLightState] = useState(DEFAULT_THEME_ID)
+
+  // Per-section overrides (empty = same as app)
+  const [terminalOverrideThemeId, setTerminalOverrideThemeIdState] = useState('')
+  const [editorOverrideThemeId, setEditorOverrideThemeIdState] = useState('')
+
+  // Resolved
+  const themeId = splitThemes ? (theme === 'dark' ? themeIdDark : themeIdLight) : singleThemeId
+  const terminalThemeId = terminalOverrideThemeId || themeId
+  const editorThemeId = editorOverrideThemeId || themeId
+  const contentVariant = theme
+
+  useEffect(() => {
+    let disposed = false
+    performance.mark('sz:theme:start')
+
+    const getSetting = (key: string): Promise<string | null> =>
+      queryClient.fetchQuery(trpc.settings.get.queryOptions({ key }))
+
+    const initialize = async () => {
+      const [
+        effective,
+        source,
+        savedThemeId,
+        savedSplit,
+        savedDark,
+        savedLight,
+        savedTermOvrId,
+        savedEditorOvrId
+      ] = await Promise.all([
+        queryClient.fetchQuery(trpc.settings.getEffectiveTheme.queryOptions()),
+        queryClient.fetchQuery(trpc.settings.getThemeSource.queryOptions()),
+        getSetting('app_theme_id'),
+        getSetting('app_theme_split'),
+        getSetting('app_theme_id_dark'),
+        getSetting('app_theme_id_light'),
+        getSetting('terminal_override_theme_id'),
+        getSetting('editor_override_theme_id')
+      ])
+      if (disposed) return
+
+      // Migrate single theme from legacy
+      let resolvedId = savedThemeId
+      if (!resolvedId) {
+        const legacyId = await getSetting('content_theme_dark').then(
+          (v) => v ?? getSetting('terminal_theme_dark')
+        )
+        resolvedId = migrateThemeId(legacyId ?? DEFAULT_THEME_ID)
+        setSettingMutation.mutate({ key: 'app_theme_id', value: resolvedId })
+      } else {
+        resolvedId = migrateThemeId(resolvedId)
+      }
+
+      const isSplit = savedSplit === '1'
+      const darkId = migrateThemeId(savedDark ?? resolvedId)
+      const lightId = migrateThemeId(savedLight ?? resolvedId)
+
+      const resolved = resolveEffective(source, effective)
+      setTheme(resolved)
+      setPreferenceState(source)
+      setSingleThemeId(resolvedId)
+      setSplitThemesState(isSplit)
+      setThemeIdDarkState(darkId)
+      setThemeIdLightState(lightId)
+      setTerminalOverrideThemeIdState(savedTermOvrId ? migrateThemeId(savedTermOvrId) : '')
+      setEditorOverrideThemeIdState(savedEditorOvrId ? migrateThemeId(savedEditorOvrId) : '')
+
+      const chromeId = isSplit ? (resolved === 'dark' ? darkId : lightId) : resolvedId
+      applyTheme(resolved, chromeId)
+      performance.mark('sz:theme:end')
+    }
+
+    initialize().catch(() => {
+      if (disposed) return
+      setTheme('dark')
+      setPreferenceState('dark')
+      setSingleThemeId(DEFAULT_THEME_ID)
+      applyTheme('dark', DEFAULT_THEME_ID)
+      performance.mark('sz:theme:end')
+    })
+
+    return () => {
+      disposed = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Replaces the old preload theme listener: fires on OS dark/light toggle (when
+  // source === 'system') or an explicit setTheme.
+  useSubscription(
+    trpc.settings.onThemeChanged.subscriptionOptions(undefined, {
+      onData: (effective) => setTheme(effective)
+    })
+  )
+
+  // Follow OS dark/light while the preference is "system". The fork sidecar can't
+  // push OS changes (no nativeTheme), so this renderer-side listener is what makes
+  // system mode track the OS there; on Electron it harmlessly mirrors the
+  // onThemeChanged push.
+  useEffect(() => {
+    if (preference !== 'system') return
+    if (typeof window === 'undefined' || !window.matchMedia) return
+    const mq = window.matchMedia('(prefers-color-scheme: dark)')
+    const onChange = (): void => setTheme(mq.matches ? 'dark' : 'light')
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [preference])
+
+  // Re-apply chrome whenever resolved themeId or theme changes
+  useEffect(() => {
+    applyTheme(theme, themeId)
+  }, [theme, themeId])
+
+  const setPreference = async (nextPreference: ThemePreference) => {
+    const serverEffective = await setThemeMutation.mutateAsync(nextPreference)
+    setPreferenceState(nextPreference)
+    setTheme(resolveEffective(nextPreference, serverEffective))
+    track('theme_changed', { mode: nextPreference as 'light' | 'dark' | 'system' })
+  }
+
+  const setThemeId = (id: string) => {
+    setSingleThemeId(id)
+    setSettingMutation.mutate({ key: 'app_theme_id', value: id })
+    track('theme_changed', { themeId: id })
+  }
+
+  const setSplitThemes = (enabled: boolean) => {
+    if (enabled) {
+      setThemeIdDarkState(singleThemeId)
+      setThemeIdLightState(singleThemeId)
+      setSettingMutation.mutate({ key: 'app_theme_id_dark', value: singleThemeId })
+      setSettingMutation.mutate({ key: 'app_theme_id_light', value: singleThemeId })
+    }
+    setSplitThemesState(enabled)
+    setSettingMutation.mutate({ key: 'app_theme_split', value: enabled ? '1' : '0' })
+  }
+
+  const setThemeIdDark = (id: string) => {
+    setThemeIdDarkState(id)
+    setSettingMutation.mutate({ key: 'app_theme_id_dark', value: id })
+  }
+
+  const setThemeIdLight = (id: string) => {
+    setThemeIdLightState(id)
+    setSettingMutation.mutate({ key: 'app_theme_id_light', value: id })
+  }
+
+  const setTerminalOverrideThemeId = (id: string) => {
+    setTerminalOverrideThemeIdState(id)
+    setSettingMutation.mutate({ key: 'terminal_override_theme_id', value: id })
+  }
+
+  const setEditorOverrideThemeId = (id: string) => {
+    setEditorOverrideThemeIdState(id)
+    setSettingMutation.mutate({ key: 'editor_override_theme_id', value: id })
+  }
+
+  const value = useMemo<ThemeContextValue>(
+    () => ({
+      theme,
+      preference,
+      themeId,
+      setPreference,
+      setThemeId,
+      splitThemes,
+      setSplitThemes,
+      themeIdDark,
+      setThemeIdDark,
+      themeIdLight,
+      setThemeIdLight,
+      terminalOverrideThemeId,
+      setTerminalOverrideThemeId,
+      editorOverrideThemeId,
+      setEditorOverrideThemeId,
+      terminalThemeId,
+      editorThemeId,
+      contentVariant
+    }),
+    [
+      theme,
+      preference,
+      themeId,
+      splitThemes,
+      themeIdDark,
+      themeIdLight,
+      terminalOverrideThemeId,
+      editorOverrideThemeId,
+      terminalThemeId,
+      editorThemeId,
+      contentVariant
+    ]
+  )
+
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
+}
+
+export function useTheme() {
+  const ctx = useContext(ThemeContext)
+  if (!ctx) throw new Error('useTheme must be used within ThemeProvider')
+  return ctx
+}
