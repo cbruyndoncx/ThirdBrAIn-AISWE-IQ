@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/breaking-brake/cc-wf-studio.git
+	branch = main
+	commit = a7bf24ab246ae01e197228e8ec68f6f29bc75ffe
+	parent = 5fd71a3514a975ca487c498f81ac7e201062f09e
+	method = merge
+	cmdver = 0.4.9

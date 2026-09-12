@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+out/
+dist/
+*.vsix
+
+# Generated files
+*.generated.ts
+
+# Synced schema artifacts (copied from packages/core at build time)
+packages/vscode/resources/workflow-schema.json
+packages/vscode/resources/workflow-schema.toon
+
+# IDE
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+
+# Claude Code (track skills and rules only)
+.claude/*
+!.claude/skills/
+!.claude/rules/
+.vscode/workflows/
+
+# POC files
+poc/
+.vscode/poc/
+
+# Temporary files
+*.tmp
+*.swp

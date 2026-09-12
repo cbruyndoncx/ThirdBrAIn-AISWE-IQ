@@ -1,0 +1,57 @@
+name: CI
+
+# Runs the repo's required quality gates (build + check + test) on every PR
+# targeting main, auto-dev, or auto-qa, and on pushes to those branches. This
+# is the validation gate for both human-authored and agent-authored PRs — on
+# auto-dev and auto-qa it is the ONLY gate before an agent PR auto-merges, so
+# it must stay strict. See docs/task-automation.md and docs/quality/.
+
+on:
+  pull_request:
+    branches: [main, auto-dev, auto-qa]
+  push:
+    branches: [main, auto-dev, auto-qa]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-and-build:
+    name: Check & Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Build first: packages/mcp's type-check resolves @cc-wf-studio/core
+      # from core's built dist/, so a fresh checkout must compile before
+      # `pnpm check` can pass.
+      - name: Build all packages
+        run: pnpm build
+
+      - name: Check (lint + type-check)
+        run: pnpm check
+
+      - name: Test
+        run: pnpm test
+
+      # The MCP smoke test spawns the built `ccwf-mcp` bin and talks to it over
+      # stdio, so it needs the build above. It predates this workflow and was
+      # never wired in — it is the one behavioral check that already existed.
+      - name: MCP smoke test
+        run: pnpm --filter @cc-wf-studio/mcp run smoke

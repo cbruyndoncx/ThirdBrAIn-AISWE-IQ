@@ -1,0 +1,106 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/vscode/package.json'
+      - 'packages/vscode/src/webview/package.json'
+      - 'pnpm-lock.yaml'
+  schedule:
+    # 毎週月曜日 12:00 JST (03:00 UTC) に実行
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  snyk-security-scan:
+    name: Snyk Security Scan
+    runs-on: ubuntu-latest
+    # DependabotのPRではSNYK_TOKENシークレットにアクセスできないためスキップ
+    if: github.actor != 'dependabot[bot]'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # VSCode 拡張パッケージのスキャン
+      - name: Run Snyk on VSCode extension
+        uses: snyk/actions/node@v1.0.0
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: test
+          args: --severity-threshold=high --file=packages/vscode/package.json --project-name=cc-wf-studio-vscode
+
+      # Webview のスキャン
+      - name: Run Snyk on webview
+        uses: snyk/actions/node@v1.0.0
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: test
+          args: --severity-threshold=high --file=packages/vscode/src/webview/package.json --project-name=cc-wf-studio-webview
+
+      # SARIF形式でのスキャン（GitHub Code Scanning用）
+      - name: Generate SARIF for VSCode extension
+        uses: snyk/actions/node@v1.0.0
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: test
+          args: --severity-threshold=low --file=packages/vscode/package.json --sarif-file-output=snyk-vscode.sarif
+
+      - name: Generate SARIF for webview
+        uses: snyk/actions/node@v1.0.0
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: test
+          args: --severity-threshold=low --file=packages/vscode/src/webview/package.json --sarif-file-output=snyk-webview.sarif
+
+      # すべてのプロジェクトのモニタリング
+      - name: Monitor all projects with Snyk
+        uses: snyk/actions/node@v1.0.0
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: monitor
+          args: --all-projects
+
+      # GitHub Code Scanning へのアップロード
+      - name: Upload VSCode extension results to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: snyk-vscode.sarif
+          category: snyk-vscode
+
+      - name: Upload webview results to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: snyk-webview.sarif
+          category: snyk-webview

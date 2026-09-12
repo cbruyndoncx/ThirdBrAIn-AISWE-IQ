@@ -1,0 +1,48 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "watch:extension",
+      "type": "shell",
+      "command": "pnpm --filter cc-wf-studio run watch",
+      "problemMatcher": {
+        "owner": "vite",
+        "fileLocation": ["relative", "${workspaceFolder}/packages/vscode"],
+        "pattern": {
+          "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error):\\s+(.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "message": 5
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "build started\\.\\.\\.",
+          "endsPattern": "built in \\d+ms\\."
+        }
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "never"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "build:webview",
+      "type": "shell",
+      "command": "pnpm --filter cc-wf-studio-webview run build",
+      "problemMatcher": []
+    },
+    {
+      "label": "typecheck:extension",
+      "type": "shell",
+      "command": "pnpm --filter cc-wf-studio exec tsc -p ./",
+      "problemMatcher": "$tsc",
+      "group": "build"
+    }
+  ]
+}

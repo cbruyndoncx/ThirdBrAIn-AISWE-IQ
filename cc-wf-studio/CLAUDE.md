@@ -1,0 +1,274 @@
+# cc-wf-studio Development Guidelines
+
+Core conventions live here; topic-specific rules are in `.claude/rules/`
+(loaded automatically): `schema-driven-panels.md`, `translation.md`,
+`dialog-design.md`, `webview-patterns.md`. Reference material that is not a
+rule lives in `docs/` (e.g. `docs/architecture.md` for the main data-flow
+sequence diagrams, `docs/release-flow.md`).
+
+## Language
+
+- GitHub Issues and Pull Requests (titles, bodies, and comments) MUST be written in English.
+- This applies regardless of the conversation language used with Claude.
+
+## Autonomous Value-Creation Loop
+
+Development is partially autonomous — see `docs/task-automation.md` for the
+loop architecture and safety rails. Key points for agents:
+
+- The loop's job is **inventing user-facing value** (canvas UX, AI-editing
+  quality, CLI experience — see `IMPLEMENTATION_PLAN.md`, human-edited;
+  agents read it, never edit it). Housekeeping (dependency bumps, TODO
+  cleanup, docs-for-docs'-sake, no-user-effect refactors) is out of scope
+  for agents. Maintenance is interrupt-only: red CI, security, human-reported
+  bugs.
+- Two skills drive it: `next-idea` (ideation — files locked `idea` issues,
+  never implements) and `next-task` (implementation — one queued idea or
+  interrupt-fix per iteration). Idea queue = GitHub Issues labeled `idea`.
+  Loop memory = `docs/progress-log.md` (append-only).
+- Two-stage branch flow: agent task PRs target the **`auto-dev`** integration
+  branch and may auto-merge there on green CI. **`main` is human-only** —
+  agents never open or merge PRs based on `main`; a human promotes
+  `auto-dev` → `main` via a promotion PR. Release actions are always
+  human-only.
+- A second, sibling track handles **quality assurance**, split the same way:
+  `next-qa-idea` (ideation — files one locked `qa` issue per run) and
+  `next-qa` (implementation — builds one per run) grow the automated test
+  suite on the **`auto-qa`** branch (queue = Issues labeled `qa`, memory =
+  `docs/qa-log.md`). `auto-qa` branches from `main` and is promoted back to
+  `main` by a human, independently of `auto-dev`. The two tracks never merge into each other and are kept to
+  disjoint files: **the QA loop never edits `packages/*/src`** — when a test
+  finds a product bug it files a `bug` issue for the feature loop and lands
+  the test skipped.
+
+## Project Structure
+
+pnpm monorepo. Four packages under `packages/`:
+
+```text
+packages/
+  core/      # @cc-wf-studio/core  — shared types, validators, Mermaid/Markdown generators, schema (no fs/UI/network)
+  mcp/       # @cc-wf-studio/mcp   — MCP server toolkit + ccwf-mcp stdio bin
+  cli/       # @cc-wf-studio/cli   — ccwf CLI (render/validate/export/run/preview/canvas/mcp), bundles the webview
+  vscode/    # cc-wf-studio        — VSCode extension (canvas, Slack share, in-canvas AI editing)
+    src/
+    src/webview/   # cc-wf-studio-webview — React webview UI (bundled into the extension + cli)
+    resources/     # workflow-schema.{json,toon} synced from core at build time
+```
+
+### Schema Files — two systems, two purposes
+
+1. **AI-authoring guide**: `packages/core/resources/workflow-schema.json` —
+   hand-tuned prose/JSON that instructs AI agents generating workflows
+   (see the workflow-schema-tuning skill). It is **NOT generated from code**.
+   - `workflow-schema.toon` is auto-generated from the `.json` at build time
+     (`generate:toon`). **Do not edit it manually.**
+   - `packages/vscode/resources/workflow-schema.{json,toon}` are synced from
+     core during the extension build (`sync:schema`) — do not edit there either.
+2. **UI/validation SSoT**: zod-based node property schemas in
+   `packages/core/src/schema/nodes/` — drive the property panels, export
+   warnings, and workflow validation. See `.claude/rules/schema-driven-panels.md`.
+
+Cross-reference rule: when you add a node field to a zod schema that AI agents
+should also author, update `workflow-schema.json` as well (and vice versa).
+
+## Development Workflow & Commands
+
+### Commit Message Guidelines
+
+**IMPORTANT: Keep commit messages simple for squash merge workflow.**
+
+#### Format
+```
+<type>: <subject>
+
+<optional body with bullet points>
+```
+
+#### Example
+```
+fix: add missing MCP node definition to workflow schema
+
+- Added 'mcp' to supportedNodeTypes
+- Added complete MCP node type definition with field constraints
+- Fixes MCP_INVALID_PARAMETERS and MCP_INVALID_MODE validation errors
+```
+
+#### Rules
+- **Subject**: 50 characters max, imperative mood, no period
+- **Body**: 3-5 bullet points max, "what" changed only
+- **Details**: Put "why" and "how" in PR description, NOT commit message
+
+#### Types
+- `feat:` - New feature (minor version bump)
+- `fix:` - Bug fix (patch version bump)
+- `improvement:` - Minor enhancement to existing feature (patch version bump)
+- `docs:` - Documentation only
+- `refactor:` - Code refactoring
+- `chore:` - Build/tooling changes
+
+#### What to Avoid
+❌ Long explanations (Problem/Solution/Impact sections)
+❌ Multiple paragraphs
+❌ Code blocks
+❌ Test results with checkboxes
+
+✅ Simple 3-5 line summary of changes
+
+### Code Quality Checks (Required Before Commit/PR)
+
+**This is a pnpm monorepo — use `pnpm`, not `npm`. Always run these from the repo root after code modifications:**
+
+```bash
+pnpm check   # pnpm -r run check across all packages (Biome lint+format on vscode, tsc on others)
+pnpm build   # pnpm -r run build across all packages (verify compilation)
+```
+
+To target a single package, filter: `pnpm -F @cc-wf-studio/cli run check` / `pnpm -F cc-wf-studio run build`.
+
+### Command Execution Timing
+
+#### During Development
+1. **After code modification**:
+   ```bash
+   pnpm check
+   ```
+   - Runs lint + format (vscode) and type-checks every package
+
+2. **Before manual E2E testing**:
+   ```bash
+   pnpm build
+   ```
+   - Compiles all packages; required for testing the extension / CLI
+
+3. **Before git commit**:
+   ```bash
+   pnpm check
+   ```
+   - Ensures all code quality standards are met
+   - Prevents committing code with linting/formatting issues
+
+#### Testing
+
+The automated suite is being built by the quality-assurance loop (`next-qa`
+on the `auto-qa` branch); it is not yet complete, so manual E2E remains the
+primary check for feature work.
+
+- **Manual E2E testing**: Required for all feature changes and bug fixes
+  - Run `pnpm build` first
+  - Test in VSCode Extension Development Host
+- **Automated tests**: run with `pnpm test` from the repo root. Adding to
+  the suite is the QA loop's job, not the feature loop's — a feature PR is
+  not expected to ship tests, and **must not** delete, skip, or weaken an
+  existing passing test to get CI green.
+- **Where tests live**: `packages/core` (pure validators, generators,
+  schema) and the pure transforms in `packages/cli` / `packages/mcp` are the
+  suite's target. Webview React rendering and the VSCode host stay on manual
+  E2E — the cost/benefit there does not justify automation.
+- **Test file placement**: tests go under the package's `src/__tests__/`
+  directory, mirroring the source tree — the test for
+  `src/utils/validate-workflow.ts` is
+  `src/__tests__/utils/validate-workflow.test.ts`. Fixtures keep their
+  relative spot (`src/__tests__/**/__fixtures__/`); the webview's global
+  setup is `src/__tests__/setup-browser-globals.ts`. Do not co-locate tests
+  next to source files.
+
+## Version Update & Release Procedure
+
+**IMPORTANT: Versioning is driven by [Changesets](https://github.com/changesets/changesets). A release is cut manually (you open the Release PR) and publishes automatically when that PR merges into `main`. Do NOT hand-edit `version` fields in `package.json`.**
+
+> **Releasing is a human-only action — AI agents must not self-trigger it.** Do not run the "Release — Create Release PR" workflow, do not merge the Release PR into `main`, and do not dispatch publish workflows. Merging the Release PR is an irreversible npm publish. Agents may prepare changes (incl. changesets) and explain the procedure, but a human performs the actual release.
+
+### The four published artifacts
+
+This is a pnpm monorepo with independently versioned packages:
+
+| Package | Published to | Tag format |
+|---|---|---|
+| `@cc-wf-studio/core` | npm | `@cc-wf-studio/core@x.y.z` |
+| `@cc-wf-studio/mcp` | npm | `@cc-wf-studio/mcp@x.y.z` |
+| `@cc-wf-studio/cli` | npm | `@cc-wf-studio/cli@x.y.z` |
+| `cc-wf-studio` (VSCode extension) | GitHub Release (VSIX attachment) | `cc-wf-studio@x.y.z` |
+
+`cc-wf-studio-webview` is in the Changesets `ignore` list — it is bundled into `@cc-wf-studio/cli` and the extension at build time, never published on its own.
+
+### Per-PR step: add a changeset
+
+When a change should be released, add a changeset describing it:
+
+```bash
+pnpm changeset
+# interactive: select which package(s) to bump, choose patch/minor/major,
+# write a one-line summary (this becomes the CHANGELOG entry)
+```
+
+This writes a `.changeset/<slug>.md` file — commit it alongside your code. **You never hand-edit `CHANGELOG.md`; Changesets generates it.** If a PR genuinely needs no release (CI/docs-only tooling), run `pnpm changeset add --empty`.
+
+`updateInternalDependencies: "patch"` is set, so bumping `@cc-wf-studio/core` automatically bumps `cli` / `mcp` (patch) and updates their dependency ranges — no need to author separate changesets for the dependents.
+
+### Release flow (manual Release PR → auto publish on merge)
+
+```
+1. feature PR + .changeset/*.md  →  merge to main   (just accumulates; no release)
+2. when ready, run "Release — Create Release PR" (Actions, manual dispatch)
+   → opens / updates the "Version Packages" PR — a preview of the bumps + CHANGELOG
+3. review + merge the "Version Packages" PR into main
+   → the merge push triggers "Release — Publish" automatically:
+     publishes every pending npm package, creates tags, and if cc-wf-studio
+     was bumped, builds + uploads the VSIX to its GitHub Release
+4. Repository Owner uploads the VSIX from the GitHub Release to the stores (manual)
+```
+
+Confirm = release: because the version bump and publish happen on `main` back-to-back, a version never sits "confirmed but unpublished", so version numbers don't skip. Let changesets accumulate and cut a release only when ready.
+
+- **`.github/workflows/release-version-pr.yml`** — trigger: **`workflow_dispatch`** (manual). Runs `changesets/action` *version step only* — opens / updates the Release PR. No publish. Intentionally manual so "cut a release" is deliberate.
+- **`.github/workflows/release.yml`** — trigger: **push to `main`** (+ `workflow_dispatch` fallback). A `check` job skips ordinary feature merges (pending changesets present); on a release push (none pending) the `publish` job runs `changesets/action` *publish step* (`pnpm changeset publish`), then detects the `cc-wf-studio@*` tag and uploads the VSIX.
+- `production` is **frozen / legacy** — not part of the flow; do not promote to it. (Past tags/Releases are unaffected — tags are independent of branches.)
+
+### npm authentication: OIDC Trusted Publishing
+
+npm publishes use **OIDC Trusted Publishing** — there is no `NPM_TOKEN` secret. Each of `@cc-wf-studio/{core,mcp,cli}` has a Trusted Publisher configured on npmjs.com pointing at `breaking-brake/cc-wf-studio` → `release.yml`. The trusted publisher is bound to the workflow **file name** (not its trigger), so keep the publish logic in `release.yml`. The publish workflow sets `NPM_CONFIG_PROVENANCE: 'true'`, so each release carries a provenance attestation.
+
+### VS Marketplace / Open VSX publishing (manual, by the Repository Owner)
+
+The publish workflow does **not** push the extension to the Marketplace. It only **builds the `.vsix` and attaches it to the `cc-wf-studio@x.y.z` GitHub Release**. The actual store publish is a manual step performed by the Repository Owner:
+
+1. The "Release — Publish" workflow uploads `packages/vscode/*.vsix` to the GitHub Release for that version.
+2. The Repository Owner downloads that `.vsix` from the GitHub Release.
+3. The Repository Owner uploads it manually to the VS Marketplace (and Open VSX) via the publisher portal.
+
+So the `.vsix` on the GitHub Release is the source artifact for the store listing — there is no `vsce publish` / `ovsx publish` in CI.
+
+### If you must set a version by hand (rare)
+
+Prefer `pnpm changeset` always. Only edit a `packages/*/package.json` `version` field directly when bootstrapping or fixing a broken state, and expect the next Changesets release to take over from there.
+
+## AI Editing Features
+
+### MCP Server-based AI Editing (Active)
+- The built-in MCP server (`cc-workflow-ai-editor` skill) is the primary interface for external AI agents to create and edit workflows.
+- All new AI editing development should go through the MCP server approach.
+- The interaction sequence is documented in `docs/architecture.md`.
+
+### Chat UI-based AI Editing (Discontinued)
+- The chat UI-based AI editing features (Refinement Chat Panel, AI Workflow Generation Dialog) are **no longer under active development**.
+- Existing functionality will be maintained but no new features or enhancements will be added.
+- Affected features:
+  - `001-ai-workflow-generation`: AI Workflow Generation via AiGenerationDialog
+  - `001-ai-workflow-refinement`: AI Workflow Refinement via RefinementChatPanel
+  - `001-ai-skill-generation`: AI Skill Node Generation via AiGenerationDialog
+
+### Slack Sharing and Claude API Upload (Frozen)
+- Both are **frozen as thin value**: maintenance-only, no new features or enhancements. The code stays and ships; it receives no investment.
+- Affected features:
+  - Slack share, OAuth / manual-token connect, import deep link (`vscode://cc-wf-studio/import`)
+  - The pre-share sensitive-data scan (`sensitive-data-detector`) — its only caller is Slack share, so it is frozen with it
+  - Claude API skill upload (`claude-api-upload-service`)
+- **Out of assurance scope too** — writing automated tests for a feature we have decided not to touch contradicts the decision to freeze it. See `docs/quality/02-feature-map.md`.
+
+> ⚠️ **Known open gap — the Claude API upload does not scan for secrets.**
+> `detectSensitiveData` has exactly one caller, `slack-share-workflow.ts:55`. The upload path (`claude-api-upload-service`) sends workflow content — including free-text prompt fields, where users are known to paste credentials — to the Anthropic API with no scan and no warning.
+>
+> **Frozen does not mean dormant.** The code still ships and users can still invoke it, so this gap is live, not deferred. It is lower severity than the Slack case (the destination is the user's own Anthropic account, not a shared team channel), but the secret still comes to rest on an external service and persists beyond the session.
+>
+> It is left open deliberately, and the resolution is a product decision, not an assurance one. Note that **adding a scan would mean investing in a feature we just declared thin value; removing the entry point would be the option consistent with the freeze.** Until one is chosen, treat this as accepted risk with no owner assigned.
