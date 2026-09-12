@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/umutcanoner/aider_scripted.git
+	branch = main
+	commit = ddd89f904a0b0c4a66ef918e56c9d1380edfe329
+	parent = 9a92303b4d6a96af7e124fa9188dcad35844feb1
+	method = merge
+	cmdver = 0.4.9
