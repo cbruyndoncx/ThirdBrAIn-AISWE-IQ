@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/addyosmani/web-quality-skills.git
+	branch = main
+	commit = afa8da942115f2961fdbfa80807ea0b232ff6c00
+	parent = 565fadc2b3401431c46a6a576fe7bc4da6cfb098
+	method = merge
+	cmdver = 0.4.9
