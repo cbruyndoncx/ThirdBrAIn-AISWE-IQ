@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/HKUDS/CLI-Anything.git
+	branch = main
+	commit = 810c18b0d1ab9b234bc996c9fd999318523a3ef0
+	parent = da238a27ae5077e0104d62403928579cc6d9e5ed
+	method = merge
+	cmdver = 0.4.9
