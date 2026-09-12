@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/cogeet-io/ai-development-specifications.git
+	branch = main
+	commit = 2871e4f06b94485ee6dee9145c523ce1f28d75e3
+	parent = d04627955ce9d32c579e1c2f2b33eb38f9fa7e5b
+	method = merge
+	cmdver = 0.4.9
