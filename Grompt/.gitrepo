@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/jgravelle/Grompt.git
+	branch = main
+	commit = dd384407939d05cb161ea939d327c612a1d60c08
+	parent = c97c68bb7058a0ff2b29eb096edc32cff269334e
+	method = merge
+	cmdver = 0.4.9
