@@ -1,0 +1,2968 @@
+# Translation catalog for Loom Web
+# Language: zh-CN
+#
+msgid ""
+msgstr ""
+"Language: zh-CN\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: nav.threads
+msgid "nav.threads"
+msgstr "会话"
+
+#: nav.settings
+msgid "nav.settings"
+msgstr "设置"
+
+#: nav.admin
+msgid "nav.admin"
+msgstr "管理"
+
+#: nav.jobs
+msgid "nav.jobs"
+msgstr "作业"
+
+#: nav.observability
+msgid "nav.observability"
+msgstr "Observability"
+
+#: nav.crashes
+msgid "nav.crashes"
+msgstr "Crashes"
+
+#: nav.crons
+msgid "nav.crons"
+msgstr "Crons"
+
+#: nav.sessions
+msgid "nav.sessions"
+msgstr "Sessions"
+
+#: thread.new
+msgid "thread.new"
+msgstr "新建会话"
+
+#: thread.delete
+msgid "thread.delete"
+msgstr "删除"
+
+#: thread.search
+msgid "thread.search"
+msgstr "搜索会话..."
+
+#: thread.noThreads
+msgid "thread.noThreads"
+msgstr "暂无会话"
+
+#: thread.loadError
+msgid "thread.loadError"
+msgstr "加载会话失败"
+
+#: state.waiting_for_user_input
+msgid "state.waiting_for_user_input"
+msgstr "等待输入"
+
+#: state.calling_llm
+msgid "state.calling_llm"
+msgstr "调用 LLM"
+
+#: state.processing_llm_response
+msgid "state.processing_llm_response"
+msgstr "处理响应"
+
+#: state.executing_tools
+msgid "state.executing_tools"
+msgstr "执行工具"
+
+#: state.post_tools_hook
+msgid "state.post_tools_hook"
+msgstr "后处理"
+
+#: state.error
+msgid "state.error"
+msgstr "错误"
+
+#: state.shutting_down
+msgid "state.shutting_down"
+msgstr "正在关闭"
+
+#: tool.pending
+msgid "tool.pending"
+msgstr "待处理"
+
+#: tool.running
+msgid "tool.running"
+msgstr "运行中"
+
+#: tool.completed
+msgid "tool.completed"
+msgstr "已完成"
+
+#: tool.failed
+msgid "tool.failed"
+msgstr "失败"
+
+#: connection.connected
+msgid "connection.connected"
+msgstr "已连接"
+
+#: connection.disconnected
+msgid "connection.disconnected"
+msgstr "已断开"
+
+#: connection.connecting
+msgid "connection.connecting"
+msgstr "连接中..."
+
+#: connection.reconnecting
+msgid "connection.reconnecting"
+msgstr "重新连接中..."
+
+#: connection.error
+msgid "connection.error"
+msgstr "连接错误"
+
+#: connection.clickToReconnect
+msgid "connection.clickToReconnect"
+msgstr "点击重新连接"
+
+#: connection.attempt
+msgid "connection.attempt"
+msgstr "第 {count} 次尝试"
+
+#: message.placeholder
+msgid "message.placeholder"
+msgstr "输入消息..."
+
+#: message.send
+msgid "message.send"
+msgstr "发送"
+
+#: auth.signOut
+msgid "auth.signOut"
+msgstr "退出登录"
+
+#: auth.dashboard.welcome
+msgid "auth.dashboard.welcome"
+msgstr "欢迎，"
+
+#: auth.dashboard.protectedPage
+msgid "auth.dashboard.protectedPage"
+msgstr "这是受保护的页面。您必须登录才能查看。"
+
+#: general.loading
+msgid "general.loading"
+msgstr "加载中..."
+
+#: general.error
+msgid "general.error"
+msgstr "发生错误"
+
+#: general.retry
+msgid "general.retry"
+msgstr "重试"
+
+#: general.cancel
+msgid "general.cancel"
+msgstr "取消"
+
+#: general.save
+msgid "general.save"
+msgstr "保存"
+
+#: general.close
+msgid "general.close"
+msgstr "关闭"
+
+#: auth.login.title
+msgid "auth.login.title"
+msgstr "登录 Loom"
+
+#: auth.login.subtitle
+msgid "auth.login.subtitle"
+msgstr "选择您的登录方式"
+
+#: auth.login.github
+msgid "auth.login.github"
+msgstr "使用 GitHub 继续"
+
+#: auth.login.google
+msgid "auth.login.google"
+msgstr "使用 Google 继续"
+
+#: auth.login.or
+msgid "auth.login.or"
+msgstr "或"
+
+#: auth.login.emailLabel
+msgid "auth.login.emailLabel"
+msgstr "邮箱地址"
+
+#: auth.login.emailPlaceholder
+msgid "auth.login.emailPlaceholder"
+msgstr "you@example.com"
+
+#: auth.login.sendMagicLink
+msgid "auth.login.sendMagicLink"
+msgstr "发送魔法链接"
+
+#: auth.login.sending
+msgid "auth.login.sending"
+msgstr "发送中..."
+
+#: auth.login.checkEmail
+msgid "auth.login.checkEmail"
+msgstr "请查看您的邮箱"
+
+#: auth.login.magicLinkSent
+msgid "auth.login.magicLinkSent"
+msgstr "我们已向以下邮箱发送登录链接"
+
+#: auth.login.useDifferentEmail
+msgid "auth.login.useDifferentEmail"
+msgstr "使用其他邮箱"
+
+#: auth.login.error
+msgid "auth.login.error"
+msgstr "无法发送魔法链接，请重试。"
+
+#: auth.login.signups_disabled
+msgid "auth.login.signups_disabled"
+msgstr "新用户注册目前已禁用。请联系管理员。"
+
+#: auth.device.title
+msgid "auth.device.title"
+msgstr "授权 CLI"
+
+#: auth.device.subtitle
+msgid "auth.device.subtitle"
+msgstr "输入终端中显示的代码以将 CLI 与您的账户关联"
+
+#: auth.device.inputLabel
+msgid "auth.device.inputLabel"
+msgstr "输入代码"
+
+#: auth.device.placeholder
+msgid "auth.device.placeholder"
+msgstr "XXX-XXX-XXX"
+
+#: auth.device.authorize
+msgid "auth.device.authorize"
+msgstr "授权"
+
+#: auth.device.authorizing
+msgid "auth.device.authorizing"
+msgstr "授权中..."
+
+#: auth.device.success
+msgid "auth.device.success"
+msgstr "授权成功！"
+
+#: auth.device.successMessage
+msgid "auth.device.successMessage"
+msgstr "您现在可以关闭此页面并返回终端。"
+
+#: auth.device.error
+msgid "auth.device.error"
+msgstr "代码无效或已过期。请检查终端并重试。"
+
+#: auth.device.noCode
+msgid "auth.device.noCode"
+msgstr "没有代码？运行"
+
+#: auth.device.cliCommand
+msgid "auth.device.cliCommand"
+msgstr "loom login"
+
+#: auth.device.inTerminal
+msgid "auth.device.inTerminal"
+msgstr "在终端中。"
+
+#: settings.sessions.title
+msgid "settings.sessions.title"
+msgstr "活跃会话"
+
+#: settings.sessions.description
+msgid "settings.sessions.description"
+msgstr "管理您在各设备上的活跃会话"
+
+#: settings.sessions.current
+msgid "settings.sessions.current"
+msgstr "当前会话"
+
+#: settings.sessions.lastUsed
+msgid "settings.sessions.lastUsed"
+msgstr "上次使用"
+
+#: settings.sessions.createdAt
+msgid "settings.sessions.createdAt"
+msgstr "创建时间"
+
+#: settings.sessions.revoke
+msgid "settings.sessions.revoke"
+msgstr "撤销"
+
+#: settings.sessions.revokeConfirm
+msgid "settings.sessions.revokeConfirm"
+msgstr "确定要撤销此会话吗？"
+
+#: settings.sessions.noSessions
+msgid "settings.sessions.noSessions"
+msgstr "暂无活跃会话"
+
+#: settings.sessions.web
+msgid "settings.sessions.web"
+msgstr "Web"
+
+#: settings.sessions.cli
+msgid "settings.sessions.cli"
+msgstr "CLI"
+
+#: settings.sessions.vscode
+msgid "settings.sessions.vscode"
+msgstr "VS Code"
+
+#: settings.nav.sessions
+msgid "settings.nav.sessions"
+msgstr "会话"
+
+#: settings.nav.profile
+msgid "settings.nav.profile"
+msgstr "个人资料"
+
+#: settings.nav.orgs
+msgid "settings.nav.orgs"
+msgstr "组织"
+
+#: settings.profile.title
+msgid "settings.profile.title"
+msgstr "个人资料设置"
+
+#: settings.profile.displayName
+msgid "settings.profile.displayName"
+msgstr "显示名称"
+
+#: settings.profile.email
+msgid "settings.profile.email"
+msgstr "邮箱"
+
+#: settings.profile.emailHint
+msgid "settings.profile.emailHint"
+msgstr "邮箱无法在此处更改"
+
+#: settings.profile.username
+msgid "settings.profile.username"
+msgstr "用户名"
+
+#: settings.profile.usernamePlaceholder
+msgid "settings.profile.usernamePlaceholder"
+msgstr "输入用户名"
+
+#: settings.profile.usernameHint
+msgid "settings.profile.usernameHint"
+msgstr "您的用户名用于 git 仓库 URL"
+
+#: settings.profile.usernameInvalid
+msgid "settings.profile.usernameInvalid"
+msgstr "用户名只能包含字母、数字和下划线"
+
+#: settings.profile.usernameTaken
+msgid "settings.profile.usernameTaken"
+msgstr "此用户名已被使用"
+
+#: settings.profile.usernameTooShort
+msgid "settings.profile.usernameTooShort"
+msgstr "用户名至少需要 3 个字符"
+
+#: settings.profile.usernameTooLong
+msgid "settings.profile.usernameTooLong"
+msgstr "用户名最多 39 个字符"
+
+#: settings.profile.locale
+msgid "settings.profile.locale"
+msgstr "语言"
+
+#: settings.profile.save
+msgid "settings.profile.save"
+msgstr "保存更改"
+
+#: settings.profile.saving
+msgid "settings.profile.saving"
+msgstr "保存中..."
+
+#: settings.profile.saved
+msgid "settings.profile.saved"
+msgstr "个人资料更新成功"
+
+#: settings.profile.error
+msgid "settings.profile.error"
+msgstr "更新个人资料失败"
+
+#: orgs.title
+msgid "orgs.title"
+msgstr "组织"
+
+#: orgs.description
+msgid "orgs.description"
+msgstr "管理您的组织和团队"
+
+#: orgs.create
+msgid "orgs.create"
+msgstr "创建组织"
+
+#: orgs.createTitle
+msgid "orgs.createTitle"
+msgstr "创建新组织"
+
+#: orgs.name
+msgid "orgs.name"
+msgstr "组织名称"
+
+#: orgs.slug
+msgid "orgs.slug"
+msgstr "URL 标识"
+
+#: orgs.slugHint
+msgid "orgs.slugHint"
+msgstr "用于 URL，仅限小写字母和连字符"
+
+#: orgs.visibility
+msgid "orgs.visibility"
+msgstr "可见性"
+
+#: orgs.visibilityPublic
+msgid "orgs.visibilityPublic"
+msgstr "公开"
+
+#: orgs.visibilityPrivate
+msgid "orgs.visibilityPrivate"
+msgstr "私有"
+
+#: orgs.joinPolicy
+msgid "orgs.joinPolicy"
+msgstr "加入策略"
+
+#: orgs.joinPolicyOpen
+msgid "orgs.joinPolicyOpen"
+msgstr "开放加入"
+
+#: orgs.joinPolicyRequest
+msgid "orgs.joinPolicyRequest"
+msgstr "申请加入"
+
+#: orgs.joinPolicyInvite
+msgid "orgs.joinPolicyInvite"
+msgstr "仅限邀请"
+
+#: orgs.members
+msgid "orgs.members"
+msgstr "成员"
+
+#: orgs.teams
+msgid "orgs.teams"
+msgstr "团队"
+
+#: orgs.apiKeys
+msgid "orgs.apiKeys"
+msgstr "API 密钥"
+
+#: orgs.settings
+msgid "orgs.settings"
+msgstr "设置"
+
+#: orgs.noOrgs
+msgid "orgs.noOrgs"
+msgstr "暂无组织"
+
+#: orgs.delete
+msgid "orgs.delete"
+msgstr "删除组织"
+
+#: orgs.deleteConfirm
+msgid "orgs.deleteConfirm"
+msgstr "确定要删除此组织吗？"
+
+#: settings.orgs.title
+msgid "settings.orgs.title"
+msgstr "组织"
+
+#: settings.orgs.description
+msgid "settings.orgs.description"
+msgstr "管理您的组织和团队成员资格"
+
+#: settings.orgs.create
+msgid "settings.orgs.create"
+msgstr "创建组织"
+
+#: settings.orgs.noOrgs
+msgid "settings.orgs.noOrgs"
+msgstr "暂无组织"
+
+#: settings.orgs.loadError
+msgid "settings.orgs.loadError"
+msgstr "加载组织失败"
+
+#: settings.orgs.personal
+msgid "settings.orgs.personal"
+msgstr "个人"
+
+#: settings.orgs.slug
+msgid "settings.orgs.slug"
+msgstr "标识"
+
+#: settings.orgs.member
+msgid "settings.orgs.member"
+msgstr "名成员"
+
+#: settings.orgs.members
+msgid "settings.orgs.members"
+msgstr "名成员"
+
+#: settings.orgs.visibility.public
+msgid "settings.orgs.visibility.public"
+msgstr "公开"
+
+#: settings.orgs.visibility.unlisted
+msgid "settings.orgs.visibility.unlisted"
+msgstr "不公开"
+
+#: settings.orgs.visibility.private
+msgid "settings.orgs.visibility.private"
+msgstr "私有"
+
+#: settings.orgs.new.title
+msgid "settings.orgs.new.title"
+msgstr "创建组织"
+
+#: settings.orgs.new.name
+msgid "settings.orgs.new.name"
+msgstr "组织名称"
+
+#: settings.orgs.new.namePlaceholder
+msgid "settings.orgs.new.namePlaceholder"
+msgstr "我的组织"
+
+#: settings.orgs.new.slug
+msgid "settings.orgs.new.slug"
+msgstr "标识"
+
+#: settings.orgs.new.slugPlaceholder
+msgid "settings.orgs.new.slugPlaceholder"
+msgstr "my-organization"
+
+#: settings.orgs.new.slugHint
+msgid "settings.orgs.new.slugHint"
+msgstr "URL 安全标识符（小写字母、数字和连字符）"
+
+#: settings.orgs.new.visibility
+msgid "settings.orgs.new.visibility"
+msgstr "可见性"
+
+#: settings.orgs.new.create
+msgid "settings.orgs.new.create"
+msgstr "创建组织"
+
+#: settings.orgs.new.creating
+msgid "settings.orgs.new.creating"
+msgstr "创建中..."
+
+#: settings.orgs.new.error
+msgid "settings.orgs.new.error"
+msgstr "创建组织失败"
+
+#: settings.orgs.new.requiredFields
+msgid "settings.orgs.new.requiredFields"
+msgstr "名称和标识为必填项"
+
+#: members.title
+msgid "members.title"
+msgstr "成员"
+
+#: members.add
+msgid "members.add"
+msgstr "添加成员"
+
+#: members.remove
+msgid "members.remove"
+msgstr "移除"
+
+#: members.removeConfirm
+msgid "members.removeConfirm"
+msgstr "确定要移除此成员吗？"
+
+#: members.role
+msgid "members.role"
+msgstr "角色"
+
+#: members.roleOwner
+msgid "members.roleOwner"
+msgstr "所有者"
+
+#: members.roleAdmin
+msgid "members.roleAdmin"
+msgstr "管理员"
+
+#: members.roleMember
+msgid "members.roleMember"
+msgstr "成员"
+
+#: members.changeRole
+msgid "members.changeRole"
+msgstr "更改角色"
+
+#: members.noMembers
+msgid "members.noMembers"
+msgstr "暂无成员"
+
+#: teams.title
+msgid "teams.title"
+msgstr "团队"
+
+#: teams.create
+msgid "teams.create"
+msgstr "创建团队"
+
+#: teams.createTitle
+msgid "teams.createTitle"
+msgstr "创建新团队"
+
+#: teams.name
+msgid "teams.name"
+msgstr "团队名称"
+
+#: teams.slug
+msgid "teams.slug"
+msgstr "URL 标识"
+
+#: teams.members
+msgid "teams.members"
+msgstr "团队成员"
+
+#: teams.addMember
+msgid "teams.addMember"
+msgstr "添加成员"
+
+#: teams.removeMember
+msgid "teams.removeMember"
+msgstr "移除"
+
+#: teams.removeMemberConfirm
+msgid "teams.removeMemberConfirm"
+msgstr "确定要将此成员从团队中移除吗？"
+
+#: teams.noTeams
+msgid "teams.noTeams"
+msgstr "暂无团队"
+
+#: teams.noMembers
+msgid "teams.noMembers"
+msgstr "此团队暂无成员"
+
+#: teams.delete
+msgid "teams.delete"
+msgstr "删除团队"
+
+#: teams.deleteConfirm
+msgid "teams.deleteConfirm"
+msgstr "确定要删除此团队吗？"
+
+#: teams.roleMaintainer
+msgid "teams.roleMaintainer"
+msgstr "维护者"
+
+#: teams.roleMember
+msgid "teams.roleMember"
+msgstr "成员"
+
+#: teams.role.maintainer
+msgid "teams.role.maintainer"
+msgstr "维护者"
+
+#: teams.role.member
+msgid "teams.role.member"
+msgstr "成员"
+
+#: teams.backToOrg
+msgid "teams.backToOrg"
+msgstr "返回组织"
+
+#: teams.changeRole
+msgid "teams.changeRole"
+msgstr "更改角色"
+
+#: teams.settings
+msgid "teams.settings"
+msgstr "团队设置"
+
+#: teams.teamName
+msgid "teams.teamName"
+msgstr "团队名称"
+
+#: teams.save
+msgid "teams.save"
+msgstr "保存更改"
+
+#: teams.saving
+msgid "teams.saving"
+msgstr "保存中..."
+
+#: teams.saved
+msgid "teams.saved"
+msgstr "团队更新成功"
+
+#: teams.deleteTeam
+msgid "teams.deleteTeam"
+msgstr "删除团队"
+
+#: teams.deleteTeamConfirm
+msgid "teams.deleteTeamConfirm"
+msgstr "确定要删除此团队吗？此操作无法撤销。"
+
+#: teams.deleteTeamWarning
+msgid "teams.deleteTeamWarning"
+msgstr "这将永久删除团队并移除所有成员。"
+
+#: teams.deleting
+msgid "teams.deleting"
+msgstr "删除中..."
+
+#: teams.selectMember
+msgid "teams.selectMember"
+msgstr "选择要添加的成员"
+
+#: teams.selectRole
+msgid "teams.selectRole"
+msgstr "选择角色"
+
+#: teams.adding
+msgid "teams.adding"
+msgstr "添加中..."
+
+#: teams.add
+msgid "teams.add"
+msgstr "添加"
+
+#: teams.noAvailableMembers
+msgid "teams.noAvailableMembers"
+msgstr "没有可添加的组织成员"
+
+#: apiKeys.title
+msgid "apiKeys.title"
+msgstr "API 密钥"
+
+#: apiKeys.description
+msgid "apiKeys.description"
+msgstr "管理用于程序化访问的 API 密钥"
+
+#: apiKeys.create
+msgid "apiKeys.create"
+msgstr "创建 API 密钥"
+
+#: apiKeys.createTitle
+msgid "apiKeys.createTitle"
+msgstr "创建新 API 密钥"
+
+#: apiKeys.name
+msgid "apiKeys.name"
+msgstr "密钥名称"
+
+#: apiKeys.nameHint
+msgid "apiKeys.nameHint"
+msgstr "为此密钥提供一个描述性名称"
+
+#: apiKeys.scopes
+msgid "apiKeys.scopes"
+msgstr "权限范围"
+
+#: apiKeys.scopesHint
+msgid "apiKeys.scopesHint"
+msgstr "选择此密钥的权限"
+
+#: apiKeys.scopeThreadsRead
+msgid "apiKeys.scopeThreadsRead"
+msgstr "读取会话"
+
+#: apiKeys.scopeThreadsWrite
+msgid "apiKeys.scopeThreadsWrite"
+msgstr "写入会话"
+
+#: apiKeys.scopeLlmUse
+msgid "apiKeys.scopeLlmUse"
+msgstr "使用 LLM"
+
+#: apiKeys.prefix
+msgid "apiKeys.prefix"
+msgstr "密钥前缀"
+
+#: apiKeys.createdAt
+msgid "apiKeys.createdAt"
+msgstr "创建时间"
+
+#: apiKeys.lastUsed
+msgid "apiKeys.lastUsed"
+msgstr "上次使用"
+
+#: apiKeys.never
+msgid "apiKeys.never"
+msgstr "从未使用"
+
+#: apiKeys.revoke
+msgid "apiKeys.revoke"
+msgstr "撤销"
+
+#: apiKeys.revokeConfirm
+msgid "apiKeys.revokeConfirm"
+msgstr "确定要撤销此 API 密钥吗？"
+
+#: apiKeys.noKeys
+msgid "apiKeys.noKeys"
+msgstr "暂无 API 密钥"
+
+#: apiKeys.copyWarning
+msgid "apiKeys.copyWarning"
+msgstr "请立即复制此密钥，之后将无法再次查看。"
+
+#: apiKeys.copied
+msgid "apiKeys.copied"
+msgstr "已复制到剪贴板"
+
+#: general.search
+msgid "general.search"
+msgstr "搜索"
+
+#: general.previous
+msgid "general.previous"
+msgstr "上一页"
+
+#: general.next
+msgid "general.next"
+msgstr "下一页"
+
+#: general.done
+msgid "general.done"
+msgstr "完成"
+
+#: general.refresh
+msgid "general.refresh"
+msgstr "刷新"
+
+#: admin.users.title
+msgid "admin.users.title"
+msgstr "用户管理"
+
+#: admin.users.description
+msgid "admin.users.description"
+msgstr "查看和管理平台用户"
+
+#: admin.users.searchPlaceholder
+msgid "admin.users.searchPlaceholder"
+msgstr "按名称或邮箱搜索..."
+
+#: admin.users.empty
+msgid "admin.users.empty"
+msgstr "未找到用户"
+
+#: admin.users.created
+msgid "admin.users.created"
+msgstr "创建时间"
+
+#: admin.users.lastLogin
+msgid "admin.users.lastLogin"
+msgstr "上次登录"
+
+#: admin.users.impersonate
+msgid "admin.users.impersonate"
+msgstr "模拟用户"
+
+#: admin.users.updated
+msgid "admin.users.updated"
+msgstr "已更新"
+
+#: admin.users.makeAdmin
+msgid "admin.users.makeAdmin"
+msgstr "设为管理员"
+
+#: admin.users.removeAdmin
+msgid "admin.users.removeAdmin"
+msgstr "移除管理员"
+
+#: admin.users.makeSupport
+msgid "admin.users.makeSupport"
+msgstr "设为支持"
+
+#: admin.users.removeSupport
+msgid "admin.users.removeSupport"
+msgstr "移除支持"
+
+#: admin.users.makeAuditor
+msgid "admin.users.makeAuditor"
+msgstr "设为审计员"
+
+#: admin.users.removeAuditor
+msgid "admin.users.removeAuditor"
+msgstr "移除审计员"
+
+#: admin.users.cancel
+msgid "admin.users.cancel"
+msgstr "取消"
+
+#: admin.users.confirm
+msgid "admin.users.confirm"
+msgstr "删除"
+
+#: admin.users.delete
+msgid "admin.users.delete"
+msgstr "删除"
+
+#: admin.users.deleteConfirmMessage
+msgid "admin.users.deleteConfirmMessage"
+msgstr "您确定要删除此用户吗？此操作无法撤销。"
+
+#: admin.users.deleteConfirmTitle
+msgid "admin.users.deleteConfirmTitle"
+msgstr "删除用户"
+
+#: admin.users.impersonateConfirmMessage
+msgid "admin.users.impersonateConfirmMessage"
+msgstr "您即将模拟此用户。所有操作都将被记录以供审计。"
+
+#: admin.users.impersonateConfirmTitle
+msgid "admin.users.impersonateConfirmTitle"
+msgstr "模拟用户"
+
+#: admin.users.impersonateReasonLabel
+msgid "admin.users.impersonateReasonLabel"
+msgstr "模拟原因"
+
+#: admin.users.impersonateReasonPlaceholder
+msgid "admin.users.impersonateReasonPlaceholder"
+msgstr "例如，调查支持工单 #1234"
+
+#: admin.logs.title
+msgid "admin.logs.title"
+msgstr "服务器日志"
+
+#: admin.logs.description
+msgid "admin.logs.description"
+msgstr "查看和实时流式传输服务器日志"
+
+#: admin.logs.buffer_status
+msgid "admin.logs.buffer_status"
+msgstr "缓冲区中 {size} / {capacity} 条目"
+
+#: admin.logs.start_stream
+msgid "admin.logs.start_stream"
+msgstr "开始流式传输"
+
+#: admin.logs.stop_stream
+msgid "admin.logs.stop_stream"
+msgstr "停止流式传输"
+
+#: admin.logs.clear
+msgid "admin.logs.clear"
+msgstr "清除"
+
+#: admin.logs.level
+msgid "admin.logs.level"
+msgstr "级别"
+
+#: admin.logs.target
+msgid "admin.logs.target"
+msgstr "目标"
+
+#: admin.logs.auto_scroll
+msgid "admin.logs.auto_scroll"
+msgstr "自动滚动"
+
+#: admin.logs.no_logs
+msgid "admin.logs.no_logs"
+msgstr "没有日志条目"
+
+#: admin.logs.no_matches
+msgid "admin.logs.no_matches"
+msgstr "没有日志匹配当前筛选条件"
+
+#: admin.logs.streaming
+msgid "admin.logs.streaming"
+msgstr "实时"
+
+#: admin.logs.stream_error
+msgid "admin.logs.stream_error"
+msgstr "日志流已断开"
+
+#: admin.logs.search_placeholder
+msgid "admin.logs.search_placeholder"
+msgstr "搜索日志..."
+
+#: admin.logs.show_all
+msgid "admin.logs.show_all"
+msgstr "所有级别"
+
+#: admin.logs.errors_only
+msgid "admin.logs.errors_only"
+msgstr "仅错误"
+
+#: admin.logs.showing_count
+msgid "admin.logs.showing_count"
+msgstr "显示 {shown} / {total} 条日志"
+
+#: admin.dashboard.view_all_logs
+msgid "admin.dashboard.view_all_logs"
+msgstr "查看所有日志 →"
+#: admin.users.you
+msgid "admin.users.you"
+msgstr "(您)"
+
+#: admin.users.makeAdmin
+msgid "admin.users.makeAdmin"
+msgstr "设为管理员"
+
+#: admin.users.removeAdmin
+msgid "admin.users.removeAdmin"
+msgstr "移除管理员"
+
+#: admin.impersonation.banner
+msgid "admin.impersonation.banner"
+msgstr "管理员 {admin} 正在模拟 {user}"
+
+#: admin.impersonation.stop
+msgid "admin.impersonation.stop"
+msgstr "停止模拟"
+
+#: nav.weavers
+msgid "nav.weavers"
+msgstr "织机"
+
+#: weavers.title
+msgid "weavers.title"
+msgstr "织机"
+
+#: weavers.subtitle
+msgid "weavers.subtitle"
+msgstr "管理临时开发环境"
+
+#: weavers.new
+msgid "weavers.new"
+msgstr "新建 Weaver"
+
+#: weavers.description
+msgid "weavers.description"
+msgstr "管理临时开发环境"
+
+#: weavers.create
+msgid "weavers.create"
+msgstr "创建织机"
+
+#: weavers.createFirst
+msgid "weavers.createFirst"
+msgstr "创建您的第一个织机"
+
+#: weavers.createTitle
+msgid "weavers.createTitle"
+msgstr "创建新织机"
+
+#: weavers.empty
+msgid "weavers.empty"
+msgstr "没有运行中的织机"
+
+#: weavers.delete
+msgid "weavers.delete"
+msgstr "删除"
+
+#: weavers.deleteConfirm
+msgid "weavers.deleteConfirm"
+msgstr "确定要删除此织机吗？"
+
+#: weavers.image
+msgid "weavers.image"
+msgstr "镜像"
+
+#: weavers.imageName
+msgid "weavers.imageName"
+msgstr "容器镜像"
+
+#: weavers.organization
+msgid "weavers.organization"
+msgstr "组织"
+
+#: weavers.created
+msgid "weavers.created"
+msgstr "创建时间"
+
+#: weavers.age
+msgid "weavers.age"
+msgstr "运行时长"
+
+#: weavers.lifetime
+msgid "weavers.lifetime"
+msgstr "生命周期"
+
+#: weavers.lifetimeLabel
+msgid "weavers.lifetimeLabel"
+msgstr "生命周期 (TTL)"
+
+#: weavers.workdir
+msgid "weavers.workdir"
+msgstr "工作目录"
+
+#: weavers.hour
+msgid "weavers.hour"
+msgstr "小时"
+
+#: weavers.hours
+msgid "weavers.hours"
+msgstr "小时"
+
+#: weavers.attach
+msgid "weavers.attach"
+msgstr "连接"
+
+#: weavers.backToList
+msgid "weavers.backToList"
+msgstr "返回织机列表"
+
+#: weavers.notFound
+msgid "weavers.notFound"
+msgstr "未找到织机"
+
+#: weavers.logs
+msgid "weavers.logs"
+msgstr "日志"
+
+#: weavers.logsTitle
+msgid "weavers.logsTitle"
+msgstr "织机日志"
+
+#: weavers.logsConnecting
+msgid "weavers.logsConnecting"
+msgstr "正在连接日志流..."
+
+#: weavers.logsNoData
+msgid "weavers.logsNoData"
+msgstr "暂无日志"
+
+#: weavers.logsError
+msgid "weavers.logsError"
+msgstr "连接日志流失败"
+
+#: weavers.logsClosed
+msgid "weavers.logsClosed"
+msgstr "日志流已关闭"
+
+#: weavers.creatingTitle
+msgid "weavers.creatingTitle"
+msgstr "正在创建织机"
+
+#: weavers.creatingProgress
+msgid "weavers.creatingProgress"
+msgstr "正在配置您的织机环境..."
+
+#: weavers.creatingWait
+msgid "weavers.creatingWait"
+msgstr "等待织机就绪。您将被自动重定向。"
+
+#: weavers.createFailed
+msgid "weavers.createFailed"
+msgstr "创建织机失败"
+
+#: weavers.createTimeout
+msgid "weavers.createTimeout"
+msgstr "创建织机超时"
+
+#: weavers.terminal.connected
+msgid "weavers.terminal.connected"
+msgstr "已连接"
+
+#: weavers.terminal.connecting
+msgid "weavers.terminal.connecting"
+msgstr "连接中..."
+
+#: weavers.terminal.disconnected
+msgid "weavers.terminal.disconnected"
+msgstr "已断开"
+
+#: weavers.terminal.error
+msgid "weavers.terminal.error"
+msgstr "连接错误"
+
+#: weavers.terminal.reconnect
+msgid "weavers.terminal.reconnect"
+msgstr "重新连接"
+
+#: weavers.terminal.pending
+msgid "weavers.terminal.pending"
+msgstr "织机正在启动..."
+
+#: weavers.terminal.pendingHint
+msgid "weavers.terminal.pendingHint"
+msgstr "织机运行后终端将可用"
+
+#: weavers.terminal.notRunning
+msgid "weavers.terminal.notRunning"
+msgstr "织机未运行 (状态: {status})"
+
+#: client.repos.list.title
+msgid "client.repos.list.title"
+msgstr "仓库"
+
+#: client.repos.list.new
+msgid "client.repos.list.new"
+msgstr "新建仓库"
+
+#: client.repos.list.search_placeholder
+msgid "client.repos.list.search_placeholder"
+msgstr "搜索仓库..."
+
+#: client.repos.list.try_again
+msgid "client.repos.list.try_again"
+msgstr "重试"
+
+#: client.repos.list.no_match
+msgid "client.repos.list.no_match"
+msgstr "没有匹配的仓库"
+
+#: client.repos.list.empty
+msgid "client.repos.list.empty"
+msgstr "暂无仓库"
+
+#: client.repos.list.create_first
+msgid "client.repos.list.create_first"
+msgstr "创建你的第一个仓库"
+
+#: client.repos.list.default_branch
+msgid "client.repos.list.default_branch"
+msgstr "默认分支："
+
+#: client.repos.list.updated
+msgid "client.repos.list.updated"
+msgstr "更新于"
+
+#: admin.anthropic.title
+msgid "admin.anthropic.title"
+msgstr "Claude Max 账户"
+
+#: admin.anthropic.add_account
+msgid "admin.anthropic.add_account"
+msgstr "添加账户"
+
+#: admin.anthropic.remove
+msgid "admin.anthropic.remove"
+msgstr "删除"
+
+#: admin.anthropic.remove_confirm
+msgid "admin.anthropic.remove_confirm"
+msgstr "确定要从池中移除此账户吗？"
+
+#: admin.anthropic.status.available
+msgid "admin.anthropic.status.available"
+msgstr "可用"
+
+#: admin.anthropic.status.cooling_down
+msgid "admin.anthropic.status.cooling_down"
+msgstr "冷却中"
+
+#: admin.anthropic.status.disabled
+msgid "admin.anthropic.status.disabled"
+msgstr "已禁用"
+
+#: admin.anthropic.cooldown_remaining
+msgid "admin.anthropic.cooldown_remaining"
+msgstr "剩余 {time}"
+
+#: admin.anthropic.expires_at
+msgid "admin.anthropic.expires_at"
+msgstr "令牌过期时间: {time}"
+
+#: admin.anthropic.no_accounts
+msgid "admin.anthropic.no_accounts"
+msgstr "未配置账户。添加 Claude Max 账户以开始使用。"
+
+#: admin.anthropic.not_configured
+msgid "admin.anthropic.not_configured"
+msgstr "此服务器未配置 Anthropic OAuth 池。"
+
+#: admin.anthropic.account_added
+msgid "admin.anthropic.account_added"
+msgstr "账户 {id} 已成功添加"
+
+#: admin.anthropic.enter_code_title
+msgid "admin.anthropic.enter_code_title"
+msgstr "输入授权码"
+
+#: admin.anthropic.enter_code_description
+msgid "admin.anthropic.enter_code_description"
+msgstr "已打开新的浏览器标签页以进行 Claude 授权。授权后，请从 Anthropic 页面复制授权码并粘贴到下方。"
+
+#: admin.anthropic.authorization_code
+msgid "admin.anthropic.authorization_code"
+msgstr "授权码"
+
+#: admin.anthropic.code_placeholder
+msgid "admin.anthropic.code_placeholder"
+msgstr "在此粘贴来自 Anthropic 的授权码"
+
+#: admin.anthropic.submit_code
+msgid "admin.anthropic.submit_code"
+msgstr "添加账户"
+
+#: admin.dashboard.title
+msgid "admin.dashboard.title"
+msgstr "管理仪表板"
+
+#: admin.dashboard.description
+msgid "admin.dashboard.description"
+msgstr "服务器管理与监控"
+
+#: admin.dashboard.sections
+msgid "admin.dashboard.sections"
+msgstr "管理"
+
+#: admin.dashboard.anthropic_description
+msgid "admin.dashboard.anthropic_description"
+msgstr "管理 Claude Max OAuth 订阅池"
+
+#: admin.health.title
+msgid "admin.health.title"
+msgstr "服务器健康状态"
+
+#: admin.health.overall
+msgid "admin.health.overall"
+msgstr "总体状态"
+
+#: admin.health.version
+msgid "admin.health.version"
+msgstr "版本"
+
+#: admin.health.response_time
+msgid "admin.health.response_time"
+msgstr "响应时间"
+
+#: admin.health.configured
+msgid "admin.health.configured"
+msgstr "已配置"
+
+#: admin.health.not_configured
+msgid "admin.health.not_configured"
+msgstr "未配置"
+
+#: admin.health.status.healthy
+msgid "admin.health.status.healthy"
+msgstr "正常"
+
+#: admin.health.status.degraded
+msgid "admin.health.status.degraded"
+msgstr "降级"
+
+#: admin.health.status.unhealthy
+msgid "admin.health.status.unhealthy"
+msgstr "异常"
+
+#: admin.health.status.unknown
+msgid "admin.health.status.unknown"
+msgstr "未知"
+
+#: admin.health.database
+msgid "admin.health.database"
+msgstr "数据库"
+
+#: admin.health.bin_dir
+msgid "admin.health.bin_dir"
+msgstr "二进制目录"
+
+#: admin.health.llm_providers
+msgid "admin.health.llm_providers"
+msgstr "LLM 提供商"
+
+#: admin.health.google_cse
+msgid "admin.health.google_cse"
+msgstr "Google CSE"
+
+#: admin.health.serper
+msgid "admin.health.serper"
+msgstr "Serper"
+
+#: admin.health.github_app
+msgid "admin.health.github_app"
+msgstr "GitHub App"
+
+#: admin.health.kubernetes
+msgid "admin.health.kubernetes"
+msgstr "Kubernetes"
+
+#: admin.health.smtp
+msgid "admin.health.smtp"
+msgstr "SMTP"
+
+#: admin.health.geoip
+msgid "admin.health.geoip"
+msgstr "GeoIP"
+
+#: admin.health.jobs
+msgid "admin.health.jobs"
+msgstr "后台任务"
+
+#: admin.health.auth_providers
+msgid "admin.health.auth_providers"
+msgstr "认证提供商"
+
+#: admin.health.scim
+msgid "admin.health.scim"
+msgstr "SCIM"
+
+#: admin.health.secrets
+msgid "admin.health.secrets"
+msgstr "Secrets"
+
+#: admin.health.whatsapp
+msgid "admin.health.whatsapp"
+msgstr "WhatsApp"
+
+#: jobs.title
+msgid "jobs.title"
+msgstr "后台作业"
+
+#: jobs.description
+msgid "jobs.description"
+msgstr "监控和管理计划任务"
+
+#: jobs.loading
+msgid "jobs.loading"
+msgstr "正在加载作业..."
+
+#: jobs.runNow
+msgid "jobs.runNow"
+msgstr "立即运行"
+
+#: jobs.running
+msgid "jobs.running"
+msgstr "运行中..."
+
+#: jobs.history
+msgid "jobs.history"
+msgstr "历史"
+
+#: jobs.hideHistory
+msgid "jobs.hideHistory"
+msgstr "隐藏历史"
+
+#: jobs.viewHistory
+msgid "jobs.viewHistory"
+msgstr "查看历史"
+
+#: jobs.noJobs
+msgid "jobs.noJobs"
+msgstr "未配置后台作业"
+
+#: jobs.never
+msgid "jobs.never"
+msgstr "从未运行"
+
+#: jobs.lastRun
+msgid "jobs.lastRun"
+msgstr "上次运行"
+
+#: jobs.duration
+msgid "jobs.duration"
+msgstr "耗时"
+
+#: jobs.interval
+msgid "jobs.interval"
+msgstr "间隔"
+
+#: jobs.type
+msgid "jobs.type"
+msgstr "类型"
+
+#: jobs.failures
+msgid "jobs.failures"
+msgstr "连续失败 {count} 次"
+
+#: jobs.status.healthy
+msgid "jobs.status.healthy"
+msgstr "正常"
+
+#: jobs.status.degraded
+msgid "jobs.status.degraded"
+msgstr "降级"
+
+#: jobs.status.unhealthy
+msgid "jobs.status.unhealthy"
+msgstr "异常"
+
+#: jobs.status.succeeded
+msgid "jobs.status.succeeded"
+msgstr "成功"
+
+#: jobs.status.failed
+msgid "jobs.status.failed"
+msgstr "失败"
+
+#: jobs.status.running
+msgid "jobs.status.running"
+msgstr "运行中"
+
+#: jobs.status.cancelled
+msgid "jobs.status.cancelled"
+msgstr "已取消"
+
+#: jobs.trigger.schedule
+msgid "jobs.trigger.schedule"
+msgstr "定时"
+
+#: jobs.trigger.manual
+msgid "jobs.trigger.manual"
+msgstr "手动"
+
+#: jobs.trigger.retry
+msgid "jobs.trigger.retry"
+msgstr "重试"
+
+#: jobs.history.title
+msgid "jobs.history.title"
+msgstr "运行历史"
+
+#: jobs.history.status
+msgid "jobs.history.status"
+msgstr "状态"
+
+#: jobs.history.started
+msgid "jobs.history.started"
+msgstr "开始时间"
+
+#: jobs.history.duration
+msgid "jobs.history.duration"
+msgstr "耗时"
+
+#: jobs.history.trigger
+msgid "jobs.history.trigger"
+msgstr "触发方式"
+
+#: jobs.history.details
+msgid "jobs.history.details"
+msgstr "详情"
+
+#: jobs.history.loadMore
+msgid "jobs.history.loadMore"
+msgstr "加载更多"
+
+#: jobs.history.noRuns
+msgid "jobs.history.noRuns"
+msgstr "暂无运行历史"
+
+#: jobs.time.justNow
+msgid "jobs.time.justNow"
+msgstr "刚刚"
+
+#: jobs.time.minutesAgo
+msgid "jobs.time.minutesAgo"
+msgstr "{count} 分钟前"
+
+#: jobs.time.hoursAgo
+msgid "jobs.time.hoursAgo"
+msgstr "{count} 小时前"
+
+#: jobs.time.daysAgo
+msgid "jobs.time.daysAgo"
+msgstr "{count} 天前"
+
+#: client.repos.list.title
+msgid "client.repos.list.title"
+msgstr "仓库"
+
+#: client.repos.list.new
+msgid "client.repos.list.new"
+msgstr "新建仓库"
+
+#: client.repos.list.search_placeholder
+msgid "client.repos.list.search_placeholder"
+msgstr "搜索仓库..."
+
+#: client.repos.list.try_again
+msgid "client.repos.list.try_again"
+msgstr "重试"
+
+#: client.repos.list.no_match
+msgid "client.repos.list.no_match"
+msgstr "没有匹配的仓库"
+
+#: client.repos.list.empty
+msgid "client.repos.list.empty"
+msgstr "暂无仓库"
+
+#: client.repos.list.create_first
+msgid "client.repos.list.create_first"
+msgstr "创建您的第一个仓库"
+
+#: client.repos.list.default_branch
+msgid "client.repos.list.default_branch"
+msgstr "默认分支："
+
+#: client.repos.list.updated
+msgid "client.repos.list.updated"
+msgstr "更新于"
+
+#: client.repos.create.title
+msgid "client.repos.create.title"
+msgstr "创建仓库"
+
+#: client.repos.create.name
+msgid "client.repos.create.name"
+msgstr "仓库名称"
+
+#: client.repos.create.name_placeholder
+msgid "client.repos.create.name_placeholder"
+msgstr "我的精彩项目"
+
+#: client.repos.create.visibility
+msgid "client.repos.create.visibility"
+msgstr "可见性"
+
+#: client.repos.create.private
+msgid "client.repos.create.private"
+msgstr "私有"
+
+#: client.repos.create.public
+msgid "client.repos.create.public"
+msgstr "公开"
+
+#: client.repos.create.submit
+msgid "client.repos.create.submit"
+msgstr "创建仓库"
+
+#: client.repos.create.cancel
+msgid "client.repos.create.cancel"
+msgstr "取消"
+
+#: client.repos.create.error
+msgid "client.repos.create.error"
+msgstr "创建仓库失败"
+
+#: client.repos.create.name_invalid
+msgid "client.repos.create.name_invalid"
+msgstr "仓库名称无效。请使用字母、数字、点、连字符或下划线。"
+
+#: client.repos.header.clone
+msgid "client.repos.header.clone"
+msgstr "克隆"
+
+#: client.repos.header.clone_https
+msgid "client.repos.header.clone_https"
+msgstr "使用 HTTPS 克隆"
+
+#: client.repos.header.copied
+msgid "client.repos.header.copied"
+msgstr "已复制！"
+
+#: client.repos.header.copy
+msgid "client.repos.header.copy"
+msgstr "复制"
+
+#: client.repos.header.default_branch
+msgid "client.repos.header.default_branch"
+msgstr "默认分支"
+
+#: client.repos.nav.code
+msgid "client.repos.nav.code"
+msgstr "代码"
+
+#: client.repos.nav.commits
+msgid "client.repos.nav.commits"
+msgstr "提交"
+
+#: client.repos.nav.branches
+msgid "client.repos.nav.branches"
+msgstr "分支"
+
+#: client.repos.nav.settings
+msgid "client.repos.nav.settings"
+msgstr "设置"
+
+#: client.repos.tree.empty
+msgid "client.repos.tree.empty"
+msgstr "此目录为空"
+
+#: client.repos.blob.lines
+msgid "client.repos.blob.lines"
+msgstr "行"
+
+#: client.repos.blob.bytes
+msgid "client.repos.blob.bytes"
+msgstr "字节"
+
+#: client.repos.blob.blame
+msgid "client.repos.blob.blame"
+msgstr "追溯"
+
+#: client.repos.blob.copy
+msgid "client.repos.blob.copy"
+msgstr "复制"
+
+#: client.repos.blob.copied
+msgid "client.repos.blob.copied"
+msgstr "已复制！"
+
+#: client.repos.blob.raw
+msgid "client.repos.blob.raw"
+msgstr "原始文件"
+
+#: client.repos.blob.binary_not_shown
+msgid "client.repos.blob.binary_not_shown"
+msgstr "无法显示二进制文件"
+
+#: client.repos.weaver.open
+msgid "client.repos.weaver.open"
+msgstr "在 Weaver 中打开"
+
+#: client.repos.weaver.create_failed
+msgid "client.repos.weaver.create_failed"
+msgstr "创建 Weaver 失败"
+
+#: client.repos.weaver.no_org
+msgid "client.repos.weaver.no_org"
+msgstr "未选择组织"
+
+#: client.repos.branch.find
+msgid "client.repos.branch.find"
+msgstr "搜索分支..."
+
+#: client.repos.branch.not_found
+msgid "client.repos.branch.not_found"
+msgstr "未找到分支"
+
+#: client.repos.branch.default
+msgid "client.repos.branch.default"
+msgstr "默认"
+
+#: client.repos.branches.title
+msgid "client.repos.branches.title"
+msgstr "分支"
+
+#: client.repos.branches.default
+msgid "client.repos.branches.default"
+msgstr "默认"
+
+#: client.repos.branches.empty
+msgid "client.repos.branches.empty"
+msgstr "未找到分支"
+
+#: client.repos.branches.compare
+msgid "client.repos.branches.compare"
+msgstr "比较"
+
+#: client.repos.commits.minutes_ago
+msgid "client.repos.commits.minutes_ago"
+msgstr "{count} 分钟前"
+
+#: client.repos.commits.hours_ago
+msgid "client.repos.commits.hours_ago"
+msgstr "{count} 小时前"
+
+#: client.repos.commits.days_ago
+msgid "client.repos.commits.days_ago"
+msgstr "{count} 天前"
+
+#: client.repos.commits.committed
+msgid "client.repos.commits.committed"
+msgstr "已提交"
+
+#: client.repos.commits.copy_sha
+msgid "client.repos.commits.copy_sha"
+msgstr "复制 SHA"
+
+#: client.repos.commits.empty
+msgid "client.repos.commits.empty"
+msgstr "没有提交记录"
+
+#: client.repos.diff.parent
+msgid "client.repos.diff.parent"
+msgstr "父提交"
+
+#: client.repos.diff.parents
+msgid "client.repos.diff.parents"
+msgstr "父提交"
+
+#: client.repos.diff.showing
+msgid "client.repos.diff.showing"
+msgstr "显示"
+
+#: client.repos.diff.changed_file
+msgid "client.repos.diff.changed_file"
+msgstr "个文件已更改"
+
+#: client.repos.diff.changed_files
+msgid "client.repos.diff.changed_files"
+msgstr "个文件已更改"
+
+#: client.repos.blame.lines
+msgid "client.repos.blame.lines"
+msgstr "行"
+
+#: client.repos.blame.today
+msgid "client.repos.blame.today"
+msgstr "今天"
+
+#: client.repos.blame.days_ago
+msgid "client.repos.blame.days_ago"
+msgstr "{count}天前"
+
+#: client.repos.blame.months_ago
+msgid "client.repos.blame.months_ago"
+msgstr "{count}个月前"
+
+#: client.repos.blame.years_ago
+msgid "client.repos.blame.years_ago"
+msgstr "{count}年前"
+
+#: client.repos.blame.empty
+msgid "client.repos.blame.empty"
+msgstr "没有追溯信息"
+
+#: client.repos.compare.ahead
+msgid "client.repos.compare.ahead"
+msgstr "领先"
+
+#: client.repos.compare.behind
+msgid "client.repos.compare.behind"
+msgstr "落后"
+
+#: client.repos.compare.commit
+msgid "client.repos.compare.commit"
+msgstr "个提交"
+
+#: client.repos.compare.commits
+msgid "client.repos.compare.commits"
+msgstr "个提交"
+
+#: client.repos.compare.commits_heading
+msgid "client.repos.compare.commits_heading"
+msgstr "提交"
+
+#: client.repos.compare.identical
+msgid "client.repos.compare.identical"
+msgstr "这些分支是相同的"
+
+#: client.repos.settings.general
+msgid "client.repos.settings.general"
+msgstr "常规"
+
+#: client.repos.settings.name
+msgid "client.repos.settings.name"
+msgstr "仓库名称"
+
+#: client.repos.settings.visibility
+msgid "client.repos.settings.visibility"
+msgstr "可见性"
+
+#: client.repos.settings.private
+msgid "client.repos.settings.private"
+msgstr "私有"
+
+#: client.repos.settings.public
+msgid "client.repos.settings.public"
+msgstr "公开"
+
+#: client.repos.settings.visibility_private_desc
+msgid "client.repos.settings.visibility_private_desc"
+msgstr "只有您和协作者可以访问此仓库"
+
+#: client.repos.settings.visibility_public_desc
+msgid "client.repos.settings.visibility_public_desc"
+msgstr "任何人都可以克隆此仓库"
+
+#: client.repos.settings.default_branch
+msgid "client.repos.settings.default_branch"
+msgstr "默认分支"
+
+#: client.repos.settings.clone_url
+msgid "client.repos.settings.clone_url"
+msgstr "克隆 URL"
+
+#: client.repos.settings.copy
+msgid "client.repos.settings.copy"
+msgstr "复制"
+
+#: client.repos.settings.save
+msgid "client.repos.settings.save"
+msgstr "保存更改"
+
+#: client.repos.settings.cancel
+msgid "client.repos.settings.cancel"
+msgstr "取消"
+
+#: client.repos.settings.danger_zone
+msgid "client.repos.settings.danger_zone"
+msgstr "危险区域"
+
+#: client.repos.settings.delete_title
+msgid "client.repos.settings.delete_title"
+msgstr "删除仓库"
+
+#: client.repos.settings.delete_warning
+msgid "client.repos.settings.delete_warning"
+msgstr "此操作无法撤销。这将永久删除仓库及其所有内容。"
+
+#: client.repos.settings.delete_button
+msgid "client.repos.settings.delete_button"
+msgstr "删除此仓库"
+
+#: client.repos.settings.delete_confirm
+msgid "client.repos.settings.delete_confirm"
+msgstr "输入仓库名称以确认："
+
+#: client.repos.settings.delete_confirm_button
+msgid "client.repos.settings.delete_confirm_button"
+msgstr "我了解，删除此仓库"
+
+
+#: client.repos.settings.delete_confirm_desc
+msgid "client.repos.settings.delete_confirm_desc"
+msgstr ""
+
+#: client.repos.settings.delete_type_name
+msgid "client.repos.settings.delete_type_name"
+msgstr ""
+
+#: client.repos.settings.delete_error
+msgid "client.repos.settings.delete_error"
+msgstr ""
+
+#: thread.noThreadsFound
+msgid "thread.noThreadsFound"
+msgstr "未找到会话"
+
+#: thread.time.justNow
+msgid "thread.time.justNow"
+msgstr "刚刚"
+
+#: thread.time.minutesAgo
+msgid "thread.time.minutesAgo"
+msgstr "{count}分钟前"
+
+#: thread.time.hoursAgo
+msgid "thread.time.hoursAgo"
+msgstr "{count}小时前"
+
+#: thread.time.daysAgo
+msgid "thread.time.daysAgo"
+msgstr "{count}天前"
+
+#: thread.messageCount
+msgid "thread.messageCount"
+msgstr "{count}条消息"
+
+#: thread.selectToView
+msgid "thread.selectToView"
+msgstr "选择会话以查看"
+
+#: thread.createToStart
+msgid "thread.createToStart"
+msgstr "或创建新会话开始"
+
+#: error.goHome
+msgid "error.goHome"
+msgstr "返回首页"
+
+#: support.access.requested
+msgid "support.access.requested"
+msgstr "已请求访问"
+
+#: support.access.requestSent
+msgid "support.access.requestSent"
+msgstr "您的请求已发送给会话所有者。获得批准后，您将能够查看此会话。"
+
+#: support.access.requestId
+msgid "support.access.requestId"
+msgstr "请求 ID："
+
+#: support.access.required
+msgid "support.access.required"
+msgstr "需要访问权限"
+
+#: support.access.notShared
+msgid "support.access.notShared"
+msgstr "此会话未与支持团队共享。作为支持团队成员，您可以向会话所有者请求访问权限。"
+
+#: support.access.requesting
+msgid "support.access.requesting"
+msgstr "请求中..."
+
+#: support.access.requestButton
+msgid "support.access.requestButton"
+msgstr "请求访问"
+
+#: support.access.note
+msgid "support.access.note"
+msgstr "会话所有者将收到通知，并可以批准或拒绝您的请求。如果获得批准，访问权限将持续31天。"
+
+#: support.access.errorAlreadyRequested
+msgid "support.access.errorAlreadyRequested"
+msgstr "已请求访问此会话。请等待所有者批准。"
+
+#: support.access.errorAlreadyActive
+msgid "support.access.errorAlreadyActive"
+msgstr "您已拥有此会话的访问权限。请尝试刷新页面。"
+
+#: support.access.errorFailed
+msgid "support.access.errorFailed"
+msgstr "请求访问失败。请重试。"
+
+#: support.access.errorUnexpected
+msgid "support.access.errorUnexpected"
+msgstr "发生意外错误。"
+
+#: state.idle
+msgid "state.idle"
+msgstr "空闲"
+
+#: state.weaving
+msgid "state.weaving"
+msgstr "编织中"
+
+#: state.threading
+msgid "state.threading"
+msgstr "穿线中"
+
+#: state.shuttlePass
+msgid "state.shuttlePass"
+msgstr "梭子传递"
+
+#: state.brokenThread
+msgid "state.brokenThread"
+msgstr "线断（重试 {retries}）"
+
+#: tool.showError
+msgid "tool.showError"
+msgstr "显示错误"
+
+#: tool.showOutput
+msgid "tool.showOutput"
+msgstr "显示输出"
+
+#: docs.title
+msgid "docs.title"
+msgstr "Loom 文档"
+
+#: docs.redirecting
+msgid "docs.redirecting"
+msgstr "正在跳转到教程..."
+
+#: docs.tutorials.title
+msgid "docs.tutorials.title"
+msgstr "教程"
+
+#: docs.tutorials.description
+msgid "docs.tutorials.description"
+msgstr "以学习为导向的课程，带您逐步完成项目。"
+
+#: docs.tutorials.empty
+msgid "docs.tutorials.empty"
+msgstr "暂无教程。"
+
+#: docs.explanation.title
+msgid "docs.explanation.title"
+msgstr "解释"
+
+#: docs.explanation.description
+msgid "docs.explanation.description"
+msgstr "解释概念、决策和全局的讨论和背景材料。"
+
+#: docs.explanation.empty
+msgid "docs.explanation.empty"
+msgstr "暂无解释。"
+
+#: docs.reference.title
+msgid "docs.reference.title"
+msgstr "参考"
+
+#: docs.reference.description
+msgid "docs.reference.description"
+msgstr "包含 API、配置和内部结构详细信息的技术参考资料。"
+
+#: docs.reference.empty
+msgid "docs.reference.empty"
+msgstr "暂无参考文档。"
+
+#: docs.howTo.title
+msgid "docs.howTo.title"
+msgstr "操作指南"
+
+#: docs.howTo.description
+msgid "docs.howTo.description"
+msgstr "以任务为导向的指南，展示如何实现特定目标。"
+
+#: docs.howTo.empty
+msgid "docs.howTo.empty"
+msgstr "暂无操作指南。"
+
+#: admin.auditLogs.title
+msgid "admin.auditLogs.title"
+msgstr "安全审计日志"
+
+#: admin.auditLogs.loading
+msgid "admin.auditLogs.loading"
+msgstr "正在加载审计日志..."
+
+#: admin.auditLogs.empty
+msgid "admin.auditLogs.empty"
+msgstr "未找到审计日志。"
+
+#: admin.auditLogs.showing
+msgid "admin.auditLogs.showing"
+msgstr "显示 {start} - {end}，共 {total} 条"
+
+#: admin.auditLogs.via
+msgid "admin.auditLogs.via"
+msgstr "通过 {userId}"
+
+#: admin.auditLogs.event.all
+msgid "admin.auditLogs.event.all"
+msgstr "所有事件"
+
+#: admin.auditLogs.event.login
+msgid "admin.auditLogs.event.login"
+msgstr "登录"
+
+#: admin.auditLogs.event.logout
+msgid "admin.auditLogs.event.logout"
+msgstr "登出"
+
+#: admin.auditLogs.event.loginFailed
+msgid "admin.auditLogs.event.loginFailed"
+msgstr "登录失败"
+
+#: admin.auditLogs.event.accessDenied
+msgid "admin.auditLogs.event.accessDenied"
+msgstr "访问被拒绝"
+
+#: admin.auditLogs.event.sessionRevoked
+msgid "admin.auditLogs.event.sessionRevoked"
+msgstr "会话已撤销"
+
+#: admin.auditLogs.event.apiKeyCreated
+msgid "admin.auditLogs.event.apiKeyCreated"
+msgstr "API 密钥已创建"
+
+#: admin.auditLogs.event.apiKeyRevoked
+msgid "admin.auditLogs.event.apiKeyRevoked"
+msgstr "API 密钥已撤销"
+
+#: admin.auditLogs.event.orgCreated
+msgid "admin.auditLogs.event.orgCreated"
+msgstr "组织已创建"
+
+#: admin.auditLogs.event.memberAdded
+msgid "admin.auditLogs.event.memberAdded"
+msgstr "成员已添加"
+
+#: admin.auditLogs.event.memberRemoved
+msgid "admin.auditLogs.event.memberRemoved"
+msgstr "成员已移除"
+
+#: admin.auditLogs.event.impersonationStarted
+msgid "admin.auditLogs.event.impersonationStarted"
+msgstr "开始模拟身份"
+
+#: admin.auditLogs.event.impersonationEnded
+msgid "admin.auditLogs.event.impersonationEnded"
+msgstr "结束模拟身份"
+
+#: admin.auditLogs.column.timestamp
+msgid "admin.auditLogs.column.timestamp"
+msgstr "时间戳"
+
+#: admin.auditLogs.column.event
+msgid "admin.auditLogs.column.event"
+msgstr "事件"
+
+#: admin.auditLogs.column.actor
+msgid "admin.auditLogs.column.actor"
+msgstr "操作者"
+
+#: admin.auditLogs.column.resource
+msgid "admin.auditLogs.column.resource"
+msgstr "资源"
+
+#: admin.auditLogs.column.details
+msgid "admin.auditLogs.column.details"
+msgstr "详情"
+
+#: admin.anthropic.expired
+msgid "admin.anthropic.expired"
+msgstr "已过期"
+
+#: admin.anthropic.expiresInMinutes
+msgid "admin.anthropic.expiresInMinutes"
+msgstr "{count} 分钟后"
+
+#: admin.anthropic.expiresInHours
+msgid "admin.anthropic.expiresInHours"
+msgstr "{count} 小时后"
+
+#: admin.anthropic.expiresInDays
+msgid "admin.anthropic.expiresInDays"
+msgstr "{count} 天后"
+
+#: admin.anthropic.remaining
+msgid "admin.anthropic.remaining"
+msgstr "剩余"
+
+#: admin.anthropic.tokenExpires
+msgid "admin.anthropic.tokenExpires"
+msgstr "令牌过期时间:"
+
+#: admin.anthropic.summary.available
+msgid "admin.anthropic.summary.available"
+msgstr "可用"
+
+#: admin.anthropic.summary.cooling
+msgid "admin.anthropic.summary.cooling"
+msgstr "冷却中"
+
+#: admin.anthropic.summary.disabled
+msgid "admin.anthropic.summary.disabled"
+msgstr "已禁用"
+
+#: admin.anthropic.summary.total
+msgid "admin.anthropic.summary.total"
+msgstr "总计"
+
+#: client.repos.blame.title
+msgid "client.repos.blame.title"
+msgstr "Blame:"
+
+#: client.repos.blame.viewFile
+msgid "client.repos.blame.viewFile"
+msgstr "查看文件"
+
+#: client.repos.compare.title
+msgid "client.repos.compare.title"
+msgstr "比较"
+
+#: client.repos.compare.base
+msgid "client.repos.compare.base"
+msgstr "基准:"
+
+#: client.repos.compare.compare
+msgid "client.repos.compare.compare"
+msgstr "比较:"
+
+#: client.repos.commits.title
+msgid "client.repos.commits.title"
+msgstr "提交"
+
+#: client.repos.commits.count
+msgid "client.repos.commits.count"
+msgstr "次提交"
+
+#: client.repos.commits.newer
+msgid "client.repos.commits.newer"
+msgstr "较新"
+
+#: client.repos.commits.older
+msgid "client.repos.commits.older"
+msgstr "较旧"
+
+#: state.waiting
+msgid "state.waiting"
+msgstr "等待中"
+
+#: state.complete
+msgid "state.complete"
+msgstr "完成"
+
+#: tool.shuttleReady
+msgid "tool.shuttleReady"
+msgstr "Shuttle 就绪"
+
+#: tool.shuttlePasses
+msgid "tool.shuttlePasses"
+msgstr "Shuttle 通过"
+
+#: message.toolResult
+msgid "message.toolResult"
+msgstr "🔧 工具结果"
+
+#: weavers.terminal.connectionClosed
+msgid "weavers.terminal.connectionClosed"
+msgstr "连接已关闭:"
+
+#: weavers.terminal.unknownReason
+msgid "weavers.terminal.unknownReason"
+msgstr "未知原因"
+
+#: weavers.terminal.connectFailed
+msgid "weavers.terminal.connectFailed"
+msgstr "连接 Weaver 失败"
+
+#: docs.toc.title
+msgid "docs.toc.title"
+msgstr "本页内容"
+
+#: docs.breadcrumbs.docs
+msgid "docs.breadcrumbs.docs"
+msgstr "文档"
+
+#: docs.search.placeholder
+msgid "docs.search.placeholder"
+msgstr "搜索文档..."
+
+#: docs.search.placeholderFull
+msgid "docs.search.placeholderFull"
+msgstr "搜索文档..."
+
+#: docs.search.close
+msgid "docs.search.close"
+msgstr "关闭搜索"
+
+#: docs.search.category.tutorial
+msgid "docs.search.category.tutorial"
+msgstr "教程"
+
+#: docs.search.category.howTo
+msgid "docs.search.category.howTo"
+msgstr "操作指南"
+
+#: docs.search.category.reference
+msgid "docs.search.category.reference"
+msgstr "参考"
+
+#: docs.search.category.explanation
+msgid "docs.search.category.explanation"
+msgstr "解释"
+
+#: docs.search.noResults
+msgid "docs.search.noResults"
+msgstr "未找到结果:"
+
+#: docs.search.hint
+msgid "docs.search.hint"
+msgstr "输入以搜索文档"
+
+#: docs.search.key.navigate
+msgid "docs.search.key.navigate"
+msgstr "导航"
+
+#: docs.search.key.select
+msgid "docs.search.key.select"
+msgstr "选择"
+
+#: docs.search.key.close
+msgid "docs.search.key.close"
+msgstr "关闭"
+
+#: docs.callout.info
+msgid "docs.callout.info"
+msgstr "信息"
+
+#: docs.callout.tip
+msgid "docs.callout.tip"
+msgstr "提示"
+
+#: docs.callout.warning
+msgid "docs.callout.warning"
+msgstr "警告"
+
+#: docs.callout.danger
+msgid "docs.callout.danger"
+msgstr "危险"
+
+#: settings.sessions.loadError
+msgid "settings.sessions.loadError"
+msgstr "加载会话失败"
+
+#: settings.sessions.revokeError
+msgid "settings.sessions.revokeError"
+msgstr "撤销会话失败"
+
+#: jobs.loadError
+msgid "jobs.loadError"
+msgstr "加载作业失败"
+
+#: jobs.triggerError
+msgid "jobs.triggerError"
+msgstr "触发作业失败"
+
+#: general.unknownError
+msgid "general.unknownError"
+msgstr "未知错误"
+
+#: client.repos.list.loadError
+msgid "client.repos.list.loadError"
+msgstr "加载仓库失败"
+
+#: admin.health.fileCount
+msgid "admin.health.fileCount"
+msgstr "{count} 个文件"
+
+#: admin.audit.title
+msgid "admin.audit.title"
+msgstr "审计日志"
+
+#: admin.audit.description
+msgid "admin.audit.description"
+msgstr "查看安全审计日志"
+
+#: auth.login.redirecting
+msgid "auth.login.redirecting"
+msgstr "正在重定向..."
+
+#: org.title
+msgid "org.title"
+msgstr "组织"
+
+#: org.members.add
+msgid "org.members.add"
+msgstr "添加成员"
+
+#: org.members.addTitle
+msgid "org.members.addTitle"
+msgstr "添加成员"
+
+#: org.members.email
+msgid "org.members.email"
+msgstr "电子邮件地址"
+
+#: org.members.empty
+msgid "org.members.empty"
+msgstr "暂无成员"
+
+#: org.members.invite
+msgid "org.members.invite"
+msgstr "发送邀请"
+
+#: org.members.remove
+msgid "org.members.remove"
+msgstr "移除"
+
+#: org.members.removeConfirm
+msgid "org.members.removeConfirm"
+msgstr "确定要移除此成员吗？"
+
+#: org.roles.admin
+msgid "org.roles.admin"
+msgstr "管理员"
+
+#: org.roles.member
+msgid "org.roles.member"
+msgstr "成员"
+
+#: org.teams.create
+msgid "org.teams.create"
+msgstr "创建团队"
+
+#: org.teams.createTitle
+msgid "org.teams.createTitle"
+msgstr "创建新团队"
+
+#: org.teams.empty
+msgid "org.teams.empty"
+msgstr "暂无团队"
+
+#: org.teams.memberCount
+msgid "org.teams.memberCount"
+msgstr "成员"
+
+#: org.teams.name
+msgid "org.teams.name"
+msgstr "团队名称"
+
+#: org.teams.slug
+msgid "org.teams.slug"
+msgstr "URL 标识"
+
+#: org.apiKeys.create
+msgid "org.apiKeys.create"
+msgstr "创建 API 密钥"
+
+#: org.apiKeys.createTitle
+msgid "org.apiKeys.createTitle"
+msgstr "创建新的 API 密钥"
+
+#: org.apiKeys.created
+msgid "org.apiKeys.created"
+msgstr "API 密钥已创建"
+
+#: org.apiKeys.copyWarning
+msgid "org.apiKeys.copyWarning"
+msgstr "请立即复制此密钥。您将无法再次查看它。"
+
+#: org.apiKeys.empty
+msgid "org.apiKeys.empty"
+msgstr "暂无 API 密钥"
+
+#: org.apiKeys.lastUsed
+msgid "org.apiKeys.lastUsed"
+msgstr "最后使用"
+
+#: org.apiKeys.name
+msgid "org.apiKeys.name"
+msgstr "密钥名称"
+
+#: org.apiKeys.revoke
+msgid "org.apiKeys.revoke"
+msgstr "撤销"
+
+#: org.apiKeys.revokeConfirm
+msgid "org.apiKeys.revokeConfirm"
+msgstr "确定要撤销此 API 密钥吗？"
+
+#: org.apiKeys.scopes
+msgid "org.apiKeys.scopes"
+msgstr "权限范围"
+
+#: org.settings.name
+msgid "org.settings.name"
+msgstr "组织名称"
+
+#: org.settings.visibility
+msgid "org.settings.visibility"
+msgstr "可见性"
+
+#: org.settings.joinPolicy
+msgid "org.settings.joinPolicy"
+msgstr "加入策略"
+
+#: org.settings.saved
+msgid "org.settings.saved"
+msgstr "设置已保存"
+
+#: org.settings.dangerZone
+msgid "org.settings.dangerZone"
+msgstr "危险区域"
+
+#: org.settings.deleteWarning
+msgid "org.settings.deleteWarning"
+msgstr "一旦删除组织，将无法恢复。"
+
+#: org.settings.delete
+msgid "org.settings.delete"
+msgstr "删除组织"
+
+#: org.settings.deleteConfirm
+msgid "org.settings.deleteConfirm"
+msgstr "确定要删除此组织吗？此操作无法撤销。"
+
+#: org.visibility.public
+msgid "org.visibility.public"
+msgstr "公开"
+
+#: org.visibility.private
+msgid "org.visibility.private"
+msgstr "私有"
+
+#: org.joinPolicy.open
+msgid "org.joinPolicy.open"
+msgstr "开放"
+
+#: org.joinPolicy.request
+msgid "org.joinPolicy.request"
+msgstr "申请加入"
+
+#: org.joinPolicy.inviteOnly
+msgid "org.joinPolicy.inviteOnly"
+msgstr "仅限邀请"
+
+#: org.tabs.members
+msgid "org.tabs.members"
+msgstr "成员"
+
+#: org.tabs.teams
+msgid "org.tabs.teams"
+msgstr "团队"
+
+#: org.tabs.apiKeys
+msgid "org.tabs.apiKeys"
+msgstr "API 密钥"
+
+#: org.tabs.whatsapp
+msgid "org.tabs.whatsapp"
+msgstr "WhatsApp"
+
+#: org.tabs.settings
+msgid "org.tabs.settings"
+msgstr "设置"
+
+# ============================================================================
+# Kill Switches
+# ============================================================================
+
+#: killSwitch.title
+msgid "killSwitch.title"
+msgstr "Kill Switches"
+
+#: killSwitch.description
+msgid "killSwitch.description"
+msgstr "Emergency shutoff controls for feature flags"
+
+#: killSwitch.create
+msgid "killSwitch.create"
+msgstr "Create Kill Switch"
+
+#: killSwitch.createTitle
+msgid "killSwitch.createTitle"
+msgstr "Create New Kill Switch"
+
+#: killSwitch.key
+msgid "killSwitch.key"
+msgstr "Key"
+
+#: killSwitch.keyHint
+msgid "killSwitch.keyHint"
+msgstr "Lowercase alphanumeric with underscores, 3-100 characters"
+
+#: killSwitch.name
+msgid "killSwitch.name"
+msgstr "Name"
+
+#: killSwitch.linkedFlags
+msgid "killSwitch.linkedFlags"
+msgstr "Linked Flags"
+
+#: killSwitch.linkedFlagsHint
+msgid "killSwitch.linkedFlagsHint"
+msgstr "Flag keys that will be disabled when this kill switch is active"
+
+#: killSwitch.status
+msgid "killSwitch.status"
+msgstr "Status"
+
+#: killSwitch.active
+msgid "killSwitch.active"
+msgstr "Active"
+
+#: killSwitch.inactive
+msgid "killSwitch.inactive"
+msgstr "Inactive"
+
+#: killSwitch.activate
+msgid "killSwitch.activate"
+msgstr "Activate"
+
+#: killSwitch.deactivate
+msgid "killSwitch.deactivate"
+msgstr "Deactivate"
+
+#: killSwitch.activateTitle
+msgid "killSwitch.activateTitle"
+msgstr "Activate Kill Switch"
+
+#: killSwitch.activateWarning
+msgid "killSwitch.activateWarning"
+msgstr "Activating this kill switch will immediately disable all linked feature flags."
+
+#: killSwitch.reason
+msgid "killSwitch.reason"
+msgstr "Reason"
+
+#: killSwitch.reasonPlaceholder
+msgid "killSwitch.reasonPlaceholder"
+msgstr "Enter the reason for activation (required)"
+
+#: killSwitch.reasonRequired
+msgid "killSwitch.reasonRequired"
+msgstr "A reason is required for activation"
+
+#: killSwitch.activatedAt
+msgid "killSwitch.activatedAt"
+msgstr "Activated at"
+
+#: killSwitch.activatedBy
+msgid "killSwitch.activatedBy"
+msgstr "Activated by"
+
+#: killSwitch.activationReason
+msgid "killSwitch.activationReason"
+msgstr "Activation reason"
+
+#: killSwitch.delete
+msgid "killSwitch.delete"
+msgstr "Delete"
+
+#: killSwitch.deleteConfirm
+msgid "killSwitch.deleteConfirm"
+msgstr "Are you sure you want to delete this kill switch?"
+
+#: killSwitch.empty
+msgid "killSwitch.empty"
+msgstr "No kill switches configured"
+
+#: killSwitch.noLinkedFlags
+msgid "killSwitch.noLinkedFlags"
+msgstr "No linked flags"
+
+# ============================================================================
+# Exposure Tracking
+# ============================================================================
+
+#: exposure.title
+msgid "exposure.title"
+msgstr "曝光追踪"
+
+#: exposure.description
+msgid "exposure.description"
+msgstr "追踪用户何时暴露于标志变体以进行实验分析"
+
+#: exposure.tracking
+msgid "exposure.tracking"
+msgstr "曝光追踪"
+
+#: exposure.enabled
+msgid "exposure.enabled"
+msgstr "已启用"
+
+#: exposure.disabled
+msgid "exposure.disabled"
+msgstr "已禁用"
+
+#: exposure.enableTracking
+msgid "exposure.enableTracking"
+msgstr "启用曝光追踪"
+
+#: exposure.disableTracking
+msgid "exposure.disableTracking"
+msgstr "禁用曝光追踪"
+
+#: exposure.enableHint
+msgid "exposure.enableHint"
+msgstr "启用后，标志评估将被记录以用于实验分析"
+
+#: exposure.logs
+msgid "exposure.logs"
+msgstr "曝光日志"
+
+#: exposure.export
+msgid "exposure.export"
+msgstr "导出日志"
+
+#: exposure.exportHint
+msgid "exposure.exportHint"
+msgstr "将曝光日志下载为CSV"
+
+#: exposure.noLogs
+msgid "exposure.noLogs"
+msgstr "未找到曝光日志"
+
+#: exposure.flagKey
+msgid "exposure.flagKey"
+msgstr "标志键"
+
+#: exposure.variant
+msgid "exposure.variant"
+msgstr "变体"
+
+#: exposure.userId
+msgid "exposure.userId"
+msgstr "用户ID"
+
+#: exposure.timestamp
+msgid "exposure.timestamp"
+msgstr "时间戳"
+
+#: exposure.reason
+msgid "exposure.reason"
+msgstr "原因"
+
+#: exposure.environment
+msgid "exposure.environment"
+msgstr "环境"
+
+#: exposure.filterByFlag
+msgid "exposure.filterByFlag"
+msgstr "按标志筛选"
+
+#: exposure.filterByEnvironment
+msgid "exposure.filterByEnvironment"
+msgstr "按环境筛选"
+
+#: exposure.startDate
+msgid "exposure.startDate"
+msgstr "开始日期"
+
+#: exposure.endDate
+msgid "exposure.endDate"
+msgstr "结束日期"
+
+#: exposure.totalCount
+msgid "exposure.totalCount"
+msgstr "{count} 次曝光"
+
+#: exposure.deduplicationWindow
+msgid "exposure.deduplicationWindow"
+msgstr "曝光在每个用户/上下文的1小时窗口内去重"
+
+# ============================================================================
+# Flag Stats
+# ============================================================================
+
+#: flagStats.title
+msgid "flagStats.title"
+msgstr "Flag Statistics"
+
+#: flagStats.description
+msgid "flagStats.description"
+msgstr "Evaluation statistics for this flag"
+
+#: flagStats.lastEvaluated
+msgid "flagStats.lastEvaluated"
+msgstr "Last Evaluated"
+
+#: flagStats.never
+msgid "flagStats.never"
+msgstr "Never"
+
+#: flagStats.evaluations24h
+msgid "flagStats.evaluations24h"
+msgstr "Evaluations (24h)"
+
+#: flagStats.evaluations7d
+msgid "flagStats.evaluations7d"
+msgstr "Evaluations (7d)"
+
+#: flagStats.evaluations30d
+msgid "flagStats.evaluations30d"
+msgstr "Evaluations (30d)"
+
+#: flagStats.staleFlags
+msgid "flagStats.staleFlags"
+msgstr "Stale Flags"
+
+#: flagStats.staleFlagsDescription
+msgid "flagStats.staleFlagsDescription"
+msgstr "Flags that haven't been evaluated recently"
+
+#: flagStats.noStaleFlags
+msgid "flagStats.noStaleFlags"
+msgstr "No stale flags found"
+
+#: flagStats.staleFlagsHint
+msgid "flagStats.staleFlagsHint"
+msgstr "Flags are considered stale after {days} days without evaluation"
+
+#: flagStats.daysSinceEvaluated
+msgid "flagStats.daysSinceEvaluated"
+msgstr "{days} days ago"
+
+#: flagStats.neverEvaluated
+msgid "flagStats.neverEvaluated"
+msgstr "Never evaluated"
+
+#: flagStats.viewStats
+msgid "flagStats.viewStats"
+msgstr "View Stats"
+
+# ============================================================================
+# Flags SDK (client-side)
+# ============================================================================
+
+#: client.flags.error.invalid_sdk_key
+msgid "client.flags.error.invalid_sdk_key"
+msgstr "Invalid or missing SDK key"
+
+#: client.flags.error.invalid_base_url
+msgid "client.flags.error.invalid_base_url"
+msgstr "Invalid or missing base URL"
+
+#: client.flags.error.connection_failed
+msgid "client.flags.error.connection_failed"
+msgstr "Failed to connect to server"
+
+#: client.flags.error.request_failed
+msgid "client.flags.error.request_failed"
+msgstr "HTTP request failed"
+
+#: client.flags.error.parse_failed
+msgid "client.flags.error.parse_failed"
+msgstr "Failed to parse server response"
+
+#: client.flags.error.server_error
+msgid "client.flags.error.server_error"
+msgstr "Server returned an error"
+
+#: client.flags.error.flag_not_found
+msgid "client.flags.error.flag_not_found"
+msgstr "Flag not found"
+
+#: client.flags.error.sse_connection_failed
+msgid "client.flags.error.sse_connection_failed"
+msgstr "SSE connection failed"
+
+#: client.flags.error.sse_stream_error
+msgid "client.flags.error.sse_stream_error"
+msgstr "SSE stream error"
+
+#: client.flags.error.offline_no_cache
+msgid "client.flags.error.offline_no_cache"
+msgstr "Client is offline and no cached data is available"
+
+#: client.flags.error.authentication_failed
+msgid "client.flags.error.authentication_failed"
+msgstr "SDK key authentication failed"
+
+#: client.flags.error.rate_limited
+msgid "client.flags.error.rate_limited"
+msgstr "Rate limited. Retry after seconds"
+
+#: client.flags.error.initialization_timeout
+msgid "client.flags.error.initialization_timeout"
+msgstr "Client initialization timed out"
+
+#: client.flags.error.client_closed
+msgid "client.flags.error.client_closed"
+msgstr "Client has been closed"
+
+#: client.flags.error.invalid_value_type
+msgid "client.flags.error.invalid_value_type"
+msgstr "Invalid flag value type"
+
+#: client.flags.status.initializing
+msgid "client.flags.status.initializing"
+msgstr "Initializing flags client..."
+
+#: client.flags.status.connected
+msgid "client.flags.status.connected"
+msgstr "Flags client connected"
+
+#: client.flags.status.disconnected
+msgid "client.flags.status.disconnected"
+msgstr "Flags client disconnected"
+
+#: client.flags.status.reconnecting
+msgid "client.flags.status.reconnecting"
+msgstr "Reconnecting to flags server..."
+
+#: client.flags.status.using_cache
+msgid "client.flags.status.using_cache"
+msgstr "Using cached flag values"
+
+#: client.flags.status.cache_initialized
+msgid "client.flags.status.cache_initialized"
+msgstr "Flag cache initialized with {count} flags"
+
+# ============================================================================
+# HTTP Client (client-side)
+# ============================================================================
+
+#: client.http.error.timeout
+msgid "client.http.error.timeout"
+msgstr "Request timed out"
+
+#: client.http.error.network
+msgid "client.http.error.network"
+msgstr "Network request failed"
+
+#: client.http.error.rate_limited
+msgid "client.http.error.rate_limited"
+msgstr "Rate limited"
+
+#: client.http.error.server
+msgid "client.http.error.server"
+msgstr "Server returned an error"
+
+#: client.http.retry.attempt
+msgid "client.http.retry.attempt"
+msgstr "Retry attempt {count}"
+
+#: client.http.retry.max_attempts
+msgid "client.http.retry.max_attempts"
+msgstr "Max retry attempts reached"

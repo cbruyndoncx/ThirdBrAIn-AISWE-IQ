@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/ghuntley/loom.git
+	branch = trunk
+	commit = 7ba513204b3c0911deb36584cb63925150ca8b7a
+	parent = c173fc5642fe6c4b44de5f60fd8096111ae4385b
+	method = merge
+	cmdver = 0.4.9
