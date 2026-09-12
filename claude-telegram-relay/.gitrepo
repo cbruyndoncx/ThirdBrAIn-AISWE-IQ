@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/godagoo/claude-telegram-relay.git
+	branch = master
+	commit = 563220c2ccf51711314c93ebb2cf6cb41b856201
+	parent = 78a14a190d2dcd7ab801df920574d36ae2d277ec
+	method = merge
+	cmdver = 0.4.9
