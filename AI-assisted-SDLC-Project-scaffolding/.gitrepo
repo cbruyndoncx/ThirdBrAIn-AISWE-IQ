@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/dzivkovi/AI-assisted-SDLC-Project-scaffolding.git
+	branch = main
+	commit = d84eb0d08c01b5df6fde862f0aa8c6002cb83ae5
+	parent = d87e524f6c33c3a801c57527ce29138b06b56a6e
+	method = merge
+	cmdver = 0.4.9
