@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/s-smits/agentic-cursorrules.git
+	branch = main
+	commit = f8df721ed0d5c9c00b2f2cadbed512dd24b779f0
+	parent = 99771b709ce71412cba2e5f7f14ada74fd05dc8c
+	method = merge
+	cmdver = 0.4.9
