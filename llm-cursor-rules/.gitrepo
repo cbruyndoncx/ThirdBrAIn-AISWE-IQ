@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/RayFernando1337/llm-cursor-rules.git
+	branch = main
+	commit = d31bec10c7c4f9cce5f7d703184bb3fd1eb9d8c5
+	parent = 196913aac07c2bd017347fa6557c7350283caa09
+	method = merge
+	cmdver = 0.4.9
