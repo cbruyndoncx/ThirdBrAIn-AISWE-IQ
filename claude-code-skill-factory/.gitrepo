@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/alirezarezvani/claude-code-skill-factory.git
+	branch = dev
+	commit = ba18b31703542d9d7eda5f9ba94f0df65a59dddf
+	parent = 6524d70d303f6a77e5db1e469bd36e4d949945bf
+	method = merge
+	cmdver = 0.4.9
