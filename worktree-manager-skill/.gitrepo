@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/Wirasm/worktree-manager-skill.git
+	branch = main
+	commit = 92794623ac16b99cbc49c354339d7b53929723f9
+	parent = 57bac596d263957d40fbab823fd99f4bc2975256
+	method = merge
+	cmdver = 0.4.9
