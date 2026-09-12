@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/ChrisRoyse/610ClaudeSubagents.git
+	branch = main
+	commit = ba504ff30f17d862539ea1557d90f3a940a5bd1d
+	parent = 6e320e12a501e77bb82fdc68b9001b8f99368112
+	method = merge
+	cmdver = 0.4.9
