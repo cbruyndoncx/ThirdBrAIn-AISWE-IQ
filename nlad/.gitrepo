@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/Matt-Dionis/nlad.git
+	branch = main
+	commit = 1850b2225217ba64a86c1ec73118a5d72b0e4eed
+	parent = 2603ef6304d253d626e8e5e707cc80c7cc90a947
+	method = merge
+	cmdver = 0.4.9
