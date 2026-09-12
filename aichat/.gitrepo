@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/sigoden/aichat.git
+	branch = main
+	commit = 82976d349ad97ac9aae0655ad631dace5e2a6385
+	parent = e9cc74d8b8e6c4b10eb93b4ac886195fb5db7c57
+	method = merge
+	cmdver = 0.4.9
