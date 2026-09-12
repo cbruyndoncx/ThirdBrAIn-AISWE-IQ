@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/mrtblount/Spec-to-Ship.git
+	branch = main
+	commit = c975e33314c17ee4c79b6f6917899220d0772f53
+	parent = da0addbd1a3ed0c1750840bc1b2d7e1ec3d5a68b
+	method = merge
+	cmdver = 0.4.9
