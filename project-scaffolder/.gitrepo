@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/fltman/project-scaffolder.git
+	branch = main
+	commit = a1a4104850f48319861dedbd3b9e5fbb26728885
+	parent = 603b00f3493a939d44c58e92ef19b8d3348241f8
+	method = merge
+	cmdver = 0.4.9
