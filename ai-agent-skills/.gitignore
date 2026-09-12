@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test coverage
+coverage/
+
+# Temporary files
+tmp/
+temp/
+
+# Internal working papers
+docs/*
+!docs/workflows/
+docs/workflows/*
+!docs/workflows/*.md
+!docs/releases/
+docs/releases/*
+!docs/releases/*.md
+
+# Local install artifacts
+.skills/
+
+# Local workspace and desktop state
+.agents/
+.codex/
+test-lib/
+ws-test/
+tmp-test-review-lib/
+ai-agent-skills-*.tgz
+ai-agent-skills-workflow.html

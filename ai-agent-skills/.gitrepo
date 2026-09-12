@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/MoizIbnYousaf/ai-agent-skills.git
+	branch = main
+	commit = 1159592a122885ddd8d767243a7cf16aab065919
+	parent = 2fba25e59af035e401b0f4640cbfbd1b9dc19dab
+	method = merge
+	cmdver = 0.4.9
