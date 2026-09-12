@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/dereknguyen269/AI-Powered-Coding-Tools.git
+	branch = main
+	commit = 7eb92612b63c53ce517db2899f497e724c088359
+	parent = 3d6d4711cad70b484c52cb4a7a5c2417fb6ba8a7
+	method = merge
+	cmdver = 0.4.9
