@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/PatrickJS/awesome-cursorrules.git
+	branch = main
+	commit = b044f956f021b6e8877f16781bcfc466a6a120e9
+	parent = bf7f04f2a55dc3960a07d7095bf7b781cb9d4508
+	method = merge
+	cmdver = 0.4.9
