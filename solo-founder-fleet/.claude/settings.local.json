@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(git init:*)",
+      "Bash(git branch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(gh repo create:*)",
+      "Bash(tree:*)",
+      "Bash(chmod:*)",
+      "Bash(~/.claude/plugins/solo-founder-fleet/scripts/sync-agents.sh:*)",
+      "Bash(~/.claude/plugins/solo-founder-fleet/scripts/session-sync.sh:*)",
+      "Bash(git -C /Users/justuseapen/.claude/plugins/solo-founder-fleet add scripts/session-sync.sh scripts/init-project-state.sh .claude/settings.local.json)"
+    ]
+  }
+}

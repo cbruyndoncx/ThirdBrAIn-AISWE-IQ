@@ -1,0 +1,8 @@
+{
+  "name": "solo-founder-fleet",
+  "description": "Executive agent fleet for solo founders with persistent state - Chief of Staff orchestrator with Engineering, Product, Design, Marketing, Sales, and Content specialists",
+  "author": {
+    "name": "User"
+  },
+  "agents": "./agents/"
+}

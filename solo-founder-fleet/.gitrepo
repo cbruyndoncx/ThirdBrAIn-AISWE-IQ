@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/justuseapen/solo-founder-fleet.git
+	branch = main
+	commit = 3800f3de8793897f15bd6ec9df1d3e1ac1e6c1cd
+	parent = 01ea9c197fc9aee7c8ed4d044a36df83a3f6ba3c
+	method = merge
+	cmdver = 0.4.9
