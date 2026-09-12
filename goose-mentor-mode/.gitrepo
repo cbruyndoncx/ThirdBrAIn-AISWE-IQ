@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/joeeuston-dev/goose-mentor-mode.git
+	branch = main
+	commit = 75a4bf0369b222887dfa72f5c75a66083d416a1c
+	parent = eba8e818e2007af6ac6de01f58ca6f89d062d0dd
+	method = merge
+	cmdver = 0.4.9
