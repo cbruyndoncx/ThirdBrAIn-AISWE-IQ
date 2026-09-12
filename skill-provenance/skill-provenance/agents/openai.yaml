@@ -1,0 +1,7 @@
+interface:
+  display_name: "Skill Provenance"
+  short_description: "Version and verify portable Agent Skill bundles"
+  brand_color: "#2F7A78"
+  default_prompt: "Use $skill-provenance to version, validate, and verify this Agent Skill bundle."
+policy:
+  allow_implicit_invocation: true

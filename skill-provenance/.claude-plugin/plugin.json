@@ -1,0 +1,27 @@
+{
+  "name": "skill-provenance",
+  "description": "Portable provenance, integrity, and drift control for agent skills across sessions, surfaces, and platforms",
+  "version": "0.2.1",
+  "author": {
+    "name": "PAICE.work PBC",
+    "url": "https://paice.work"
+  },
+  "homepage": "https://skillprovenance.dev",
+  "repository": "https://github.com/snapsynapse/skill-provenance",
+  "license": "MIT",
+  "skills": [
+    "./skills/open",
+    "./skills/validate",
+    "./skills/close",
+    "./skills/handoff",
+    "./skills/bootstrap"
+  ],
+  "keywords": [
+    "version-tracking",
+    "skills",
+    "provenance",
+    "manifest",
+    "agent-skills",
+    "agentskills"
+  ]
+}

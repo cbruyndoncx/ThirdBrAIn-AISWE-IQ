@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+# package.sh — Build derived skill bundle copies for strict platforms or registry publish.
+# Zero dependencies beyond bash, shasum or sha256sum, awk, and standard file utilities.
+#
+# Usage:
+#   ./package.sh strict [output-parent]
+#   ./package.sh clawhub [output-parent]
+#   ./package.sh all [output-parent]
+#
+# The script writes a directory named after the bundle beneath output-parent.
+# Examples:
+#   ./package.sh strict ../build/strict
+#   ./package.sh clawhub ../build/clawhub
+#   ./package.sh all ../build
+
+export LC_ALL=C
+export LANG=C
+
+set -euo pipefail
+
+MODE="${1:-}"
+OUTPUT_PARENT="${2:-}"
+
+BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUNDLE_NAME="$(basename "$BUNDLE_DIR")"
+MANIFEST="$BUNDLE_DIR/MANIFEST.yaml"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./package.sh strict [output-parent]
+  ./package.sh clawhub [output-parent]
+  ./package.sh all [output-parent]
+
+Modes:
+  strict   Build a minimal-frontmatter install copy for strict loaders.
+  clawhub  Build a consumer package for ClawHub upload.
+  all      Build both variants under one parent directory.
+EOF
+}
+
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+if [ -z "$MODE" ] || [ "$MODE" = "--help" ] || [ "$MODE" = "-h" ]; then
+  usage
+  exit 0
+fi
+
+case "$MODE" in
+  strict)
+    OUTPUT_PARENT="${OUTPUT_PARENT:-$BUNDLE_DIR/../build/strict}"
+    ;;
+  clawhub)
+    OUTPUT_PARENT="${OUTPUT_PARENT:-$BUNDLE_DIR/../build/clawhub}"
+    ;;
+  all)
+    OUTPUT_PARENT="${OUTPUT_PARENT:-$BUNDLE_DIR/../build}"
+    ;;
+  *)
+    fail "unknown mode: $MODE"
+    ;;
+esac
+
+if [ ! -f "$MANIFEST" ]; then
+  fail "MANIFEST.yaml not found in $BUNDLE_DIR"
+fi
+
+validate_source_bundle() {
+  if [ ! -x "$BUNDLE_DIR/validate.sh" ]; then
+    fail "validate.sh is missing or not executable in $BUNDLE_DIR"
+  fi
+
+  echo "Verifying canonical bundle before packaging..."
+  "$BUNDLE_DIR/validate.sh" "$BUNDLE_DIR"
+}
+
+manifest_paths() {
+  awk '
+    /^files:$/ { in_files = 1; next }
+    in_files && /^[^[:space:]#]/ { in_files = 0 }
+    in_files && /^  - path: / {
+      line = $0
+      sub(/^  - path: /, "", line)
+      print line
+    }
+  ' "$MANIFEST"
+}
+
+should_include() {
+  local mode="$1"
+  local path="$2"
+
+  case "$mode" in
+    strict)
+      return 0
+      ;;
+    clawhub)
+      case "$path" in
+        SKILL.md|README.md|evals.json|evals-distribution.json|assets/*|references/*)
+          return 0
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+copy_bundle_files() {
+  local mode="$1"
+  local dest_dir="$2"
+  local rel_path=""
+
+  mkdir -p "$dest_dir"
+  cp -p "$MANIFEST" "$dest_dir/MANIFEST.yaml"
+
+  while IFS= read -r rel_path; do
+    [ -n "$rel_path" ] || continue
+    if should_include "$mode" "$rel_path"; then
+      mkdir -p "$dest_dir/$(dirname "$rel_path")"
+      cp -p "$BUNDLE_DIR/$rel_path" "$dest_dir/$rel_path"
+    fi
+  done < <(manifest_paths)
+}
+
+strip_skill_metadata() {
+  local skill_file="$1"
+  local temp_file
+
+  temp_file="$(mktemp "${TMPDIR:-/tmp}/skill-provenance-skill.XXXXXX")"
+
+  awk '
+    BEGIN {
+      in_frontmatter = 0
+      skipping_metadata = 0
+    }
+    NR == 1 && $0 == "---" {
+      in_frontmatter = 1
+      print
+      next
+    }
+    in_frontmatter {
+      if ($0 == "---") {
+        print
+        in_frontmatter = 0
+        skipping_metadata = 0
+        next
+      }
+      if (skipping_metadata) {
+        if ($0 ~ /^[^[:space:]]/) {
+          skipping_metadata = 0
+        } else {
+          next
+        }
+      }
+      if ($0 ~ /^metadata:[[:space:]]*$/) {
+        skipping_metadata = 1
+        next
+      }
+      print
+      next
+    }
+    { print }
+  ' "$skill_file" > "$temp_file"
+
+  mv "$temp_file" "$skill_file"
+}
+
+rewrite_manifest() {
+  local manifest_file="$1"
+  local target_mode="$2"
+  local include_mode="$3"
+  local temp_file
+
+  temp_file="$(mktemp "${TMPDIR:-/tmp}/skill-provenance-manifest.XXXXXX")"
+
+  awk -v target_mode="$target_mode" -v include_mode="$include_mode" '
+    function include_path(path) {
+      if (include_mode == "strict") {
+        return 1
+      }
+      return path == "SKILL.md" ||
+             path == "README.md" ||
+             path == "evals.json" ||
+             path == "evals-distribution.json" ||
+             path ~ /^assets\// ||
+             path ~ /^references\//
+    }
+    function flush_entry() {
+      if (entry == "") {
+        return
+      }
+      if (keep_entry) {
+        printf "%s", entry
+      }
+      entry = ""
+      keep_entry = 0
+    }
+    {
+      if (skipping_deployments) {
+        if ($0 ~ /^[^[:space:]]/) {
+          skipping_deployments = 0
+        } else {
+          next
+        }
+      }
+
+      if ($0 ~ /^deployments:[[:space:]]*$/) {
+        skipping_deployments = 1
+        next
+      }
+
+      if (!in_files) {
+        if ($0 ~ /^[[:space:]]*frontmatter_mode:[[:space:]]*/) {
+          sub(/frontmatter_mode:[[:space:]]*.*/, "frontmatter_mode: " target_mode)
+        }
+        print
+        if ($0 ~ /^files:[[:space:]]*$/) {
+          in_files = 1
+        }
+        next
+      }
+
+      if ($0 ~ /^[^[:space:]#]/) {
+        flush_entry()
+        in_files = 0
+        print
+        next
+      }
+
+      if ($0 ~ /^  - path: /) {
+        flush_entry()
+        path = $0
+        sub(/^  - path: /, "", path)
+        entry = $0 ORS
+        keep_entry = include_path(path)
+        next
+      }
+
+      entry = entry $0 ORS
+    }
+    END {
+      flush_entry()
+    }
+  ' "$manifest_file" > "$temp_file"
+
+  mv "$temp_file" "$manifest_file"
+}
+
+build_variant() {
+  local mode="$1"
+  local output_parent="$2"
+  local variant_parent="$output_parent"
+  local dest_dir
+
+  case "$mode" in
+    strict|clawhub)
+      ;;
+    *)
+      fail "internal error: unsupported variant $mode"
+      ;;
+  esac
+
+  # Keep validate.sh as the single parser and policy authority. Re-run it at
+  # each package boundary so `all` mode cannot build a later variant from a
+  # source bundle that changed after the first variant was produced.
+  validate_source_bundle
+
+  if [ -e "$variant_parent" ]; then
+    fail "output path already exists: $variant_parent"
+  fi
+
+  dest_dir="$variant_parent/$BUNDLE_NAME"
+  copy_bundle_files "$mode" "$dest_dir"
+
+  case "$mode" in
+    strict)
+      strip_skill_metadata "$dest_dir/SKILL.md"
+      rewrite_manifest "$dest_dir/MANIFEST.yaml" "minimal" "strict"
+      ;;
+    clawhub)
+      rewrite_manifest "$dest_dir/MANIFEST.yaml" "metadata" "clawhub"
+      ;;
+  esac
+
+  "$BUNDLE_DIR/validate.sh" --update "$dest_dir"
+  "$BUNDLE_DIR/validate.sh" "$dest_dir"
+  echo "Built $mode package at $dest_dir"
+}
+
+if [ "$MODE" = "all" ]; then
+  build_variant "strict" "$OUTPUT_PARENT/strict"
+  build_variant "clawhub" "$OUTPUT_PARENT/clawhub"
+else
+  build_variant "$MODE" "$OUTPUT_PARENT"
+fi

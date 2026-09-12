@@ -1,0 +1,53 @@
+# Skill Provenance
+
+> Portable provenance, integrity, and drift control for Agent Skills.
+
+Skill Provenance is a metaskill that keeps version identity, staleness detection, and hash-based integrity verification inside the skill bundle so it survives local folders, registries, platform uploads, and multi-agent sessions.
+
+Most ecosystem tools track source, registry, install, or deployment state. Skill Provenance tracks the actual multi-file bundle an agent is editing, which matters when SKILL.md, evals, scripts, packages, and deployed copies can drift independently.
+
+## Core concepts
+
+- **Bundle version**: Semver version for the entire skill bundle, stored in MANIFEST.yaml
+- **Per-file versions**: Integer revision counters for each file in the bundle
+- **SHA-256 hashes**: Every file's hash is recorded in the manifest for integrity verification
+- **Standalone verification**: `https://skillprovenance.dev/verify.sh` delegates to the canonical validator only after its pinned SHA-256 matches
+- **Release tag families**: Bundle artifacts use exact `vX.Y.Z` tags; GuideCheck assistant-guide artifacts use `guidecheck-X.Y.Z` tags. A generic latest label is ambiguous in this repository
+- **Staleness detection**: When SKILL.md changes but evals.json doesn't, the changelog says so
+- **Cross-platform**: Works across Claude, Codex, Gemini CLI, Copilot, Perplexity, and any agent that reads markdown
+- **Complementary tooling**: Works alongside GitHub `gh skill`, ClawHub, Skillman, and platform APIs rather than replacing them
+- **Trust model**: Provides an integrity check, not a trust anchor
+- **GuideCheck assistant guide**: Publishes a bounded pre-install verification guide at `/.well-known/assistant-guide.txt`
+
+## Key files in a bundle
+
+- `SKILL.md` — the skill definition (what agents read)
+- `MANIFEST.yaml` — file inventory with roles, versions, SHA-256 hashes
+- `CHANGELOG.md` — rolling recent history (last 5 entries)
+- `evals.json` — evaluation scenarios for testing skill behavior
+- `validate.sh` — local hash verification script
+
+## Links
+
+- Canonical site: https://skillprovenance.dev/
+- GitHub: https://github.com/snapsynapse/skill-provenance
+- Stable bundle release: https://github.com/snapsynapse/skill-provenance/releases/tag/v6.3.0
+- ClawHub: https://clawhub.ai/snapsynapse/skills/skill-provenance
+- Standalone verifier: https://skillprovenance.dev/verify.sh
+- 2026 evidence note: https://github.com/snapsynapse/skill-provenance/blob/main/docs/state-of-skill-versioning-2026.md
+- Skill definition: https://github.com/snapsynapse/skill-provenance/blob/main/skill-provenance/SKILL.md
+- Changelog: https://github.com/snapsynapse/skill-provenance/blob/main/CHANGELOG.md
+- [Assistant Guide](https://skillprovenance.dev/.well-known/assistant-guide.txt): bounded assistant install and integrity-check instructions
+- Assistant guide manifest: https://skillprovenance.dev/.well-known/assistant-guide-manifest.txt
+- Agentic surface disclosure: https://github.com/snapsynapse/skill-provenance/blob/main/AGENTIC_SURFACES.md
+- Agent Skills spec: https://agentskills.io
+
+## Related patterns
+
+- Knowledge as Code: https://knowledge-as-code.com/
+- Graceful Boundaries: https://gracefulboundaries.dev/
+- PAICE.work Open Patterns: https://paice.work/
+
+## License
+
+MIT — https://github.com/snapsynapse/skill-provenance/blob/main/LICENSE

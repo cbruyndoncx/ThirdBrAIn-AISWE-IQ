@@ -1,0 +1,47 @@
+name: Validate bundle
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify repository search contract
+        run: node scripts/check-search.mjs
+
+      - name: Verify bundle hashes
+        uses: ./
+        with:
+          bundle-path: skill-provenance
+
+      - name: Test strict package build
+        run: |
+          chmod +x skill-provenance/package.sh
+          ./skill-provenance/package.sh strict /tmp/build/strict
+          echo "Strict build OK"
+
+      - name: Test clawhub package build
+        run: |
+          ./skill-provenance/package.sh clawhub /tmp/build/clawhub
+          echo "ClawHub build OK"
+
+      - name: Verify release surfaces
+        run: ./.github/scripts/release-surface-check.sh
+
+      - name: Verify action input transport
+        run: ./.github/scripts/action-security-check.sh
+
+      - name: Test validator hash states
+        run: ./.github/scripts/test-validate.sh
+
+      - name: Test standalone verifier pinning
+        run: ./.github/scripts/test-standalone-verify.sh

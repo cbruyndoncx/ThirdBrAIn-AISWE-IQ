@@ -1,0 +1,99 @@
+name: Compatibility or Adoption Report
+description: Report a platform test or evidence-backed use of Skill Provenance
+title: "[Evidence] "
+labels: ["compatibility"]
+body:
+  - type: dropdown
+    id: report-type
+    attributes:
+      label: Report type
+      options:
+        - Compatibility test
+        - Adoption report
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Gemini CLI (Google)
+        - Codex (OpenAI)
+        - GitHub Copilot
+        - Cursor
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: platform-version
+    attributes:
+      label: Platform version
+      placeholder: "e.g., Gemini CLI 0.4.2, Codex 1.0"
+    validations:
+      required: false
+  - type: input
+    id: model
+    attributes:
+      label: Model used
+      placeholder: "e.g., Gemini 2.5 Pro, GPT-4.1, Claude Opus 4.6"
+    validations:
+      required: true
+  - type: dropdown
+    id: status
+    attributes:
+      label: Overall status
+      options:
+        - Pass — full functionality
+        - Partial — some features work
+        - Fail — skill does not load or function
+    validations:
+      required: true
+  - type: textarea
+    id: what-worked
+    attributes:
+      label: What worked
+      placeholder: "e.g., Bootstrap, session open/close, manifest verification"
+    validations:
+      required: true
+  - type: textarea
+    id: what-didnt
+    attributes:
+      label: What didn't work
+      placeholder: "e.g., Staleness detection missed, changelog format incorrect"
+    validations:
+      required: false
+  - type: textarea
+    id: workarounds
+    attributes:
+      label: Workarounds applied
+      placeholder: "e.g., Had to remove metadata block from SKILL.md"
+    validations:
+      required: false
+  - type: input
+    id: skill-version
+    attributes:
+      label: Skill Provenance version tested
+      placeholder: "e.g., 4.3.0"
+    validations:
+      required: true
+  - type: input
+    id: adopter
+    attributes:
+      label: Adopter or project identity
+      description: Required for an adoption report. Name the repository, project, team, or organization.
+    validations:
+      required: false
+  - type: input
+    id: evidence
+    attributes:
+      label: Public evidence URL
+      description: Link to a repository, workflow, report, or other reproducible evidence. Leave blank if requesting owner-confirmed private classification.
+    validations:
+      required: false
+  - type: checkboxes
+    id: evidence-boundary
+    attributes:
+      label: Evidence boundary
+      options:
+        - label: I understand that a download, listing, fork, or redistribution alone is not verified adoption.
+          required: true

@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skill Provenance &mdash; Portable provenance for Agent Skills</title>
+  <meta name="description" content="Portable provenance, integrity, and drift control for Agent Skills across local folders, registries, platform uploads, and multi-agent sessions.">
+  <meta name="keywords" content="skill provenance, agent skills, SKILL.md, MANIFEST.yaml, version identity, bundle versioning, semver, SHA-256, hash verification, staleness detection, agentskills.io, cross-platform skills, Claude skills, Codex skills, Gemini skills, ClawHub">
+  <meta name="author" content="Sam Rogers">
+  <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">
+  <meta name="theme-color" content="#2a7a7a">
+  <link rel="canonical" href="https://skillprovenance.dev/">
+  <link rel="sitemap" type="application/xml" href="/sitemap.xml">
+  <link rel="alternate" type="text/plain" href="https://skillprovenance.dev/llms.txt" title="LLM-readable summary">
+  <link rel="assistant-guide" href="https://skillprovenance.dev/.well-known/assistant-guide.txt">
+  <meta property="og:title" content="Skill Provenance">
+  <meta property="og:description" content="Portable provenance, integrity, and drift control for Agent Skills across local folders, registries, platform uploads, and multi-agent sessions.">
+  <meta property="og:image" content="https://skillprovenance.dev/imgs/og.png">
+  <meta property="og:url" content="https://skillprovenance.dev/">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Skill Provenance">
+  <meta property="og:locale" content="en_US">
+  <meta property="article:published_time" content="2026-01-31T00:00:00Z">
+  <meta property="article:modified_time" content="2026-09-05T00:00:00Z">
+  <meta property="article:author" content="Sam Rogers">
+  <meta property="article:publisher" content="https://paice.work/">
+  <meta property="article:section" content="Agent Skills">
+  <meta property="article:tag" content="Agent Skills">
+  <meta property="article:tag" content="Version Identity">
+  <meta property="article:tag" content="SKILL.md">
+  <meta property="article:tag" content="Provenance">
+  <meta property="article:tag" content="Hash Verification">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:creator" content="@snapsynapse">
+  <meta name="twitter:title" content="Skill Provenance">
+  <meta name="twitter:description" content="Portable provenance, integrity, and drift control for Agent Skills across local folders, registries, platform uploads, and multi-agent sessions.">
+  <meta name="twitter:image" content="https://skillprovenance.dev/imgs/og.png">
+  <link rel="icon" href="imgs/favicon.ico" sizes="48x48">
+  <link rel="icon" href="imgs/favicon-32x32.png" type="image/png" sizes="32x32">
+  <link rel="icon" href="imgs/favicon-16x16.png" type="image/png" sizes="16x16">
+  <link rel="icon" href="imgs/logo.png" type="image/png" sizes="1000x1000">
+  <link rel="apple-touch-icon" href="imgs/apple-touch-icon.png">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    "headline": "Skill Provenance - Portable provenance for Agent Skills",
+    "description": "Portable provenance, integrity, and drift control for Agent Skills across local folders, registries, platform uploads, and multi-agent sessions.",
+    "datePublished": "2026-01-31",
+    "dateModified": "2026-09-05",
+    "author": {
+      "@type": "Person",
+      "name": "Sam Rogers",
+      "url": "https://paice.work/",
+      "affiliation": {
+        "@type": "Organization",
+        "name": "PAICE.work PBC"
+      }
+    },
+    "publisher": {
+      "@type": "Organization",
+      "name": "PAICE.work PBC",
+      "url": "https://paice.work/"
+    },
+    "image": "https://skillprovenance.dev/imgs/og.png",
+    "keywords": "skill provenance, agent skills, SKILL.md, MANIFEST.yaml, version identity, semver, SHA-256, hash verification, staleness detection, agentskills.io",
+    "isPartOf": {
+      "@type": "CreativeWork",
+      "name": "PAICE.work Open Patterns",
+      "url": "https://paice.work/"
+    },
+    "license": "https://creativecommons.org/licenses/by/4.0/",
+    "copyrightHolder": {
+      "@type": "Organization",
+      "name": "PAICE.work PBC"
+    },
+    "citation": [
+      {
+        "@type": "CreativeWork",
+        "name": "Knowledge as Code",
+        "url": "https://knowledge-as-code.com/"
+      },
+      {
+        "@type": "CreativeWork",
+        "name": "Graceful Boundaries",
+        "url": "https://gracefulboundaries.dev/"
+      }
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "DefinedTerm",
+    "name": "Skill Provenance",
+    "alternateName": ["skill-provenance", "Skill Provenance spec"],
+    "description": "A metaskill for portable provenance, integrity, and drift control of Agent Skills across local folders, registries, platform uploads, and multi-agent sessions.",
+    "inDefinedTermSet": {
+      "@type": "DefinedTermSet",
+      "name": "PAICE.work Open Patterns",
+      "url": "https://paice.work/"
+    },
+    "sameAs": [
+      "https://github.com/snapsynapse/skill-provenance",
+      "https://clawhub.ai/snapsynapse/skills/skill-provenance"
+    ]
+  }
+  </script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #ffffff;
+      --bg-alt: #f5f3f0;
+      --text: #1a1a2e;
+      --text-muted: #64748b;
+      --accent: #2a7a7a;
+      --accent-hover: #1f5f5f;
+      --accent-warm: #943838;
+      --accent-warm-hover: #7a2e2e;
+      --code-bg: #f1f5f9;
+      --code-text: #0f172a;
+      --border: #e2e8f0;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+      --max-width: 960px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1419;
+        --bg-alt: #1a2028;
+        --text: #e2e8f0;
+        --text-muted: #94a3b8;
+        --accent: #5cb8b2;
+        --accent-hover: #7dd3cc;
+        --accent-warm: #e07060;
+        --accent-warm-hover: #c95a52;
+        --code-bg: #1a2028;
+        --code-text: #e2e8f0;
+        --border: #2d3748;
+      }
+    }
+
+    html { scroll-behavior: smooth; }
+
+    /* Skip link for a11y */
+    .skip-link {
+      position: absolute;
+      left: -9999px;
+      top: 0;
+      background: var(--accent);
+      color: #fff;
+      padding: 0.75rem 1rem;
+      z-index: 100;
+      border-radius: 0 0 6px 0;
+      font-weight: 600;
+    }
+    .skip-link:focus { left: 0; text-decoration: none; color: #fff; }
+
+    /* GitHub star button */
+    .gh-star {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.4rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text) !important;
+      font-size: 0.85rem;
+      font-weight: 600;
+      transition: transform 0.15s, border-color 0.15s;
+    }
+    .gh-star:hover {
+      text-decoration: none;
+      transform: translateY(-1px);
+      border-color: var(--accent);
+    }
+    .gh-star svg { width: 16px; height: 16px; fill: var(--accent); }
+
+    /* Byline — flex on parent only, never on children. See canonical-spec-page
+       a11y-fix-recipes.md "Byline whitespace collapse" for the full trap write-up. */
+    .byline {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 0.9rem;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin: 0 auto 2rem;
+      max-width: 720px;
+    }
+    .byline .sep { color: var(--border); }
+    .byline .version {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      padding: 0.15rem 0.55rem;
+      border-radius: 999px;
+      background: var(--bg-alt);
+      color: var(--accent);
+      border: 1px solid var(--border);
+    }
+
+    /* Canonical reference aside */
+    .canonical-note {
+      margin-top: 2.5rem;
+      padding: 1.25rem 1.5rem;
+      background: var(--bg-alt);
+      border-left: 3px solid var(--accent);
+      border-radius: 0 6px 6px 0;
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+    .canonical-note strong { color: var(--text); }
+
+    body {
+      font-family: var(--font);
+      color: var(--text);
+      background: var(--bg);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-hover); text-decoration: underline; }
+
+    .container { max-width: var(--max-width); margin: 0 auto; padding: 0 1.5rem; }
+
+    /* Nav */
+    nav {
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 0;
+      position: sticky;
+      top: 0;
+      background: var(--bg);
+      z-index: 10;
+    }
+    nav .container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+    nav .logo {
+      font-weight: 700;
+      font-size: 1.1rem;
+      color: var(--text);
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    nav .logo img {
+      width: 28px;
+      height: 28px;
+      border-radius: 4px;
+    }
+    nav .links { display: flex; gap: 1.5rem; font-size: 0.9rem; }
+    nav .links a { color: var(--text-muted); }
+    nav .links a:hover { color: var(--text); text-decoration: none; }
+
+    /* Sections */
+    section { padding: 4rem 0; }
+    section.alt { background: var(--bg-alt); }
+
+    h1 { font-size: 2.75rem; line-height: 1.15; letter-spacing: -0.02em; font-weight: 800; }
+    h2 { font-size: 1.75rem; font-weight: 700; margin-bottom: 1.5rem; letter-spacing: -0.01em; }
+    h3 { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem; }
+
+    p { margin-bottom: 1rem; }
+    p:last-child { margin-bottom: 0; }
+
+    /* Hero */
+    .hero { padding: 5rem 0 4rem; text-align: center; }
+    .hero h1 { margin-bottom: 1rem; }
+    .hero .subtitle {
+      font-size: 1.25rem;
+      color: var(--text-muted);
+      max-width: 640px;
+      margin: 0 auto 1.5rem;
+    }
+    .hero .hook {
+      font-size: 1rem;
+      color: var(--text-muted);
+      max-width: 620px;
+      margin: 0 auto 2.5rem;
+    }
+
+    /* Hero image */
+    .hero-img {
+      display: block;
+      max-width: 680px;
+      width: 100%;
+      margin: 0 auto 2.5rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+
+    /* Before/After */
+    .before-after {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+      margin-bottom: 2.5rem;
+      text-align: left;
+    }
+    .ba-panel {
+      padding: 1.5rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+    }
+    .ba-panel h3 {
+      font-size: 0.8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.75rem;
+    }
+    .ba-panel.before { border-color: color-mix(in srgb, var(--accent-warm) 30%, var(--border)); }
+    .ba-panel.before h3 { color: var(--accent-warm); }
+    .ba-panel.after h3 { color: var(--accent); }
+    .ba-panel pre {
+      background: transparent;
+      border: none;
+      padding: 0;
+      font-size: 0.85rem;
+      margin: 0;
+    }
+
+    /* Pillars */
+    .pillars {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1.5rem;
+      margin-bottom: 2.5rem;
+      text-align: left;
+    }
+    .pillar {
+      padding: 1.5rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+    }
+    .pillar h3 { font-size: 1rem; }
+    .pillar:nth-child(2) h3 { color: var(--accent-warm); }
+    .pillar:nth-child(1) h3, .pillar:nth-child(3) h3 { color: var(--accent); }
+    .pillar p { font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0; }
+
+    /* Buttons */
+    .cta-row { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+    .btn {
+      display: inline-block;
+      padding: 0.75rem 1.5rem;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 0.95rem;
+      transition: background 0.15s, color 0.15s;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: var(--accent-hover); text-decoration: none; color: #fff; }
+    .btn-secondary {
+      background: transparent;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+    }
+    .btn-secondary:hover { background: var(--accent); color: #fff; text-decoration: none; }
+    .btn-warm { background: var(--accent-warm); color: #fff; }
+    .btn-warm:hover { background: var(--accent-warm-hover); text-decoration: none; color: #fff; }
+
+    /* Code blocks */
+    pre {
+      background: var(--code-bg);
+      color: var(--code-text);
+      padding: 1.25rem;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      line-height: 1.5;
+      border: 1px solid var(--border);
+    }
+
+    /* Table */
+    table { width: 100%; border-collapse: collapse; margin-bottom: 1.5rem; }
+    th, td {
+      text-align: left;
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.9rem;
+    }
+    th { font-weight: 600; color: var(--text-muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    td.no { color: var(--accent-warm); }
+
+    /* Why cards */
+    .why-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1.5rem;
+      margin-top: 1.5rem;
+    }
+    .why-card {
+      padding: 1.5rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+    }
+    .why-card h3 { color: var(--accent); font-size: 1rem; }
+    .why-card:nth-child(even) h3 { color: var(--accent-warm); }
+    .why-card p { font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0; }
+
+    /* Quick-start */
+    .install-option { margin-bottom: 1.5rem; }
+    .install-option h3 { font-size: 0.95rem; margin-bottom: 0.75rem; }
+    .install-option .note {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-top: 0.5rem;
+      font-style: italic;
+    }
+
+    /* Platform badges */
+    .platforms {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 1.5rem;
+      justify-content: center;
+    }
+    .platform-badge {
+      display: inline-block;
+      padding: 0.35rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      background: var(--bg);
+    }
+    .platform-badge.pass { border-color: var(--accent); color: var(--accent); }
+
+    /* Credibility signals */
+    .signals {
+      display: flex;
+      gap: 1.5rem;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-top: 2rem;
+      padding-top: 2rem;
+      border-top: 1px solid var(--border);
+    }
+    .signal {
+      text-align: center;
+      min-width: 140px;
+    }
+    .signal .number {
+      font-size: 1.5rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+    .signal .number.teal { color: var(--accent); }
+    .signal .number.warm { color: var(--accent-warm); }
+    .signal .label {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 0.15rem;
+    }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2.5rem 0;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+    .footer-grid {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 2rem;
+      flex-wrap: wrap;
+    }
+    .footer-links { display: flex; gap: 1.5rem; flex-wrap: wrap; }
+    .footer-meta p { margin-bottom: 0.25rem; }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      h1 { font-size: 2rem; }
+      .hero { padding: 3rem 0 2.5rem; }
+      .pillars { grid-template-columns: 1fr; }
+      .before-after { grid-template-columns: 1fr; }
+      .why-grid { grid-template-columns: 1fr; }
+      nav .links { display: none; }
+      .footer-grid { flex-direction: column; }
+      pre { font-size: 0.75rem; }
+    }
+  </style>
+</head>
+<body>
+
+<a class="skip-link" href="#main-content">Skip to content</a>
+
+<nav>
+  <div class="container">
+    <a href="/" class="logo"><img src="imgs/logo-128.png" alt="Skill Provenance logo">Skill Provenance</a>
+    <div class="links">
+      <a href="#why">Why</a>
+      <a href="#start">Quick Start</a>
+      <a href="https://github.com/snapsynapse/skill-provenance" class="gh-star" target="_blank" rel="noopener" aria-label="Star snapsynapse/skill-provenance on GitHub">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>
+        Star on GitHub
+      </a>
+    </div>
+  </div>
+</nav>
+
+<main id="main-content">
+<section class="hero">
+  <div class="container">
+    <h1>Skill Provenance</h1>
+    <p class="subtitle">Portable provenance, integrity, and drift control for Agent Skills.</p>
+    <p class="byline">
+      By <a href="https://paice.work/" target="_blank" rel="noopener author">Sam Rogers, PAICE.work PBC</a>
+      <span class="sep">&middot;</span>
+      Published <time datetime="2026-01-31">January 31, 2026</time>
+      <span class="sep">&middot;</span>
+      Updated <time datetime="2026-08-28">August 28, 2026</time>
+      <span class="sep">&middot;</span>
+      <span class="version">v6.3.0</span>
+      <span class="sep">&middot;</span>
+      <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="license noopener">CC&nbsp;BY&nbsp;4.0</a>
+    </p>
+    <p class="hook">Agent Skills move between local folders, registries, platform uploads, and multi-agent sessions. Source refs, registry versions, and platform APIs each help, but they do not track the actual multi-file bundle an agent is editing. This skill keeps provenance inside the bundle where it belongs.</p>
+    <p class="note">A dated public registry-diff observation reported that 169 of 1,193 Agent Skill instruction changes, or 14.2 percent, had no version movement. That is evidence for making the digest load-bearing while semver remains the release label. <a href="https://github.com/snapsynapse/skill-provenance/blob/main/docs/state-of-skill-versioning-2026.md" target="_blank" rel="noopener">Read the evidence boundary.</a></p>
+
+    <img src="imgs/og.png" alt="Skill Provenance: before and after — from scattered versioned filenames to a single SKILL.md with manifest and changelog" class="hero-img">
+
+    <div class="before-after">
+      <div class="ba-panel before">
+        <h3>Before</h3>
+<pre>SKILL_v4.md
+SKILL_v5.md
+evals_old.json
+evals.json
+
+"which one is current?"</pre>
+      </div>
+      <div class="ba-panel after">
+        <h3>After</h3>
+<pre>SKILL.md
+MANIFEST.yaml
+CHANGELOG.md
+
+"bundle is at 4.8.0, evals are stale"</pre>
+      </div>
+    </div>
+
+    <div class="pillars">
+      <div class="pillar">
+        <h3>Version Identity</h3>
+        <p>Semver bundle versions and per-file revision counters live inside the files and manifest, not in filenames.</p>
+      </div>
+      <div class="pillar">
+        <h3>Staleness Detection</h3>
+        <p>When SKILL.md changes but evals.json doesn't, the changelog says so. Drift becomes visible, not silent.</p>
+      </div>
+      <div class="pillar">
+        <h3>Hash Verification</h3>
+        <p>SHA-256 hashes in the manifest let any session verify that files match their recorded state.</p>
+      </div>
+    </div>
+
+    <div class="cta-row">
+      <a href="https://github.com/snapsynapse/skill-provenance/blob/main/skill-provenance/SKILL.md" class="btn btn-primary" target="_blank" rel="noopener">Read the Skill</a>
+      <a href="#start" class="btn btn-secondary">Quick Start</a>
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="why">
+  <div class="container">
+    <h2>Why this still exists</h2>
+    <p>Skills are the unit of reuse in the agent ecosystem. Most tools track source, registry, install, or deployment state. Skill Provenance tracks the actual multi-file bundle an agent is editing, which matters when SKILL.md, evals, scripts, packages, and deployed copies can drift independently.</p>
+
+    <div class="why-grid">
+      <div class="why-card">
+        <h3>Cross-session</h3>
+        <p>Chat sessions are stateless. Without a manifest, the next session has no idea what version it received or whether files are complete.</p>
+      </div>
+      <div class="why-card">
+        <h3>Cross-surface</h3>
+        <p>A skill authored in Claude Code, exported as a .skill ZIP, and installed via Settings UI needs version identity that survives the round trip.</p>
+      </div>
+      <div class="why-card">
+        <h3>Cross-platform</h3>
+        <p>The same skill running on Claude, Codex, Gemini CLI, and Copilot. Each platform has different frontmatter rules. The manifest stays consistent.</p>
+      </div>
+      <div class="why-card">
+        <h3>Trust and audit</h3>
+        <p>Downloaded bundles, shared org installs, registry packages. Hashes and changelogs give agents and humans an audit trail before executing unfamiliar skills.</p>
+      </div>
+    </div>
+
+    <table style="margin-top: 2.5rem;">
+      <thead>
+        <tr>
+          <th>Approach</th>
+          <th>Versions</th>
+          <th>Staleness</th>
+          <th>Cross-session</th>
+          <th>Cross-platform</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>GitHub gh skill</td>
+          <td>Source/ref/tree</td>
+          <td class="no">No</td>
+          <td class="no">Repo-bound</td>
+          <td>Partial</td>
+        </tr>
+        <tr>
+          <td>ClawHub / registries</td>
+          <td>Registry versions</td>
+          <td class="no">No</td>
+          <td>Consumer package</td>
+          <td>Partial</td>
+        </tr>
+        <tr>
+          <td>Skills API</td>
+          <td>Platform versions</td>
+          <td class="no">No</td>
+          <td class="no">Single surface</td>
+          <td class="no">No</td>
+        </tr>
+        <tr>
+          <td>Skillman</td>
+          <td>Pinned installs</td>
+          <td class="no">No</td>
+          <td class="no">Consumer-side</td>
+          <td class="no">No</td>
+        </tr>
+        <tr>
+          <td style="color: var(--accent); font-weight: 700;">Skill Provenance</td>
+          <td>Semver</td>
+          <td>Yes</td>
+          <td>Yes</td>
+          <td>Yes</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="start">
+  <div class="container">
+    <h2>Quick start</h2>
+    <p>Verify the public bundle when appropriate, install the skill, then tell the agent to use it.</p>
+
+    <div class="install-option">
+      <h3>Verify before install</h3>
+<pre>https://skillprovenance.dev/.well-known/assistant-guide.txt</pre>
+      <p class="note">This GuideCheck assistant guide fetches the public repo and runs the manifest integrity check. It does not install the skill.</p>
+    </div>
+
+    <div class="install-option">
+      <h3>No-plugin local verification</h3>
+      <p class="note">Literal</p>
+<pre>curl -fsSLo /tmp/skill-provenance-verify.sh https://skillprovenance.dev/verify.sh
+sed -n '1,220p' /tmp/skill-provenance-verify.sh</pre>
+      <p class="note">Replace TARGET_SKILL_DIRECTORY with the local bundle directory. Customize</p>
+<pre>bash /tmp/skill-provenance-verify.sh TARGET_SKILL_DIRECTORY</pre>
+      <p class="note">The wrapper delegates to the canonical validator only after its pinned SHA-256 matches. For an unversioned bundle, use the portable bootstrap prompt in the repository's standalone-verification reference.</p>
+    </div>
+
+    <div class="install-option">
+      <h3>Claude Code (Plugin)</h3>
+<pre>/plugin marketplace add snapsynapse/skill-provenance
+/plugin install skill-provenance@snapsynapse-skill-provenance</pre>
+      <p class="note">Commands: <code>/skill-provenance:open</code>, <code>/skill-provenance:validate</code>, <code>/skill-provenance:close</code>, <code>/skill-provenance:handoff</code>, <code>/skill-provenance:bootstrap</code></p>
+    </div>
+
+    <div class="install-option">
+      <h3>Claude (Settings UI)</h3>
+<pre>1. Download skill-provenance.skill from the stable v6.3.0 bundle release
+2. claude.ai &rarr; Profile &rarr; Settings &rarr; Skills &rarr; Add Skill
+3. Select the file</pre>
+      <p class="note">If your loader only accepts .zip, rename the file. The archive contents stay the same. Bundle releases use vX.Y.Z tags; GuideCheck releases use guidecheck-X.Y.Z tags. Use the exact bundle release because a provider's generic latest label can select the other tag family.</p>
+    </div>
+
+    <div class="install-option">
+      <h3>ClawHub</h3>
+<pre>openclaw skills install @snapsynapse/skill-provenance</pre>
+    </div>
+
+    <div class="install-option">
+      <h3>GitHub CLI for Codex</h3>
+<pre>gh skill preview snapsynapse/skill-provenance skill-provenance@v6.3.0
+gh skill install snapsynapse/skill-provenance skill-provenance@v6.3.0 --agent codex --scope user</pre>
+      <p class="note">These commands preview and install the current stable immutable v6.3.0 bundle release, not the separately versioned GuideCheck release.</p>
+    </div>
+
+    <div class="install-option">
+      <h3>Gemini CLI</h3>
+<pre>git clone https://github.com/snapsynapse/skill-provenance.git
+./skill-provenance/package.sh strict
+cp -r build/strict/skill-provenance ~/.gemini/skills/</pre>
+    </div>
+
+    <div class="install-option">
+      <h3>Manual (any platform)</h3>
+<pre>Copy the skill-provenance/ directory into your project.
+Or use .agents/skills/ for the neutral cross-client path.</pre>
+    </div>
+
+    <p style="margin-top: 1rem;">Then tell the agent:</p>
+<pre style="text-align: center; font-size: 0.9rem;">"Use the skill-provenance skill to bootstrap this bundle."</pre>
+
+    <div class="platforms">
+      <span class="platform-badge pass">Claude</span>
+      <span class="platform-badge pass">Claude Code</span>
+      <span class="platform-badge pass">Claude API</span>
+      <span class="platform-badge pass">Codex</span>
+      <span class="platform-badge pass">Gemini CLI</span>
+      <span class="platform-badge">Copilot</span>
+      <span class="platform-badge">Cursor</span>
+      <span class="platform-badge pass">Perplexity</span>
+    </div>
+    <p style="text-align: center; margin-top: 0.75rem; font-size: 0.85rem; color: var(--text-muted);">
+      Compatible with the <a href="https://agentskills.io" target="_blank" rel="noopener">agentskills.io</a> open standard (30+ adopters).
+    </p>
+
+    <div class="cta-row" style="margin-top: 2rem;">
+      <a href="https://github.com/snapsynapse/skill-provenance" class="btn btn-primary" target="_blank" rel="noopener">View on GitHub</a>
+      <a href="https://github.com/snapsynapse/skill-provenance/releases/tag/v6.3.0" class="btn btn-warm" target="_blank" rel="noopener">Stable Bundle Release</a>
+    </div>
+
+    <div class="signals">
+      <div class="signal">
+        <div class="number teal">8.41/10</div>
+        <div class="label"><a href="https://proskills.md" target="_blank" rel="noopener">ProSkills.md</a> score</div>
+      </div>
+      <div class="signal">
+        <div class="number teal">&#10003;</div>
+        <div class="label"><a href="https://github.com/VoltAgent/awesome-openclaw-skills" target="_blank" rel="noopener">Awesome OpenClaw</a> Skills list</div>
+      </div>
+      <div class="signal">
+        <div class="number teal">1,000+</div>
+        <div class="label"><a href="https://clawhub.ai/snapsynapse/skills/skill-provenance" target="_blank" rel="noopener">ClawHub</a> downloads</div>
+      </div>
+      <div class="signal">
+        <div class="number warm">63</div>
+        <div class="label">evaluation scenarios</div>
+      </div>
+      <div class="signal">
+        <div class="number warm">8</div>
+        <div class="label">platforms tested</div>
+      </div>
+    </div>
+
+    <aside class="canonical-note">
+      <strong>Canonical source.</strong> This page is the authoritative home for the Skill Provenance metaskill. Cross-posts on GitHub, ClawHub, and other registries may lag. Use the <a href="https://skillprovenance.dev/.well-known/assistant-guide.txt" target="_blank" rel="noopener">GuideCheck assistant guide</a> for a bounded pre-install integrity check, read the <a href="/llms.txt">agent summary</a> and <a href="https://github.com/snapsynapse/skill-provenance/blob/main/AGENTIC_SURFACES.md" target="_blank" rel="noopener">agentic-surface disclosure</a> for machine-facing boundaries, and check the <a href="https://github.com/snapsynapse/skill-provenance/commits/main/skill-provenance/SKILL.md" target="_blank" rel="noopener">revision history</a> to verify which version you're reading.
+    </aside>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="container">
+    <div class="footer-grid">
+      <div class="footer-meta">
+        <p>Skill Provenance v6.3.0 &middot; <a href="https://github.com/snapsynapse/skill-provenance/blob/main/LICENSE" target="_blank" rel="noopener license">MIT</a></p>
+        <p>A <a href="https://paice.work/" target="_blank" rel="noopener">PAICE.work</a> project.</p>
+        <p style="margin-top: 0.5rem;">See also: <a href="https://knowledge-as-code.com/" target="_blank" rel="noopener">Knowledge as Code</a> &middot; <a href="https://gracefulboundaries.dev/" target="_blank" rel="noopener">Graceful Boundaries</a></p>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/snapsynapse/skill-provenance" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/snapsynapse/skill-provenance/blob/main/skill-provenance/SKILL.md" target="_blank" rel="noopener">Skill</a>
+        <a href="https://github.com/snapsynapse/skill-provenance/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
+        <a href="https://github.com/snapsynapse/skill-provenance/commits/main/skill-provenance/SKILL.md" target="_blank" rel="noopener">Revisions</a>
+        <a href="/llms.txt">Agent Summary</a>
+        <a href="/verify.sh">Standalone Verifier</a>
+        <a href="https://github.com/snapsynapse/skill-provenance/blob/main/AGENTIC_SURFACES.md" target="_blank" rel="noopener">Agentic Surfaces</a>
+        <a href="https://skillprovenance.dev/.well-known/assistant-guide.txt" target="_blank" rel="noopener">Assistant Guide</a>
+        <a href="https://clawhub.ai/snapsynapse/skills/skill-provenance" target="_blank" rel="noopener">ClawHub</a>
+        <a href="https://github.com/sponsors/snapsynapse" target="_blank" rel="noopener">Sponsor</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

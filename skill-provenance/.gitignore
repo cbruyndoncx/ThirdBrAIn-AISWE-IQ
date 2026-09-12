@@ -1,0 +1,31 @@
+.DS_Store
+*.swp
+*.swo
+*~
+.perplexity-research/
+archive/
+build/
+
+# Local compatibility symlink for agents that expect a monolithic skill under skills/.
+# The canonical source remains ./skill-provenance/.
+skills/skill-provenance
+
+# --- baseline additions (automated audit 2026-04-21) ---
+.env
+.env.*
+node_modules/
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+.venv/
+venv/
+/handoffs
+
+# --- portfolio baseline (2026-07-04): transient dirs ---
+handoffs/
+working/
+
+# --- search evidence privacy (2026-08-20) ---
+.playwright-mcp/
+.search-evidence-private/

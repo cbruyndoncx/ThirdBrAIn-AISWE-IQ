@@ -1,0 +1,196 @@
+bundle: skill-provenance
+bundle_version: 6.3.0
+bundle_date: 2026-09-05
+description: >
+  Metaskill for portable provenance, integrity, and drift control across
+  Agent Skills local folders, registries, platform uploads, and multi-agent
+  sessions. Manifest, changelog, deployment notes, hashes, and portable
+  internal version markers prevent version confusion during iterative
+  skill development and cross-surface deployment.
+
+compatibility:
+  designed_for:
+    surfaces:
+      - chat
+      - cli
+      - ide
+      - api
+    capabilities:
+      - metadata or minimal SKILL.md frontmatter
+      - local filesystem access
+      - optional git workflow
+      - deployment drift tracking
+      - hash-based audit trail
+      - derived install and publish package generation
+  tested_on:
+    - platform: Anthropic Claude
+      model: Claude Opus 4.6
+      surface: Chat
+      status: pass
+      date: 2026-02-10
+      notes: Full bootstrap and round-trip validated with .skill ZIP
+    - platform: Anthropic Claude
+      model: Claude Opus 4.6
+      surface: Code
+      status: pass
+      date: 2026-02-28
+      notes: Full session protocol, validate.sh, git commit workflow
+    - platform: Anthropic Claude
+      model: Claude Opus 4.6
+      surface: Cowork
+      status: pass
+      date: 2026-02-28
+      notes: Filesystem persistence, manifest verification
+    - platform: OpenAI Codex
+      model: N/A
+      surface: CLI
+      status: pass
+      date: 2026-02-27
+      notes: Minimal frontmatter mode, local editing workflow
+    - platform: Google Gemini CLI
+      model: Gemini 2.5 Pro
+      surface: CLI
+      status: pass
+      date: 2026-03-07
+      notes: Skill loading, bootstrap, and Gems workflow validated.
+    - platform: Perplexity Computer
+      model: N/A
+      surface: Computer
+      status: pass
+      date: 2026-03-07
+      notes: .zip upload path works. Trigger-oriented description improves discovery.
+  compatible_with:
+    - Claude API (/v1/skills)
+    - Claude Agent SDK
+    - GitHub Copilot / VS Code
+    - Cursor
+    - Any agentskills.io-compatible agent (30+ adopters)
+  spec_version: agentskills.io/1.0
+  frontmatter_mode: metadata
+
+dependencies: []
+
+# Attestation records. Each entry binds a validation event to the exact
+# bundle_version it validated, unlike compatibility.tested_on which records
+# unbound design-time compatibility claims. Informational only: validate.sh
+# reports these but never gates on them. Integrity gates, attestation informs.
+validated_against:
+  - bundle_version: 5.1.0
+    harness: Anthropic Claude Code
+    model: claude-fable-5
+    date: 2026-07-16
+    result: pass
+    method: validate.sh verify + .github/scripts/test-validate.sh + release-surface-check.sh
+    notes: >
+      Full hash verification, validator regression suite, and release surface
+      checks run clean on this harness/model pair at release time.
+  - bundle_version: 6.0.0
+    harness: OpenAI Codex desktop
+    model: GPT-5
+    date: 2026-07-21
+    result: pass
+    method: validate.sh verify + adversarial regression suite + derived package validation + release-surface-check.sh
+    notes: >
+      Path traversal, ambiguous grammar, duplicate entry, symlink component,
+      null-opt-out reporting, 1000-entry resource, strict package, and ClawHub
+      package checks passed under Bash 5.3 and macOS system Bash 3.2.
+      Attestation remains informational.
+  - bundle_version: 6.1.0
+    harness: OpenAI Codex desktop
+    model: GPT-5
+    date: 2026-08-20
+    result: pass
+    method: validate.sh verify + regression suite + skill and plugin validation + search contract + gh skill publish dry-run + release-surface-check.sh
+    notes: >
+      Canonical hashes, focused skill metadata, OpenAI metadata, Codex plugin
+      package, repository search contract, derived archive, regression suite,
+      and GitHub publication dry-run passed. Attestation remains informational.
+  - bundle_version: 6.2.0
+    harness: OpenAI Codex desktop
+    model: GPT-5
+    date: 2026-08-28
+    result: pass
+    method: validate.sh verify + regression suite + standalone pin test + derived package validation + search contract + gh skill publish dry-run + release-surface-check.sh
+    notes: >
+      Canonical hashes, local and downloaded standalone verifier pinning,
+      tamper rejection, exit-code preservation, temporary cleanup, derived
+      strict and ClawHub packages, repository search contract, archive
+      agreement, and release surfaces passed. Attestation remains informational.
+  - bundle_version: 6.3.0
+    harness: OpenAI Codex desktop
+    model: GPT-5
+    date: 2026-09-05
+    result: pass
+    method: validate.sh verify + regression suite + skill validation + CFF schema validation + search contract + release-surface-check.sh
+    notes: >
+      Canonical hashes, verified-adoption classification, release-artifact
+      subjects, citation truthfulness, Scorecard evidence discipline, exact
+      archive contents, standalone verification, search, and release surfaces
+      passed. Attestation remains informational.
+
+files:
+  - path: SKILL.md
+    role: skill
+    version: 25
+    hash: sha256:75cf176b93f3bc3fbb3f7b7e8d440bd2f2f604fdd6874a1c3a39ef8de7970eee
+    note: Canonical skill definition with action-led triggers, concise progressive disclosure, constrained manifest grammar, standalone verification and bootstrap routing, exact package inventory, evidence-based staleness, package validation gates, origin metadata, and provenance metadata in frontmatter
+
+  - path: README.md
+    role: reference
+    version: 28
+    hash: sha256:322865d66ff4f137939c42bf0cbdb44519ae4756ecf960cc27ec4a895b3b35b0
+    note: Human-facing instructions for GitHub CLI installation, exact bundle-versus-GuideCheck release tags, no-plugin verification and bootstrap, dated adoption evidence, OpenAI discovery metadata, constrained manifest paths, exact package inventory, fail-closed validation, packaging, trust, and troubleshooting
+
+  - path: agents/openai.yaml
+    role: agents
+    version: 1
+    hash: sha256:568181a56d4819901554fbd1ef25464097144ebd6aa79fd142aea85f8e0b51f6
+    note: OpenAI interface metadata with display name, short description, brand color, explicit default prompt, and implicit invocation policy
+
+  - path: references/packaging-and-changelog.md
+    role: reference
+    version: 1
+    hash: sha256:a6d178663d20e3862f11eccdf3bd0be9f4e42d9768f8a73164b4a7af68a79bc2
+    note: Load-on-demand package structure, exact inventory, and changelog format guidance
+
+  - path: references/platforms-and-trust.md
+    role: reference
+    version: 1
+    hash: sha256:dbd6a0e4b7035d0c9deb37e0a76b3385347b82a6d6b4d9bd4c2bee03956eac51
+    note: Load-on-demand canonical and derived states, platform notes, ecosystem boundaries, and trust guidance
+
+  - path: references/standalone-verification.md
+    role: reference
+    version: 1
+    hash: sha256:30ac69654d5712b9930ceb1172d6bd2216f3a5a4930ab2c3151a14fb6a1b0a6c
+    note: No-plugin verification procedure, pinned-validator trust boundary, exit semantics, and portable bootstrap prompt
+
+  - path: evals.json
+    role: evals
+    version: 17
+    hash: sha256:67fb6ab87028f968403a8200d22d3bb03807cacbbb0ea7de3ccfabc2300c23a2
+    note: 42 core evals including verified-adoption evidence classification, standalone verifier pinning and bootstrap decision gates, files-section scope, malformed attestation, exact package inventory, unsafe paths, duplicates, symlinks, fail-closed hashes, and prior provenance, portability, deployment, validation, and trust workflows
+
+  - path: evals-distribution.json
+    role: evals
+    version: 11
+    hash: sha256:0988a855783a1e621259c285552abb170e8b5151dbffc3bbbe396ccaaa1ea478
+    note: 21 supplemental evals covering release-artifact subjects, citation truthfulness, Scorecard evidence discipline, release tag-family separation, package-boundary safety, GitHub Action shell safety, derived packaging, origin metadata, release integrity, surface disclosure, and source-backed ecosystem workflows
+
+  - path: CHANGELOG.md
+    role: reference
+    version: 32
+    hash: sha256:fb5822abd1802bc6b33c61d2d039b4df7e22f69d7e8cd9abb2b8b92b3d6210f0
+    note: Active in-bundle changelog with the 5 most recent entries; older history lives in the repo root
+
+  - path: validate.sh
+    role: script
+    version: 9
+    hash: sha256:cac9624665345d317fd37edf183defd5553f8a2afaed736c07f58f597ae55c05
+    note: Zero-dependency constrained manifest parsing, path and symlink enforcement, fail-closed hash verification and repair, explicit null opt-outs, and non-gating malformed, stale, or matching validated_against reporting
+
+  - path: package.sh
+    role: script
+    version: 5
+    hash: sha256:6bcdd97f4c0b02782c4bc7e429c3d83007ac2e8803c7f15110ac775f867b6439
+    note: Zero-dependency derived-package builder that delegates both derived hash updates and boundary verification to canonical validate.sh

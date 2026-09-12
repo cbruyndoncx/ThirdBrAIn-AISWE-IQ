@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/snapsynapse/skill-provenance.git
+	branch = main
+	commit = 76c1586f4cf89a4e2e4fb1aec3a0df1a0f82471a
+	parent = 060714e97ced1c6b85e4f4e60598a97706f214ea
+	method = merge
+	cmdver = 0.4.9
