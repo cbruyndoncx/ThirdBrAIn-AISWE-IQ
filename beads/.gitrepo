@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/gastownhall/beads.git
+	branch = main
+	commit = e21eaf00ae63957fd3c46421610dc525dc42dc81
+	parent = 684dc11619bf30cabffee0b4aeae780e260db78a
+	method = merge
+	cmdver = 0.4.9
