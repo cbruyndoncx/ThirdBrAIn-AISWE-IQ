@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/EveryInc/compound-engineering-plugin.git
+	branch = main
+	commit = d484685805d52b2375f94deba890638a92a846f7
+	parent = 2231f29389583c827ec4f70e3f72f189d0ae0f31
+	method = merge
+	cmdver = 0.4.9
