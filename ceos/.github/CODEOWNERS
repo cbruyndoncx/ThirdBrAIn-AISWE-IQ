@@ -1,0 +1,11 @@
+# CODEOWNERS — CEOS
+#
+# This file auto-assigns reviewers to Pull Requests.
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Note: CODEOWNERS only works for PRs from branches in the same repository.
+# For PRs from forks (the typical open-source workflow), the repository owner
+# reviews manually. This is expected behavior.
+
+# Brad reviews all changes
+* @bradfeld

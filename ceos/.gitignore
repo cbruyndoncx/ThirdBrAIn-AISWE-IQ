@@ -1,0 +1,50 @@
+# Company EOS data — NEVER commit this.
+#
+# Your accountability chart, scorecard, rocks, issues, and financials are
+# confidential. This repository is public, and so is every fork of it, so a
+# committed data/ directory is readable by anyone — and stays readable after you
+# delete it, because it remains in the commit history and in the shared fork
+# object store. If you have already committed data/, removing the file is not
+# enough; rewrite the history and rotate anything sensitive it revealed.
+#
+# The rule below is what enforces the exclusion. Before 2026-08-04 this section
+# was a comment ASSERTING that data/ was excluded, with no matching rule anywhere
+# in the file — wording inherited from the private upstream repo, where data/ is
+# deliberately tracked. An assertion is not a rule.
+data/
+
+# Session state (per-worktree, not shared)
+.claude-session/
+.claude-ticket
+
+# Personal user config
+.ceos-user.yaml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Secrets. Nothing has leaked — no .env exists in any commit of this repo — but
+# this is a public repo with a dashboard build that reads GITHUB_WRITE_TOKEN and
+# DASHBOARD_PASSWORD from the environment, so a local .env is the obvious next
+# step for anyone running it, and there was no rule stopping them committing it.
+.env
+.env.*
+!.env.example
+
+# Python artifacts (dashboard/build.py and its tests)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Node artifacts (in case anyone adds tooling)
+node_modules/

@@ -1,0 +1,85 @@
+name: Bug Report
+description: Report something that isn't working correctly in CEOS.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What Happened
+      description: Describe the bug — what went wrong?
+      placeholder: |
+        When I ran "score rocks", Claude...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected Behavior
+      description: What should have happened instead?
+      placeholder: |
+        I expected Claude to...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce this bug?
+      placeholder: |
+        1. Open Claude Code in my CEOS repo
+        2. Say "score rocks"
+        3. Select rock-001
+        4. See error...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of CEOS is affected?
+      options:
+        - setup.sh (installation/setup)
+        - ceos-accountability (Accountability Chart)
+        - ceos-annual (Annual Planning)
+        - ceos-checkup (Organizational Checkup)
+        - ceos-clarity (Clarity Break)
+        - ceos-dashboard (Business Dashboard)
+        - ceos-delegate (Delegate and Elevate)
+        - ceos-ids (Issue Resolution)
+        - ceos-kickoff (EOS Kickoff)
+        - ceos-l10 (Level 10 Meetings)
+        - ceos-people (People Analyzer)
+        - ceos-process (Core Processes)
+        - ceos-quarterly (Quarterly Conversations)
+        - ceos-quarterly-planning (Quarterly Planning)
+        - ceos-rocks (Quarterly Rocks)
+        - ceos-scorecard (Weekly Measurables)
+        - ceos-todos (To-Do Tracking)
+        - ceos-vto (Vision/Traction Organizer)
+        - Data format (markdown/YAML files)
+        - Templates
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Your OS and Claude Code version.
+      placeholder: "e.g., macOS 15.2, Claude Code 1.0.12"
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Error messages, screenshots, or anything else that might help.
+    validations:
+      required: false

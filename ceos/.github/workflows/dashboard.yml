@@ -1,0 +1,59 @@
+name: Build & Deploy EOS Dashboard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'data/**'
+      - 'dashboard/**'
+      - 'tests/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install cryptography pytest
+
+      - name: Run tests
+        run: python -m pytest tests/test_build.py -v
+
+      - name: Build dashboard
+        env:
+          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
+          GITHUB_WRITE_TOKEN: ${{ secrets.GH_WRITE_TOKEN }}
+        run: python dashboard/build.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

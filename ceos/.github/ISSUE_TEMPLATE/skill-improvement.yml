@@ -1,0 +1,71 @@
+name: Skill Improvement
+description: Suggest an improvement to an existing CEOS skill.
+title: "[Skill] "
+labels: ["skill-improvement"]
+body:
+  - type: dropdown
+    id: which-skill
+    attributes:
+      label: Which Skill?
+      description: Select the skill you'd like to improve.
+      options:
+        - ceos-accountability (Accountability Chart)
+        - ceos-annual (Annual Planning)
+        - ceos-checkup (Organizational Checkup)
+        - ceos-clarity (Clarity Break)
+        - ceos-dashboard (Business Dashboard)
+        - ceos-delegate (Delegate and Elevate)
+        - ceos-ids (Issue Resolution)
+        - ceos-kickoff (EOS Kickoff)
+        - ceos-l10 (Level 10 Meetings)
+        - ceos-people (People Analyzer)
+        - ceos-process (Core Processes)
+        - ceos-quarterly (Quarterly Conversations)
+        - ceos-quarterly-planning (Quarterly Planning)
+        - ceos-rocks (Quarterly Rocks)
+        - ceos-scorecard (Weekly Measurables)
+        - ceos-todos (To-Do Tracking)
+        - ceos-vto (Vision/Traction Organizer)
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-behavior
+    attributes:
+      label: Current Behavior
+      description: How does the skill currently handle this?
+      placeholder: |
+        When I say "track rocks", the skill currently...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-improvement
+    attributes:
+      label: Proposed Improvement
+      description: How should it work instead?
+      placeholder: |
+        It would be better if the skill...
+    validations:
+      required: true
+
+  - type: textarea
+    id: why-better
+    attributes:
+      label: Why This Is Better
+      description: What problem does this solve or what does it improve?
+      placeholder: |
+        This would help because...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: breaking-change
+    attributes:
+      label: Breaking Change?
+      description: Would this change how existing data files are structured or how the skill is invoked?
+      options:
+        - "No — backward compatible"
+        - "Yes — would change existing behavior or data format"
+    validations:
+      required: true

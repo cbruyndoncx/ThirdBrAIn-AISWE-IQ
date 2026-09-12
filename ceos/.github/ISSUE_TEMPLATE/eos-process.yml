@@ -1,0 +1,77 @@
+name: EOS Process Request
+description: Request a new EOS workflow or suggest how an existing one should work. No coding knowledge required.
+title: "[EOS Process] "
+labels: ["eos-process"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing how this EOS process should work! Your experience running EOS is exactly what makes CEOS better.
+
+        You don't need to know anything about code to file this — just describe the process.
+
+  - type: input
+    id: process-name
+    attributes:
+      label: EOS Process Name
+      description: What EOS process or tool is this about?
+      placeholder: "e.g., Quarterly Conversation, People Analyzer, GWC"
+    validations:
+      required: true
+
+  - type: textarea
+    id: how-it-works
+    attributes:
+      label: How It Works Today
+      description: Describe how you currently run this process (with or without CEOS).
+      placeholder: |
+        We currently do this manually in our L10 meetings...
+    validations:
+      required: true
+
+  - type: textarea
+    id: how-it-should-work
+    attributes:
+      label: How It Should Work with CEOS
+      description: Describe the ideal experience — what would Claude do for you?
+      placeholder: |
+        I'd like to say "run the People Analyzer" and have Claude...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: skill-affected
+    attributes:
+      label: Which Skill(s) Affected?
+      description: Select the CEOS skill this relates to, or "New Skill" if it doesn't exist yet.
+      multiple: true
+      options:
+        - ceos-accountability (Accountability Chart)
+        - ceos-annual (Annual Planning)
+        - ceos-checkup (Organizational Checkup)
+        - ceos-clarity (Clarity Break)
+        - ceos-dashboard (Business Dashboard)
+        - ceos-delegate (Delegate and Elevate)
+        - ceos-ids (Issue Resolution)
+        - ceos-kickoff (EOS Kickoff)
+        - ceos-l10 (Level 10 Meetings)
+        - ceos-people (People Analyzer)
+        - ceos-process (Core Processes)
+        - ceos-quarterly (Quarterly Conversations)
+        - ceos-quarterly-planning (Quarterly Planning)
+        - ceos-rocks (Quarterly Rocks)
+        - ceos-scorecard (Weekly Measurables)
+        - ceos-todos (To-Do Tracking)
+        - ceos-vto (Vision/Traction Organizer)
+        - New Skill Needed
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Anything else that would help us understand this process?
+      placeholder: Links to EOS resources, screenshots of how you track this today, etc.
+    validations:
+      required: false

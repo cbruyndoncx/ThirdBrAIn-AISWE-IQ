@@ -1,0 +1,7 @@
+{
+  "team": [
+    {"name": "Alice", "color": "blue"},
+    {"name": "Bob", "color": "purple"},
+    {"name": "Carol", "color": "green"}
+  ]
+}

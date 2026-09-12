@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/bradfeld/ceos.git
+	branch = main
+	commit = 79fb063cd32aceb1214f624e285428b30b1bb185
+	parent = c0197eb8dd9fc2c449707176948879c65904a1b8
+	method = merge
+	cmdver = 0.4.9

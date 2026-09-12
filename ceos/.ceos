@@ -1,0 +1,4 @@
+# CEOS repository marker
+# Skills use this file to locate the CEOS repo root.
+# Do not delete this file.
+version: 1
