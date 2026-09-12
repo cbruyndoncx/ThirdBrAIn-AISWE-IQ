@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/Pythagora-io/gpt-pilot.git
+	branch = main
+	commit = 9b763fdaf0020c7d8abacc7b58b2b09e57494623
+	parent = 66edc30db5775e3d8a5a5bb62380725f67f93372
+	method = merge
+	cmdver = 0.4.9
