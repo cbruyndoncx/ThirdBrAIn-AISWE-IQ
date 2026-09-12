@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/JasperHG90/persona.git
+	branch = main
+	commit = 498b3b977721d8d41378ef72c13182a6c9c02c98
+	parent = b513972c8b233cc7ea780276a44c6e8eeb0c4f5d
+	method = merge
+	cmdver = 0.4.9
