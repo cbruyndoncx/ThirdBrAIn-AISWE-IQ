@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/aaif-goose/goose.git
+	branch = main
+	commit = 50666ae0b9a51e260b52b7efbab2e4e020346e94
+	parent = d6a1087504f407e5a33f89db6620a56a5cdb6438
+	method = merge
+	cmdver = 0.4.9
