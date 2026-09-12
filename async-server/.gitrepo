@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/bkdevs/async-server.git
+	branch = main
+	commit = d743728b88eb802181595b6a7a13d61b829f56b2
+	parent = f176f849f858eb6bec54f5614bd52d3dfe055d63
+	method = merge
+	cmdver = 0.4.9
